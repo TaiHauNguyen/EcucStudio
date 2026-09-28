@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.bak
+*.tmp
+build/
+dist/
+*.spec
+# never commit DaVinci/SIP/project data
+*.arxml
+*.dpa
+*.dcf
