@@ -28,6 +28,7 @@ APP_NAME = "EcucStudio"
 class App(tk.Tk):
     def __init__(self, dpa=None):
         super().__init__()
+        self.report_callback_exception = self._on_tk_error
         self.cfg = Settings()
         self.session = Session(self.cfg)
         self.busy = False
@@ -162,6 +163,17 @@ class App(tk.Tk):
         self.editor.subheader.config(text="File › Open Project…  (recent projects in the File menu)")
 
     # ============================================================ utilities
+    def _on_tk_error(self, exc, val, tb):
+        """Errors in Tk callbacks: log them (pythonw has no console) and tell the user."""
+        from ..__main__ import log_path, write_log
+        text = "".join(traceback.format_exception(exc, val, tb))
+        write_log("GUI error:\n" + text)
+        try:
+            self.console.write(text, "ERROR")
+        except Exception:
+            pass
+        messagebox.showerror(APP_NAME, f"{val}\n\nDetails: {log_path()}")
+
     def status(self, msg, frac=None):
         self.status_var.set(msg)
         if frac is not None:

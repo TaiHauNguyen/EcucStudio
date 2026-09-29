@@ -10,7 +10,14 @@ run.bat D:\MyEcu\Project\MyEcu.dpa
 rem hoặc
 python -m ecucstudio gui D:\MyEcu\Project\MyEcu.dpa
 ```
-Yêu cầu: Python 3.10+ với `tkinter` và `lxml` (đã có trên máy này).
+Yêu cầu: Python 3.10+ (bản cài từ python.org, có chọn *tcl/tk and IDLE* và *Add python.exe to PATH*)
+và gói `lxml`:
+```bat
+py -m pip install -r requirements.txt
+```
+`run.bat` tự kiểm tra Python/tkinter/lxml, tự cài `lxml` nếu thiếu và in lỗi ra cửa sổ nếu không chạy được.
+Kiểm tra thủ công: `py -m ecucstudio --check`. Lỗi khi khởi động/trong lúc chạy được ghi vào
+`%LOCALAPPDATA%\EcucStudio\ecucstudio.log`. Muốn xem lỗi trực tiếp thì chạy `py -m ecucstudio gui` trong cmd.
 
 ## Giao diện
 

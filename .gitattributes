@@ -1,0 +1,5 @@
+# Windows batch files must keep CRLF line endings, otherwise cmd.exe may misparse them
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.py  text eol=lf
+*.md  text eol=lf

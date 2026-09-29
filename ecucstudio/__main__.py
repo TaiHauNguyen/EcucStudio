@@ -15,6 +15,69 @@ import sys
 import time
 
 
+MIN_PY = (3, 8)
+
+
+def log_path():
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    d = os.path.join(base, "EcucStudio")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "ecucstudio.log")
+
+
+def write_log(text):
+    try:
+        with open(log_path(), "a", encoding="utf-8") as fh:
+            fh.write(time.strftime("%Y-%m-%d %H:%M:%S ") + text.rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def check_environment() -> int:
+    """0 = ok, 1 = missing pip-installable package, 2 = fatal (Python too old / no tkinter)."""
+    rc = 0
+    print(f"Python {sys.version.split()[0]} at {sys.executable}")
+    if sys.version_info < MIN_PY:
+        print(f"[ERROR] Python {MIN_PY[0]}.{MIN_PY[1]} or newer is required.")
+        return 2
+    try:
+        import tkinter
+        print(f"[OK]    tkinter {tkinter.TkVersion}")
+    except ImportError as e:
+        print(f"[ERROR] tkinter is not available ({e}). Re-install Python and enable 'tcl/tk and IDLE'.")
+        rc = 2
+    try:
+        import lxml.etree
+        print(f"[OK]    lxml {'.'.join(map(str, lxml.etree.LXML_VERSION[:3]))}")
+    except ImportError:
+        print("[MISSING] lxml  ->  pip install -r requirements.txt")
+        rc = max(rc, 1)
+    return rc
+
+
+def _run_gui(dpa):
+    import traceback
+    write_log(f"start GUI (python {sys.version.split()[0]}, {sys.executable}) project={dpa or '-'}")
+    try:
+        from .gui.app import main as gui_main
+        gui_main(dpa)
+    except Exception:
+        tb = traceback.format_exc()
+        write_log("GUI crashed:\n" + tb)
+        sys.stderr.write(tb)
+        try:  # pythonw has no console: show the error in a dialog
+            import tkinter
+            from tkinter import messagebox
+            r = tkinter.Tk()
+            r.withdraw()
+            messagebox.showerror("EcucStudio", f"EcucStudio could not start:\n\n{tb[-1500:]}\n\nLog: {log_path()}")
+            r.destroy()
+        except Exception:
+            pass
+        return 1
+    return 0
+
+
 def _session(dpa):
     from .session import Session
     t = time.time()
@@ -133,12 +196,12 @@ def cmd_generate(a):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--check":
+        return check_environment()
     if not argv or argv[0].lower().endswith(".dpa") or argv[0] == "gui":
         if argv and argv[0] == "gui":
             argv = argv[1:]
-        from .gui.app import main as gui_main
-        gui_main(argv[0] if argv else None)
-        return 0
+        return _run_gui(argv[0] if argv else None)
     ap = argparse.ArgumentParser(prog="ecucstudio")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("info")
