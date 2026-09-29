@@ -578,6 +578,9 @@ class App(tk.Tk):
 
     def after_edit(self, el, label, structure=False):
         self.update_title()
+        fb = getattr(self.session, "fallback", None)
+        if fb is not None:
+            fb.invalidate()
         cur = self.current_editor()
         for ed in self._editors():
             if structure:
@@ -663,7 +666,7 @@ class App(tk.Tk):
         if self.busy:
             return
         s = self.session
-        pdef = s.defs.find(definition_ref(parent_el))
+        pdef = s.container_def(parent_el)[0]
         if pdef is None:
             return
         cdefs = pdef.containers()

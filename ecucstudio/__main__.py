@@ -2,6 +2,7 @@
 
     python -m ecucstudio [gui] [project.dpa]
     python -m ecucstudio info     project.dpa
+    python -m ecucstudio diag     project.dpa          (unresolved definitions, split BSWMD files)
     python -m ecucstudio validate project.dpa [--modules Com,Det] [--json out.json] [--davinci]
     python -m ecucstudio set      project.dpa "/ActiveEcuC/Det/DetGeneral[0:DetEnableDet]" true [--save]
     python -m ecucstudio generate project.dpa [-m /MICROSAR/Det,/MICROSAR/Com] [--gen-type REAL]
@@ -99,6 +100,44 @@ def cmd_info(a):
         from . import arxml
         print(f"  {arxml.short_name(m):<20} {definition_ref(m)}")
     return 0
+
+
+def cmd_diag(a):
+    """Explain unresolved definitions (e.g. 'The definition of this element was not found')."""
+    from collections import defaultdict
+    from . import davinci
+    from .project import definition_ref
+    s = _session(a.project)
+    p, d = s.project, s.defs
+    print(f"SIP folder     : {p.sip_dir}  (exists: {os.path.isdir(p.sip_dir)})")
+    print(f"Extra BSWMD    : {', '.join(p.add_bswmds) or '-'}")
+    print(f"BSWMD files    : {len(d.files)}, module definitions: {len(d.module_index)}")
+    ver = davinci.sip_tool_version(p.sip_dir)
+    print(f"SIP DaVinci    : {ver[0] + ' ' + ver[1] if ver else 'not in SIP'}")
+    split = {k: v["files"] for k, v in d.module_index.items() if len(v.get("files", [])) > 1}
+    print(f"Split modules  : {len(split)} (definition spread over several files, merged)")
+    for k, files in sorted(split.items())[:30]:
+        print(f"  {k}: " + ", ".join(os.path.basename(f) for f in files))
+    missing = defaultdict(list)
+    for path, el in s.model.path_index.items():
+        dref = definition_ref(el)
+        if d.find(dref) is None:
+            missing[dref].append(path)
+    for m in s.model.modules:
+        if d.module(definition_ref(m)) is None:
+            missing[definition_ref(m)].append(s.model.path_of(m))
+    print(f"Unresolved definitions: {len(missing)} ({sum(len(v) for v in missing.values())} elements)")
+    for dref, paths in sorted(missing.items())[:a.limit]:
+        ex = d.explain(dref)
+        print(f"- {dref}   ({len(paths)} element(s), e.g. {paths[0]})")
+        print(f"    module: {ex['module'] or '-'}")
+        for f in ex["files"]:
+            print(f"    file  : {f}")
+        if ex.get("nearest"):
+            print(f"    deepest known: {ex['nearest']}")
+        if ex.get("hint"):
+            print(f"    reason: {ex['hint']}")
+    return 1 if missing else 0
 
 
 def _print_results(results, limit):
@@ -216,6 +255,10 @@ def main(argv=None):
     p.add_argument("--limit", type=int, default=40)
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(fn=cmd_validate)
+    p = sub.add_parser("diag", help="explain unresolved BSWMD definitions")
+    p.add_argument("project")
+    p.add_argument("--limit", type=int, default=40)
+    p.set_defaults(fn=cmd_diag)
     p = sub.add_parser("set")
     p.add_argument("project")
     p.add_argument("object", help='e.g. "/ActiveEcuC/Det/DetGeneral[0:DetEnableDet]"')

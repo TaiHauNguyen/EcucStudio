@@ -180,6 +180,7 @@ class ModuleDef(Def):
     file: str = ""
     impl: "BswImpl | None" = None
     index: dict = field(default_factory=dict)   # def path -> Def
+    files: list = field(default_factory=list)   # all BSWMD files contributing to this module
 
     def find(self, path: str):
         return self.index.get(path)
@@ -304,9 +305,14 @@ class DefinitionRepository:
         self.refined_to_vendor.clear()
         for f, e in entries.items():
             for m in e.get("modules", []):
-                if m["path"] in self.module_index:
+                info = self.module_index.get(m["path"])
+                if info is not None:
+                    # AUTOSAR 4: ECUC-MODULE-DEF is splitable, one module may be spread over files
+                    info["files"].append(f)
+                    if not info.get("refined") and m.get("refined"):
+                        info["refined"] = m["refined"]
                     continue
-                self.module_index[m["path"]] = {"file": f, "refined": m.get("refined")}
+                self.module_index[m["path"]] = {"file": f, "files": [f], "refined": m.get("refined")}
                 if m.get("refined"):
                     self.refined_to_vendor.setdefault(m["refined"], []).append(m["path"])
             for im in e.get("impls", []):
@@ -363,15 +369,21 @@ class DefinitionRepository:
             info = self.module_index.get(path)
             if info is None:
                 return None
-            tree = self._tree(info["file"])
-            el = None
-            for p, e in arxml.iter_identifiables(tree.getroot(), {"ECUC-MODULE-DEF"}):
-                if p == path:
-                    el = e
-                    break
-            if el is None:
+            parts = []          # (element count, file, element) of every file defining this module
+            for f in info.get("files", [info["file"]]):
+                tree = self._tree(f)
+                for p, e in arxml.iter_identifiables(tree.getroot(), {"ECUC-MODULE-DEF"}):
+                    if p == path:
+                        parts.append((sum(1 for _ in e.iter()), f, e))
+                        break
+            if not parts:
                 return None
-            m = self._build_module(el, path, info["file"])
+            parts.sort(key=lambda x: -x[0])      # the most complete part is the main one
+            _n, f0, e0 = parts[0]
+            m = self._build_module(e0, path, f0)
+            for _n, f, e in parts[1:]:
+                self._merge_module(m, e, f)
+            m.files = [x[1] for x in parts]
             self._modules[path] = m
             return m
 
@@ -391,6 +403,31 @@ class DefinitionRepository:
         if def_path == m.path:
             return m
         return m.index.get(def_path)
+
+    def explain(self, def_path: str) -> dict:
+        """Why *def_path* cannot be resolved: module match, files, deepest known ancestor."""
+        info = {"path": def_path, "module": None, "files": [], "nearest": None, "missing": None}
+        m = self.module_for(def_path)
+        if m is None:
+            parts = def_path.strip("/").split("/")
+            cands = sorted({"/" + "/".join(parts[:2]), "/" + "/".join(parts[:3])})
+            info["hint"] = (f"no ECUC-MODULE-DEF {' or '.join(cands)} in the {len(self.files)} BSWMD files — "
+                            f"the module is not delivered in this SIP (or its BSWMD folder is missing)")
+            return info
+        info["module"] = m.path
+        info["files"] = list(getattr(m, "files", []) or [m.file])
+        p = def_path
+        while p and p != m.path and p not in m.index:
+            p = p.rsplit("/", 1)[0]
+        info["nearest"] = p
+        rest = def_path[len(p):].strip("/")
+        info["missing"] = rest.split("/")[0] if rest else None
+        if info["missing"]:
+            near = m.index.get(p) or m
+            names = [c.name for c in near.children]
+            info["hint"] = (f"'{info['missing']}' is not a child of {p} in the BSWMD "
+                            f"(known children: {', '.join(names[:15]) or 'none'})")
+        return info
 
     def standard_path(self, def_path: str) -> str:
         """Map a vendor definition path to the AUTOSAR standard one (via REFINED-MODULE-DEF-REF)."""
@@ -451,6 +488,19 @@ class DefinitionRepository:
                 self._build_node(c, m, m)
         return m
 
+    def _merge_module(self, m: ModuleDef, el, file: str):
+        """Merge another split part of the same ECUC-MODULE-DEF into *m*."""
+        for v in el.iter(q("SUPPORTED-CONFIG-VARIANT")):
+            if v.text and v.text.strip() not in m.supported_variants:
+                m.supported_variants.append(v.text.strip())
+        if not m.refined:
+            m.refined = text(el, "REFINED-MODULE-DEF-REF")
+        conts = el.find(q("CONTAINERS"))
+        if conts is not None:
+            for c in conts:
+                if isinstance(c.tag, str):
+                    self._build_node(c, m, m)
+
     def _fill_common(self, d: Def, el):
         d.uuid = el.get("UUID")
         d.desc = _desc(el)
@@ -483,11 +533,17 @@ class DefinitionRepository:
         if not name:
             return
         path = parent.path + "/" + name
+        existing = module.index.get(path)
+        if existing is not None and not existing.is_container:
+            return                      # parameter already known from another split part
         if tag in CONTAINER_KINDS:
-            d = Def(path=path, name=name, tag=tag, kind=CONTAINER_KINDS[tag], parent=parent, module=module)
-            self._fill_common(d, el)
-            parent.children.append(d)
-            module.index[path] = d
+            if existing is not None:
+                d = existing            # split container: add the children of this part
+            else:
+                d = Def(path=path, name=name, tag=tag, kind=CONTAINER_KINDS[tag], parent=parent, module=module)
+                self._fill_common(d, el)
+                parent.children.append(d)
+                module.index[path] = d
             for group in ("PARAMETERS", "REFERENCES", "SUB-CONTAINERS", "CHOICES"):
                 g = el.find(q(group))
                 if g is not None:

@@ -40,6 +40,17 @@ Phím tắt: Ctrl+O mở, Ctrl+S lưu, Ctrl+Z/Ctrl+Y undo/redo, Alt+←/→ edit
 Ctrl+G generate, Ctrl+F Find, Ctrl+L đi tới đường dẫn (nhận cả `/ActiveEcuC/Com/ComGeneral[0:ComX]`),
 F2 đổi tên, Del xoá container.
 
+### Khi SIP thiếu định nghĩa (BSWMD)
+
+Mọi module/container vẫn xem và sửa được, theo thứ tự nguồn định nghĩa:
+1. BSWMD của SIP (gộp cả định nghĩa bị tách ra nhiều file — AUTOSAR "splitable");
+2. định nghĩa chuẩn AUTOSAR của DaVinci (`<DaVinci>\Core\StandardDefinition`, lấy theo đường dẫn DVCfgCmd
+   trong Settings), đổi gốc về đường dẫn `/MICROSAR/...` của ECUC nên file ghi ra vẫn đúng với DaVinci;
+3. suy ra từ chính ECUC (`DEFINITION-REF DEST="ECUC-...-DEF"` cho biết kiểu tham số).
+
+Form hiện dòng thông báo vàng cho biết nguồn đang dùng và lý do. `python -m ecucstudio diag <dpa>` liệt kê
+mọi định nghĩa không tìm thấy trong SIP.
+
 ## Validation
 
 1. **Basic rules** (tự cài đặt, cùng ID/nội dung với DaVinci): AR-ECUC02008 multiplicity,
@@ -80,6 +91,7 @@ tresos; MemMap cần `..\Board\AsrCommon\inc\MemMap_User.h`. Generate các modul
 
 ```bat
 python -m ecucstudio info     Project.dpa
+python -m ecucstudio diag     Project.dpa   :: giải thích lỗi "definition ... not found" (SIP, file BSWMD, phần thiếu)
 python -m ecucstudio validate Project.dpa [--modules Com,Det] [--json out.json] [--davinci]
 python -m ecucstudio set      Project.dpa "/ActiveEcuC/Det/DetGeneral[0:DetVersionInfoApi]" true --save
 python -m ecucstudio generate Project.dpa -m /MICROSAR/Det [--gen-type REAL]

@@ -5,6 +5,8 @@ A ``BasicEditor`` is one editor tab: address line (breadcrumb) + context tree wi
 """
 from __future__ import annotations
 
+import os
+
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
@@ -251,7 +253,9 @@ class BasicEditor(tk.Frame):
     def _show_form(self, node):
         self._use("form")
         s = self.app.session
-        el, cdef = node.el, node.cdef
+        el = node.el
+        cdef, source = s.container_def(el)
+        node.cdef = cdef
         self._set_crumbs(el)
         self.form.clear()
         self.fields = []
@@ -262,20 +266,21 @@ class BasicEditor(tk.Frame):
         hdr.grid(row=row, column=0, columnspan=6, sticky="ew", padx=8, pady=(6, 0))
         row += 1
         is_module = arxml.local(el) == MODULE_TAG
-        kind = "Module" if is_module else (KIND_LABEL.get(cdef.kind, "") if cdef else "Unknown definition")
+        kind = "Module" if is_module else (KIND_LABEL.get(cdef.kind, "") if cdef else "Container")
         tk.Label(hdr, text=arxml.short_name(el), background=COLORS["view_bg"], font=("Segoe UI", 11, "bold"),
                  image=self.app.icons.module if is_module else self.app.icons.container, compound="left",
                  padx=2).pack(anchor="w")
         tk.Label(hdr, text=f"{kind}   {definition_ref(el)}", background=COLORS["view_bg"], foreground="#777",
                  font=FONT).pack(anchor="w")
+        if source:
+            row = self._fallback_banner(g, row, el, source)
         if cdef is None:
-            tk.Label(g, text="The definition of this element was not found in the SIP / BSWMD files.",
-                     background=COLORS["view_bg"], foreground=COLORS["error"]).grid(row=row, column=0, columnspan=6,
-                                                                                    sticky="w", padx=10, pady=10)
             self._set_status([])
             return
-        if is_module:
+        if is_module and not source:
             row = self._module_info(g, row, node)
+        elif is_module:
+            self._set_status([])
         else:
             self.live = s.validate_container(el)
             self._set_status(self.live)
@@ -296,6 +301,26 @@ class BasicEditor(tk.Frame):
                         row = self._field_row(g, row, el, p, i, v, len(vals) > 1, live.get(p.path))
         row = self._subcontainers(g, row, el, cdef)
         tk.Frame(g, height=20, background=COLORS["view_bg"]).grid(row=row, column=0)
+
+    def _fallback_banner(self, g, row, el, source):
+        """Yellow note: the SIP BSWMD definition is missing, a fallback definition is used."""
+        s = self.app.session
+        ex = s.defs.explain(definition_ref(el))
+        box = tk.Frame(g, background="#fff8d6", highlightthickness=1, highlightbackground="#e6c65c")
+        box.grid(row=row, column=0, columnspan=6, sticky="ew", padx=8, pady=(8, 2))
+        tk.Label(box, image=self.app.icons.warning, background="#fff8d6").pack(side="left", anchor="n", padx=6,
+                                                                           pady=4)
+        txt = (f"The SIP BSWMD definition was not found — editing with the {source}. "
+               f"Values are written with the definition path used in the ECUC file, so DaVinci reads them "
+               f"normally. Range/enum checks are only available when a definition exists.")
+        detail = ex.get("hint") or ""
+        if ex.get("module"):
+            detail = f"module {ex['module']} from {', '.join(os.path.basename(f) for f in ex['files'])}; " + detail
+        lbl = tk.Label(box, text=txt + ("\n" + detail if detail else ""), background="#fff8d6", justify="left",
+                       anchor="w", wraplength=700, font=FONT)
+        lbl.pack(side="left", fill="x", expand=True, padx=(0, 6), pady=4)
+        box.bind("<Configure>", lambda e: lbl.configure(wraplength=max(200, e.width - 50)))
+        return row + 1
 
     def _section_padded(self, g, title, row):
         f = tk.Frame(g, background=COLORS["view_bg"])
@@ -399,7 +424,7 @@ class BasicEditor(tk.Frame):
         if p.is_ref and p.kind not in ("foreign", "instance", "uri"):
             w = ttk.Combobox(g, state="normal" if editable else "disabled")
             w.set(cur)
-            w.configure(postcommand=lambda: w.configure(values=self._ref_candidates(p)))
+            w.configure(postcommand=lambda: w.configure(values=self._ref_candidates(p, raw)))
             w.bind("<<ComboboxSelected>>", lambda e: commit(w.get()))
             w.bind("<Return>", lambda e: commit(w.get()))
             w.bind("<FocusOut>", lambda e: w.get() != cur and commit(w.get()))
@@ -424,12 +449,23 @@ class BasicEditor(tk.Frame):
         if txt is not None:
             self._commit(el, p, i, v, txt)
 
-    def _ref_candidates(self, p):
+    def _ref_candidates(self, p, current=None):
         s = self.app.session
         out = []
         for d in p.dest:
             for c in s.model.containers_of_def(d, s.defs):
                 out.append(s.model.path_of(c))
+            if not out and d.startswith("/AUTOSAR/EcucDefs/"):
+                # standard destination and no refined vendor module known: match by the path tail
+                tail = "/" + d[len("/AUTOSAR/EcucDefs/"):]
+                for dp, els in s.model.def_index.items():
+                    if dp.endswith(tail):
+                        out.extend(s.model.path_of(c) for c in els)
+        if not p.dest and current:
+            # definition inferred from the ECUC: offer containers of the same kind as the current target
+            t = s.model.resolve(current)
+            if t is not None:
+                out.extend(s.model.path_of(c) for c in s.model.def_index.get(definition_ref(t), []))
         return sorted(set(out))
 
     def _subcontainers(self, g, row, el, cdef):
@@ -579,7 +615,10 @@ class BasicEditor(tk.Frame):
         cdef = node.cdef
         self._set_crumbs(node.el, cdef.name)
         self.grid_title.configure(text=f"{cdef.label}  ({len(node.el_list)} of {cdef.multiplicity_str()})")
-        params = cdef.params()[:60]
+        cols_def = cdef
+        if not cdef.params() and node.el_list:      # fallback definition: take columns from an instance
+            cols_def = s.container_def(node.el_list[0])[0] or cdef
+        params = cols_def.params()[:60]
         self.grid_params = params
         cols = [p.path for p in params]
         self.tv.delete(*self.tv.get_children(""))

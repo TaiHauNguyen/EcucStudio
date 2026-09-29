@@ -174,6 +174,31 @@ class CoreTests(unittest.TestCase):
         self.model.undo()
         self.assertIsNotNone(self.model.resolve(path))
 
+    def test_fallback_when_bswmd_is_partial(self):
+        """Missing SIP sub-definitions: editable via AUTOSAR standard definition or the ECUC itself."""
+        from ecucstudio.fallback import FallbackDefinitions, SOURCE_ECUC, SOURCE_STANDARD, standard_definition_dirs
+        base = "/MICROSAR/EcuM/EcuMConfiguration/EcuMCommonConfiguration"
+        m = self.defs.module("/MICROSAR/EcuM")
+        saved = (list(m.index[base].children), dict(m.index))
+        try:
+            for c in [c for c in m.index[base].children if c.is_container]:
+                m.index[base].children.remove(c)
+                for k in [k for k in m.index if k.startswith(c.path)]:
+                    del m.index[k]
+            dirs = standard_definition_dirs(self.project.sip_dir, os.environ.get("ECUCSTUDIO_DVCFGCMD"))
+            fb = FallbackDefinitions(self.defs, self.model, dirs, cache_dir=CACHE)
+            ws = self.model.def_index[base + "/EcuMWakeupSource"][0]
+            d, src = fb.container_def(ws)
+            self.assertIn(src, (SOURCE_STANDARD, SOURCE_ECUC))
+            p = next(x for x in d.params() if x.name == "EcuMWakeupSourceId")
+            self.assertEqual(p.path, base + "/EcuMWakeupSource/EcuMWakeupSourceId")   # vendor path kept
+            self.model.set_value(ws, p, "7")
+            self.assertEqual(raw_value(self.model.find_values(ws, p.path)[0]), "7")
+        finally:
+            m.index[base].children[:] = saved[0]
+            m.index.clear()
+            m.index.update(saved[1])
+
     def test_parse_object_ref(self):
         self.assertEqual(parse_object_ref("/ActiveEcuC/Com/ComGeneral[0:ComSupportedIPduGroups](value=14)"),
                          ("/ActiveEcuC/Com/ComGeneral", "ComSupportedIPduGroups", 0))

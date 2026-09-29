@@ -124,7 +124,9 @@ class ProjectTree(tk.Frame):
             for el in node.el_list:
                 out.append((Node("container", el, node.cdef), arxml.short_name(el), self._icon(node.cdef)))
             return out
-        el, cdef = node.el, node.cdef
+        el = node.el
+        cdef = self.app.session.container_def(el)[0]   # SIP BSWMD or fallback definition
+        node.cdef = cdef
         subs = container_children(el)
         if cdef is None:
             for s in subs:

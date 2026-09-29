@@ -55,6 +55,11 @@ class Session:
         if initial:
             step("Loading initial (derived) configuration", 0.82)
             self.model.load_initial(initial)
+        step("Loading AUTOSAR standard definitions (fallback)", 0.88)
+        from .fallback import FallbackDefinitions, standard_definition_dirs
+        self.fallback = FallbackDefinitions(self.defs, self.model,
+                                            standard_definition_dirs(sip_dir, self.cfg.get("dvcfgcmd")),
+                                            cache_dir=settings_mod.CACHE_DIR)
         step("Preparing module definitions", 0.9)
         for m in self.model.modules:
             from .project import definition_ref
@@ -83,6 +88,15 @@ class Session:
         self.validator = default_validator(self.plugin_dirs())
         self.results = self.validator.run(self.context(**options), progress=progress, cancel=cancel)
         return self.results
+
+    def container_def(self, el):
+        """(definition, source) for editing *el*; source is None for a normal SIP BSWMD definition,
+        otherwise a text telling that a fallback (AUTOSAR standard / inferred from ECUC) is used."""
+        fb = getattr(self, "fallback", None)
+        if fb is None:
+            from .project import definition_ref
+            return self.defs.find(definition_ref(el)), None
+        return fb.container_def(el)
 
     def validate_container(self, el):
         return validate_container(self.context(), el)
