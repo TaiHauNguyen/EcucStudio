@@ -1,8 +1,11 @@
-"""EcucStudio main window."""
+"""EcucStudio main window, laid out like DaVinci Configurator 5."""
 from __future__ import annotations
 
+import copy
 import os
 import queue
+import re
+import subprocess
 import threading
 import time
 import tkinter as tk
@@ -14,13 +17,14 @@ from ..project import MODULE_TAG, container_children, definition_ref, parse_obje
 from ..session import Session
 from ..settings import Settings
 from ..validation import Severity
-from .console import ConsoleView, GenerationView
+from .console import ConsoleView, FindView, GenerationView
 from .dialogs import AddContainerDialog, GenerateDialog, OpenFilesDialog, SettingsDialog
-from .editor import EditorPanel
+from .editor import BasicEditor
+from .navigator import NavigatorView
 from .properties import PropertiesPanel
-from .theme import Icons, init_style
-from .tree import ProjectTree
+from .theme import COLORS, Icons, init_style
 from .validation_view import ValidationView
+from .widgets import ToolButton, ToolSeparator, ViewStack
 
 APP_NAME = "EcucStudio"
 
@@ -34,6 +38,8 @@ class App(tk.Tk):
         self.busy = False
         self.dv_run = None
         self._q = queue.Queue()
+        self.history, self.hist_pos, self._nav = [], -1, False
+        self._max = None
         init_style(self)
         self.icons = Icons()
         self.title(APP_NAME)
@@ -41,49 +47,69 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build_menu()
         self._build_toolbar()
-        self._build_body()
         self._build_status()
+        self._build_body()
         self._bind_keys()
         self.after(100, self._poll)
-        self._welcome()
         if dpa:
             self.after(200, lambda: self.open_project(dpa))
 
     # ================================================================== layout
     def _build_menu(self):
         mb = tk.Menu(self)
+        ic = self.icons
         f = tk.Menu(mb, tearoff=False)
-        f.add_command(label="Open Project (.dpa)…", accelerator="Ctrl+O", command=self.open_project_dialog)
-        f.add_command(label="Open ECUC ARXML files…", command=self.open_files_dialog)
+        f.add_command(label="Open Project…", accelerator="Ctrl+O", image=ic.open, compound="left",
+                      command=self.open_project_dialog)
+        f.add_command(label="Open ECUC Files…", command=self.open_files_dialog)
         self.recent_menu = tk.Menu(f, tearoff=False)
-        f.add_cascade(label="Recent projects", menu=self.recent_menu)
+        f.add_cascade(label="Recent Projects", menu=self.recent_menu)
         f.add_separator()
-        f.add_command(label="Save", accelerator="Ctrl+S", command=self.save)
-        f.add_command(label="Reload from disk", command=self.reload)
+        f.add_command(label="Save", accelerator="Ctrl+S", image=ic.save, compound="left", command=self.save)
+        f.add_command(label="Reload Project", command=self.reload)
         f.add_separator()
         f.add_command(label="Exit", command=self.on_close)
         mb.add_cascade(label="File", menu=f)
         e = tk.Menu(mb, tearoff=False)
-        e.add_command(label="Undo", accelerator="Ctrl+Z", command=self.undo)
-        e.add_command(label="Redo", accelerator="Ctrl+Y", command=self.redo)
+        e.add_command(label="Undo", accelerator="Ctrl+Z", image=ic.undo, compound="left", command=self.undo)
+        e.add_command(label="Redo", accelerator="Ctrl+Y", image=ic.redo, compound="left", command=self.redo)
         e.add_separator()
-        e.add_command(label="Find container…", accelerator="Ctrl+F", command=lambda: self.tree.filter_entry.focus_set())
-        e.add_command(label="Go to path…", accelerator="Ctrl+L", command=self.goto_path_dialog)
+        e.add_command(label="Find…", accelerator="Ctrl+F", image=ic.find, compound="left", command=self.show_find)
         mb.add_cascade(label="Edit", menu=e)
+        n = tk.Menu(mb, tearoff=False)
+        n.add_command(label="Last Editor", accelerator="Alt+Left", image=ic.back, compound="left",
+                      command=self.nav_back)
+        n.add_command(label="Next Editor", accelerator="Alt+Right", image=ic.forward, compound="left",
+                      command=self.nav_forward)
+        n.add_command(label="Go to Path…", accelerator="Ctrl+L", command=self.goto_path_dialog)
+        mb.add_cascade(label="Navigate", menu=n)
+        v = tk.Menu(mb, tearoff=False)
+        v.add_command(label="Basic Editor", image=ic.basic, compound="left", command=lambda: self.open_editor(None))
+        v.add_command(label="Configuration Editors", image=ic.editors, compound="left",
+                      command=lambda: self.left.select("nav"))
+        v.add_command(label="Properties", image=ic.properties, compound="left",
+                      command=lambda: self.props_stack.select("props"))
+        for key, label, icon in (("val", "Validation", ic.warning), ("find", "Find", ic.find),
+                                 ("gen", "Generation Result", ic.genresult), ("console", "Console", ic.console)):
+            v.add_command(label=label, image=icon, compound="left", command=lambda k=key: self.bottom.select(k))
+        mb.add_cascade(label="View", menu=v)
         p = tk.Menu(mb, tearoff=False)
-        p.add_command(label="Validate", accelerator="F5", command=self.validate)
-        p.add_command(label="Validate with DaVinci (DVCfgCmd -v)", command=self.davinci_validate)
-        p.add_command(label="Solve All", command=lambda: self.val.solve_all())
+        p.add_command(label="Validate", accelerator="F5", image=ic.validate, compound="left", command=self.validate)
+        p.add_command(label="On-demand Validation (DaVinci)", image=ic.generate, compound="left",
+                      command=self.davinci_validate)
+        p.add_command(label="Solve All", image=ic.solve, compound="left", command=lambda: self.val.solve_all())
         p.add_separator()
-        p.add_command(label="Generate with DaVinci…", accelerator="Ctrl+G", command=self.generate)
-        p.add_command(label="Open project in DaVinci Configurator GUI", command=self.open_in_davinci)
+        p.add_command(label="Generate…", accelerator="Ctrl+G", image=ic.generate, compound="left",
+                      command=self.generate)
+        p.add_command(label="Open in DaVinci Configurator", command=self.open_in_davinci)
         p.add_separator()
-        p.add_command(label="Settings…", command=self.settings_dialog)
+        p.add_command(label="Project Settings…", image=ic.settings, compound="left", command=self.settings_dialog)
         mb.add_cascade(label="Project", menu=p)
         h = tk.Menu(mb, tearoff=False)
         h.add_command(label="About", command=lambda: messagebox.showinfo(
             APP_NAME, f"{APP_NAME} {__version__}\nECUC configurator with DaVinci compatible validation\n"
-                      f"and DaVinci Configurator command line generation."))
+                      f"and DaVinci Configurator command line generation.\n\nLog: "
+                      f"{os.path.join(os.environ.get('LOCALAPPDATA', ''), 'EcucStudio', 'ecucstudio.log')}"))
         mb.add_cascade(label="Help", menu=h)
         self.config(menu=mb)
         self._refresh_recent()
@@ -94,77 +120,108 @@ class App(tk.Tk):
             self.recent_menu.add_command(label=pth, command=lambda p=pth: self.open_project(p))
 
     def _build_toolbar(self):
-        tb = ttk.Frame(self, padding=(4, 2))
-        tb.pack(fill="x")
-        for text, cmd in (("Open", self.open_project_dialog), ("Save", self.save), (None, None),
-                          ("Undo", self.undo), ("Redo", self.redo), (None, None),
-                          ("Validate", self.validate), ("DaVinci Validate", self.davinci_validate),
-                          ("Solve All", lambda: self.val.solve_all()), (None, None),
-                          ("Generate…", self.generate)):
-            if text is None:
-                ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=4)
+        tb = tk.Frame(self, background=COLORS["bg"])
+        tb.pack(fill="x", padx=2, pady=(2, 0))
+        ic = self.icons
+        items = [(ic.open, self.open_project_dialog, "Open Project (Ctrl+O)"),
+                 (ic.save, self.save, "Save (Ctrl+S)"), None,
+                 (ic.undo, self.undo, "Undo (Ctrl+Z)"), (ic.redo, self.redo, "Redo (Ctrl+Y)"), None,
+                 (ic.back, self.nav_back, "Last Editor (Alt+Left)"),
+                 (ic.forward, self.nav_forward, "Next Editor (Alt+Right)"), None,
+                 (ic.validate, self.validate, "Validate (F5)"),
+                 (ic.solve, lambda: self.val.solve_all(), "Solve All"), None,
+                 (ic.generate, self.generate, "Generate (Ctrl+G)"),
+                 (ic.settings, self.settings_dialog, "Project Settings"), None,
+                 (ic.find, self.show_find, "Find (Ctrl+F)")]
+        for it in items:
+            if it is None:
+                ToolSeparator(tb).pack(side="left", fill="y", padx=4, pady=3)
             else:
-                ttk.Button(tb, text=text, command=cmd).pack(side="left", padx=1)
-        self.proj_label = ttk.Label(tb, text="", foreground="#555")
-        self.proj_label.pack(side="right")
+                ToolButton(tb, it[0], it[1], it[2]).pack(side="left")
 
     def _build_body(self):
-        vp = ttk.PanedWindow(self, orient="vertical")
-        vp.pack(fill="both", expand=True)
-        hp = ttk.PanedWindow(vp, orient="horizontal")
-        vp.add(hp, weight=4)
-        self.tree = ProjectTree(hp, self)
-        hp.add(self.tree, weight=1)
-        self.editor = EditorPanel(hp, self)
-        hp.add(self.editor, weight=3)
-        self.props = PropertiesPanel(hp, self)
-        hp.add(self.props, weight=1)
-        self.bottom = ttk.Notebook(vp)
-        vp.add(self.bottom, weight=2)
-        self.val = ValidationView(self.bottom, self)
-        self.console = ConsoleView(self.bottom, self)
-        self.genview = GenerationView(self.bottom, self)
-        self.bottom.add(self.val, text="Validation")
-        self.bottom.add(self.console, text="Console")
-        self.bottom.add(self.genview, text="Generation Result")
+        self.vpane = ttk.PanedWindow(self, orient="vertical")
+        self.vpane.pack(fill="both", expand=True, padx=3, pady=3)
+        self.hpane = ttk.PanedWindow(self.vpane, orient="horizontal")
+        self.vpane.add(self.hpane, weight=3)
+        # left: Configuration Editors
+        self.left = ViewStack(self.hpane, self)
+        self.nav = NavigatorView(self.left.body, self)
+        self.left.add("nav", "Configuration Editors", self.icons.editors, self.nav)
+        self.hpane.add(self.left, weight=1)
+        # editor area
+        self.editors = ViewStack(self.hpane, self, closable=True)
+        self.editors.on_change = lambda k: self._on_editor_change()
+        self.hpane.add(self.editors, weight=4)
+        self._welcome = tk.Label(self.editors.body, text="Open a DaVinci project (File › Open Project…)",
+                                 background=COLORS["view_bg"], foreground="#888", font=("Segoe UI", 11))
+        self._welcome.pack(expand=True)
+        # bottom: Properties | Validation, Find, Generation Result, Console
+        self.bpane = ttk.PanedWindow(self.vpane, orient="horizontal")
+        self.vpane.add(self.bpane, weight=1)
+        self.props_stack = ViewStack(self.bpane, self)
+        self.props = PropertiesPanel(self.props_stack.body, self)
+        self.props_stack.add("props", "Properties", self.icons.properties, self.props)
+        self.bpane.add(self.props_stack, weight=2)
+        self.bottom = ViewStack(self.bpane, self)
+        self.val = ValidationView(self.bottom.body, self)
+        self.find = FindView(self.bottom.body, self)
+        self.genview = GenerationView(self.bottom.body, self)
+        self.console = ConsoleView(self.bottom.body, self)
+        self.bottom.add("val", "Validation", self.icons.warning, self.val, select=True)
+        self.bottom.add("find", "Find", self.icons.find, self.find)
+        self.bottom.add("gen", "Generation Result", self.icons.genresult, self.genview)
+        self.bottom.add("console", "Console", self.icons.console, self.console)
+        self.bottom.select("val")
+        self.bpane.add(self.bottom, weight=3)
+        self.nav.rebuild()
+        self.after(50, self._initial_sashes)
+
+    def _initial_sashes(self):
+        try:
+            self.update_idletasks()
+            h = self.vpane.winfo_height()
+            w = self.hpane.winfo_width()
+            self.vpane.sashpos(0, int(h * 0.68))
+            self.hpane.sashpos(0, int(min(260, w * 0.2)))
+            self.bpane.sashpos(0, int(self.bpane.winfo_width() * 0.38))
+        except tk.TclError:
+            pass
 
     def _build_status(self):
-        sb = ttk.Frame(self)
+        sb = tk.Frame(self, background=COLORS["status_bg"], borderwidth=1, relief="sunken")
         sb.pack(fill="x", side="bottom")
         self.status_var = tk.StringVar(value="Ready")
-        ttk.Label(sb, textvariable=self.status_var, style="Status.TLabel").pack(side="left", fill="x", expand=True)
-        self.progress = ttk.Progressbar(sb, length=220, mode="determinate", maximum=1.0)
+        tk.Label(sb, textvariable=self.status_var, background=COLORS["status_bg"], anchor="w").pack(
+            side="left", fill="x", expand=True, padx=4)
+        self.phase = tk.Label(sb, text="", background=COLORS["status_bg"], anchor="w", padx=4,
+                              image=self.icons.phase, compound="left", borderwidth=1, relief="groove")
+        self.phase.pack(side="right", padx=2)
+        self.counts_lbl = tk.Label(sb, text="", background=COLORS["status_bg"], borderwidth=1, relief="groove",
+                                   padx=6)
+        self.counts_lbl.pack(side="right", padx=2)
+        self.progress = ttk.Progressbar(sb, length=180, mode="determinate", maximum=1.0)
         self.progress.pack(side="right", padx=4, pady=1)
-        self.counts_var = tk.StringVar(value="")
-        ttk.Label(sb, textvariable=self.counts_var, style="Status.TLabel").pack(side="right")
 
     def _bind_keys(self):
         self.bind_all("<Control-s>", lambda e: self.save())
         self.bind_all("<Control-o>", lambda e: self.open_project_dialog())
-        self.bind_all("<Control-z>", lambda e: self._key_undo(e))
-        self.bind_all("<Control-y>", lambda e: self._key_redo(e))
+        self.bind_all("<Control-z>", lambda e: self._key(e, self.undo))
+        self.bind_all("<Control-y>", lambda e: self._key(e, self.redo))
         self.bind_all("<F5>", lambda e: self.validate())
         self.bind_all("<Control-g>", lambda e: self.generate())
-        self.bind_all("<Control-f>", lambda e: self.tree.filter_entry.focus_set())
+        self.bind_all("<Control-f>", lambda e: self.show_find())
         self.bind_all("<Control-l>", lambda e: self.goto_path_dialog())
+        self.bind_all("<Alt-Left>", lambda e: self.nav_back())
+        self.bind_all("<Alt-Right>", lambda e: self.nav_forward())
 
-    def _key_undo(self, e):
-        if isinstance(e.widget, (tk.Entry, ttk.Entry, tk.Text)):
+    def _key(self, e, fn):
+        if isinstance(e.widget, (tk.Entry, ttk.Entry, tk.Text, ttk.Combobox)):
             return
-        self.undo()
+        fn()
 
-    def _key_redo(self, e):
-        if isinstance(e.widget, (tk.Entry, ttk.Entry, tk.Text)):
-            return
-        self.redo()
-
-    def _welcome(self):
-        self.editor.header.config(text=f"{APP_NAME} — open a DaVinci project (.dpa) to start")
-        self.editor.subheader.config(text="File › Open Project…  (recent projects in the File menu)")
-
-    # ============================================================ utilities
+    # ============================================================= utilities
     def _on_tk_error(self, exc, val, tb):
-        """Errors in Tk callbacks: log them (pythonw has no console) and tell the user."""
         from ..__main__ import log_path, write_log
         text = "".join(traceback.format_exception(exc, val, tb))
         write_log("GUI error:\n" + text)
@@ -180,7 +237,6 @@ class App(tk.Tk):
             self.progress["value"] = frac
 
     def run_bg(self, work, done=None, msg="Working…", block=True):
-        """Run *work(progress)* in a thread; *done(result, error)* runs in the GUI thread."""
         if block:
             if self.busy:
                 self.status("Busy — please wait")
@@ -196,7 +252,7 @@ class App(tk.Tk):
             try:
                 res = work(progress)
                 self._q.put(("done", done, res, None, block))
-            except Exception as ex:  # report background failures in the GUI
+            except Exception as ex:
                 self._q.put(("done", done, None, (ex, traceback.format_exc()), block))
         threading.Thread(target=runner, daemon=True).start()
 
@@ -220,7 +276,7 @@ class App(tk.Tk):
                     if err is not None:
                         self.status(f"Error: {err[0]}")
                         self.console.write(err[1], "ERROR")
-                        messagebox.showerror(APP_NAME, f"{err[0]}\n\nDetails in the Console tab.")
+                        messagebox.showerror(APP_NAME, f"{err[0]}\n\nDetails in the Console view.")
                     elif done:
                         done(res)
         except queue.Empty:
@@ -231,13 +287,136 @@ class App(tk.Tk):
         s = self.session
         name = s.project.name if s.project else ("ECUC files" if s.model else "")
         dirty = s.model is not None and s.model.is_dirty()
-        self.title(f"{APP_NAME} — {name}{' *' if dirty else ''}")
-        if s.project:
-            p = s.project
-            self.proj_label.config(text=f"{p.derivative} | {p.compiler} | {', '.join(p.sip_ids)} | {p.path}")
+        path = s.project.path if s.project else ""
+        self.title(f"{'*' if dirty else ''}{APP_NAME} - {name}" + (f".dpa  [{path}]" if path else ""))
+        self.phase.configure(text=" PreCompile" if s.model else "")
 
     def all_results(self):
         return list(self.session.results) + list(self.session.dv_results)
+
+    def update_counts(self):
+        allr = self.all_results()
+        e = sum(1 for r in allr if r.severity >= Severity.ERROR and not r.acknowledged)
+        w = sum(1 for r in allr if r.severity == Severity.WARNING and not r.acknowledged)
+        i = sum(1 for r in allr if r.severity < Severity.WARNING and not r.acknowledged)
+        self.counts_lbl.configure(text=f"{e} errors, {w} warnings, {i} infos" if allr else "")
+
+    def tree_marks_for(self, module_el):
+        sev = None
+        model = self.session.model
+        for r in self.all_results():
+            if r.acknowledged or r.element is None:
+                continue
+            if model.module_of(r.element) is module_el and (sev is None or r.severity > sev):
+                sev = int(r.severity)
+        return sev
+
+    def toggle_maximize(self, stack):
+        """Eclipse 'maximize view': give the stack (almost) all the space, click again to restore."""
+        try:
+            if self._max is not None:
+                for pane, idx, pos in self._max:
+                    pane.sashpos(idx, pos)
+                self._max = None
+                return
+            saved = [(self.vpane, 0, self.vpane.sashpos(0)), (self.hpane, 0, self.hpane.sashpos(0)),
+                     (self.bpane, 0, self.bpane.sashpos(0))]
+            H, W = self.vpane.winfo_height(), self.hpane.winfo_width()
+            if stack is self.editors:
+                self.vpane.sashpos(0, H - 4)
+                self.hpane.sashpos(0, 0)
+            elif stack is self.left:
+                self.vpane.sashpos(0, H - 4)
+                self.hpane.sashpos(0, W - 4)
+            elif stack is self.bottom:
+                self.vpane.sashpos(0, 0)
+                self.bpane.sashpos(0, 0)
+            elif stack is self.props_stack:
+                self.vpane.sashpos(0, 0)
+                self.bpane.sashpos(0, self.bpane.winfo_width() - 4)
+            self._max = saved
+        except tk.TclError:
+            pass
+
+    # =============================================================== editors
+    def current_editor(self):
+        w = self.editors.widget(self.editors.current) if self.editors.current else None
+        return w if isinstance(w, BasicEditor) else None
+
+    def open_editor(self, modules, title=None):
+        if self.session.model is None:
+            return None
+        key = "basic" if modules is None else "ed:" + ",".join(sorted(arxml.short_name(m) for m in modules))
+        if self.editors.has(key):
+            self.editors.select(key)
+            return self.editors.widget(key)
+        title = title or ("Basic Editor" if modules is None else arxml.short_name(modules[0]))
+        ed = BasicEditor(self.editors.body, self, modules=modules, title=title)
+        icon = self.icons.basic if modules is None else self.icons.module
+        self._welcome.pack_forget()
+        self.editors.add(key, title, icon, ed, select=True)
+        ed.populate()
+        first = (modules or self.session.model.modules or [None])[0]
+        if first is not None:
+            ed.tree.select_element(first)
+        return ed
+
+    def _on_editor_change(self):
+        ed = self.current_editor()
+        if ed is not None and ed.node is not None and ed.node.el is not None and ed.node.kind != "group":
+            self.props.show_container(ed.node.el, ed.node.cdef)
+
+    def goto_element(self, el):
+        """Show *el* (module/container/value) in the current editor or the Basic Editor."""
+        if el is None:
+            return None
+        target = el
+        while target is not None and arxml.local(target) not in (MODULE_TAG, "ECUC-CONTAINER-VALUE"):
+            target = target.getparent()
+        ed = self.current_editor()
+        if ed is None or not ed.contains(target):
+            ed = self.open_editor(None)
+        else:
+            self.editors.select(self.editors.current)
+        if ed is not None:
+            ed.tree.select_element(target)
+        return ed
+
+    def remember(self, editor, node):
+        if self._nav:
+            return
+        key = self.editors.current
+        entry = (key, node.el, node.kind, node.cdef.path if node.cdef else None)
+        if self.hist_pos >= 0 and self.history[self.hist_pos][:2] == entry[:2]:
+            return
+        self.history = self.history[:self.hist_pos + 1] + [entry]
+        self.history = self.history[-100:]
+        self.hist_pos = len(self.history) - 1
+
+    def _go_hist(self, pos):
+        if not (0 <= pos < len(self.history)):
+            return
+        key, el, kind, _d = self.history[pos]
+        self.hist_pos = pos
+        self._nav = True
+        try:
+            if self.editors.has(key):
+                self.editors.select(key)
+                ed = self.editors.widget(key)
+                if el is not None and self._attached(el):
+                    ed.tree.select_element(el if kind != "group" else el)
+        finally:
+            self._nav = False
+
+    def nav_back(self):
+        self._go_hist(self.hist_pos - 1)
+
+    def nav_forward(self):
+        self._go_hist(self.hist_pos + 1)
+
+    def show_find(self):
+        self.bottom.select("find")
+        self.find.entry.focus_set()
 
     # =============================================================== project
     def open_project_dialog(self):
@@ -266,22 +445,26 @@ class App(tk.Tk):
         self._refresh_recent()
         self._load(lambda pr: self.session.open_dpa(dpa, progress=pr))
 
+    def _close_editors(self):
+        for v in list(self.editors.views):
+            v[3].destroy()
+            v[4].destroy()
+        self.editors.views.clear()
+        self.editors.current = None
+
     def _load(self, work):
         self.session = Session(self.cfg)
-        self.tree.clear()
-        self.editor.show(None)
+        self._close_editors()
         self.val.set_results([])
+        self.history, self.hist_pos = [], -1
 
-        def done(sess):
+        def done(_sess):
             s = self.session
-            s.model.listeners.append(self._on_model_change)
-            self.tree.populate()
             self.update_title()
-            nmods = len(s.model.modules)
-            self.status(f"Loaded {nmods} modules, {len(s.model.path_index)} containers, "
+            self.nav.rebuild()
+            self.open_editor(None)
+            self.status(f"Loaded {len(s.model.modules)} modules, {len(s.model.path_index)} containers, "
                         f"{len(s.defs.module_index)} module definitions in {s.load_time:.1f} s")
-            if s.model.modules:
-                self.tree.select_element(s.model.modules[0])
             if self.cfg.get("validate_on_load", True):
                 self.validate()
         self.run_bg(lambda pr: work(pr), done, "Loading project…")
@@ -339,52 +522,48 @@ class App(tk.Tk):
         self.destroy()
 
     # ============================================================ navigation
-    def show_node(self, node):
-        self.editor.show(node)
-        if node.kind == "group":
-            self.props.show_def(node.cdef)
-        elif node.el is not None:
-            self.props.show_container(node.el, node.cdef)
-
     def goto_path(self, path):
         el = self.session.model.resolve(path)
         if el is None:
             self.status(f"Not found in ECUC: {path}")
-            return False
-        return self.tree.select_element(el)
+            return None
+        return self.goto_element(el)
 
     def goto_path_dialog(self):
         if self.session.model is None:
             return
-        p = simpledialog.askstring(APP_NAME, "AUTOSAR path (container or DaVinci object like /ActiveEcuC/X[0:Param]):")
+        p = simpledialog.askstring(APP_NAME, "AUTOSAR path (container, or DaVinci object like "
+                                             "/ActiveEcuC/X/Y[0:Param]):")
         if p:
             path, param, idx = parse_object_ref(p)
-            if self.goto_path(path) and param:
-                self.editor.select_param(name=param, index=idx)
+            ed = self.goto_path(path)
+            if ed is not None and param:
+                ed.select_param(name=param, index=idx)
 
     def goto_result(self, r):
         model = self.session.model
         el = r.element
-        if el is not None and el.getroottree().getroot() is not None and self._attached(el):
-            target = el
-            if arxml.local(el) not in (MODULE_TAG, "ECUC-CONTAINER-VALUE"):
-                target = el.getparent().getparent()
-            self.tree.select_element(target)
-            if target is not el or r.param:
-                self.editor.select_param(def_path=r.param or definition_ref(el), index=None)
+        if el is not None and self._attached(el):
+            ed = self.goto_element(el)
+            if ed is not None:
+                if arxml.local(el) not in (MODULE_TAG, "ECUC-CONTAINER-VALUE"):
+                    ed.select_param(def_path=definition_ref(el), index=None)
+                elif r.param:
+                    ed.select_param(def_path=r.param, index=None)
             return
         if r.obj:
             path, param, idx = parse_object_ref(r.obj)
-            if self.goto_path(path):
+            ed = self.goto_path(path)
+            if ed is not None:
                 if param:
-                    self.editor.select_param(name=param, index=idx)
+                    ed.select_param(name=param, index=idx)
                 return
         if r.definition:
-            parent_def = r.definition.rsplit("/", 1)[0]
-            els = model.containers_of_def(parent_def, self.session.defs)
+            els = model.containers_of_def(r.definition.rsplit("/", 1)[0], self.session.defs)
             if els:
-                self.tree.select_element(els[0])
-                self.editor.select_param(def_path=r.definition, index=None)
+                ed = self.goto_element(els[0])
+                if ed is not None:
+                    ed.select_param(def_path=r.definition, index=None)
                 return
         self.status("Cannot locate the object of this result in the loaded ECUC")
 
@@ -394,68 +573,89 @@ class App(tk.Tk):
             (el.getparent() is not None or arxml.local(el) == "AUTOSAR")
 
     # =============================================================== editing
-    def _on_model_change(self, kind, el):
-        pass
+    def _editors(self):
+        return [v[3] for v in self.editors.views if isinstance(v[3], BasicEditor)]
 
     def after_edit(self, el, label, structure=False):
         self.update_title()
-        if structure:
-            self.tree.refresh_element(el)
-        self.editor.refresh()
+        cur = self.current_editor()
+        for ed in self._editors():
+            if structure:
+                grp = ed.node.cdef.path if ed.node is not None and ed.node.kind == "group" else None
+                ed.tree.refresh_element(el)
+                if grp and ed is cur:
+                    self._reselect_group(ed, el, grp)
+                    continue
+            if ed is cur:
+                ed.refresh()
         if label:
             self.status(f"Changed: {label}")
+
+    def _reselect_group(self, ed, parent_el, def_path):
+        iid = ed.tree.by_el.get(parent_el)
+        if iid is None:
+            return
+        ed.tree._load_children(iid)
+        for gid in ed.tree.tv.get_children(iid):
+            n = ed.tree.nodes.get(gid)
+            if n is not None and n.kind == "group" and n.cdef.path == def_path:
+                ed.tree.tv.selection_set(gid)
+                ed.show_node(n)
+                return
+        ed.tree.select_element(parent_el)
 
     def undo(self):
         m = self.session.model
         if m is None or self.busy:
             return
-        lbl = m.undo()
-        self._after_undo(lbl, "Undo")
+        self._after_undo(m.undo(), "Undo")
 
     def redo(self):
         m = self.session.model
         if m is None or self.busy:
             return
-        lbl = m.redo()
-        self._after_undo(lbl, "Redo")
+        self._after_undo(m.redo(), "Redo")
 
     def _after_undo(self, lbl, what):
         if lbl is None:
             self.status(f"Nothing to {what.lower()}")
             return
-        sel = self.tree.selected_node()
-        self.tree.populate()
-        self.tree.set_marks(self.all_results())
-        if sel is not None and sel.el is not None and self._attached(sel.el):
-            self.tree.select_element(sel.el)
+        for ed in self._editors():
+            sel = ed.tree.selected_node()
+            ed.populate()
+            if sel is not None and sel.el is not None and self._attached(sel.el):
+                ed.tree.select_element(sel.el)
         self.update_title()
         self.status(f"{what}: {lbl}")
 
     def container_menu(self, node, x, y):
         m = tk.Menu(self, tearoff=False)
         s = self.session
+        ic = self.icons
         if node.kind in ("module", "container") and node.cdef is not None:
             addable = [c for c in node.cdef.containers()
                        if len([e for e in container_children(node.el) if definition_ref(e) == c.path]) < c.upper]
             if addable:
                 sub = tk.Menu(m, tearoff=False)
                 for c in addable:
-                    sub.add_command(label=f"{c.name}  ({c.multiplicity_str()})",
+                    sub.add_command(label=f"{c.label}  ({c.multiplicity_str()})",
                                     command=lambda c=c: self.add_container_dialog(node.el, c))
-                m.add_cascade(label="Add sub-container", menu=sub)
+                m.add_cascade(label="Create Sub-Container", image=ic.add, compound="left", menu=sub)
         if node.kind == "group":
-            m.add_command(label=f"Add {node.cdef.name}…", command=lambda: self.add_container_dialog(node.el, node.cdef))
+            m.add_command(label=f"Create {node.cdef.label}…", image=ic.add, compound="left",
+                          command=lambda: self.add_container_dialog(node.el, node.cdef))
         if node.kind == "container":
             m.add_command(label="Rename…  (F2)", command=lambda: self.rename_container(node.el))
-            m.add_command(label="Duplicate", command=lambda: self.duplicate_container(node.el))
-            m.add_command(label="Delete  (Del)", command=lambda: self.delete_container(node.el))
+            m.add_command(label="Duplicate", image=ic.copy, compound="left",
+                          command=lambda: self.duplicate_container(node.el))
+            m.add_command(label="Remove  (Del)", image=ic.delete, compound="left",
+                          command=lambda: self.delete_container(node.el))
             m.add_separator()
-            refs = s.model.references_to(s.model.path_of(node.el))
-            m.add_command(label=f"Show {len(refs)} referencing object(s)",
-                          command=lambda: self.props.show_container(node.el, node.cdef))
+            m.add_command(label="Element Usage", command=lambda: self.props.show_container(node.el, node.cdef))
         if node.el is not None and node.kind != "group":
-            m.add_command(label="Validate this element", command=lambda: self.validate_element(node.el))
-            m.add_command(label="Copy path", command=lambda: (self.clipboard_clear(),
+            m.add_command(label="Validate", image=ic.validate, compound="left",
+                          command=lambda: self.validate_element(node.el))
+            m.add_command(label="Copy Path", command=lambda: (self.clipboard_clear(),
                                                                self.clipboard_append(s.model.path_of(node.el))))
         m.tk_popup(x, y)
 
@@ -485,43 +685,31 @@ class App(tk.Tk):
             last = s.model.add_container(parent_el, cd, nm, with_defaults=defaults)
         self.after_edit(parent_el, f"Added {count} × {cd.name}", structure=True)
         if last is not None:
-            self.tree.select_element(last)
-
-    def selected_container(self):
-        n = self.tree.selected_node()
-        return n.el if n is not None and n.kind == "container" else None
-
-    def delete_selected_container(self):
-        el = self.selected_container()
-        if el is not None:
-            self.delete_container(el)
+            ed = self.current_editor()
+            if ed is not None:
+                ed.tree.select_element(last)
 
     def delete_container(self, el):
         if self.busy:
             return
         s = self.session
         path = s.model.path_of(el)
-        refs = [r for r in s.model.ref_index().items() if r[0] == path or r[0].startswith(path + "/")]
-        n = sum(len(v) for _k, v in refs)
-        msg = f"Delete {path}?"
+        n = sum(len(v) for k, v in s.model.ref_index().items() if k == path or k.startswith(path + "/"))
+        msg = f"Remove {path}?"
         if n:
             msg += f"\n\n{n} reference(s) point into this container and will become dangling (Cfg00024)."
         if not messagebox.askyesno(APP_NAME, msg):
             return
         parent = el.getparent().getparent()
         s.model.delete_element(el)
-        self.after_edit(parent, f"Deleted {path}", structure=True)
-        self.tree.select_element(parent)
-
-    def rename_selected_container(self):
-        el = self.selected_container()
-        if el is not None:
-            self.rename_container(el)
+        self.after_edit(parent, f"Removed {path}", structure=True)
+        ed = self.current_editor()
+        if ed is not None:
+            ed.tree.select_element(parent)
 
     def rename_container(self, el):
         if self.busy:
             return
-        import re
         s = self.session
         old = arxml.short_name(el)
         new = simpledialog.askstring(APP_NAME, "New short name (references are updated):", initialvalue=old)
@@ -536,10 +724,11 @@ class App(tk.Tk):
             return
         s.model.rename_container(el, new)
         self.after_edit(parent, f"Renamed {old} → {new}", structure=True)
-        self.tree.select_element(el)
+        ed = self.current_editor()
+        if ed is not None:
+            ed.tree.select_element(el)
 
     def duplicate_container(self, el):
-        import copy
         s = self.session
         parent = el.getparent().getparent()
         cdef = s.defs.find(definition_ref(el))
@@ -547,10 +736,8 @@ class App(tk.Tk):
             return
         name = s.model.unique_name(parent, arxml.short_name(el))
         new = s.model.add_container(parent, cdef, name, with_defaults=False)
-        # copy content (values & sub containers), new UUIDs
         for child in el:
-            tag = arxml.local(child)
-            if tag in ("PARAMETER-VALUES", "REFERENCE-VALUES", "SUB-CONTAINERS"):
+            if arxml.local(child) in ("PARAMETER-VALUES", "REFERENCE-VALUES", "SUB-CONTAINERS"):
                 c = copy.deepcopy(child)
                 for sub in c.iter(arxml.q("ECUC-CONTAINER-VALUE")):
                     sub.set("UUID", arxml.new_uuid())
@@ -558,7 +745,9 @@ class App(tk.Tk):
         s.model._index_subtree(new, False, s.model.path_of(parent))
         s.model._index_subtree(new, True, s.model.path_of(parent))
         self.after_edit(parent, f"Duplicated {arxml.short_name(el)} → {name}", structure=True)
-        self.tree.select_element(new)
+        ed = self.current_editor()
+        if ed is not None:
+            ed.tree.select_element(new)
 
     def apply_actions(self, pairs):
         if self.busy:
@@ -571,7 +760,8 @@ class App(tk.Tk):
             except Exception as ex:
                 fail += 1
                 self.console.write(f"Solving action failed ({r.rule_id}): {ex}", "ERROR")
-        self.tree.populate()
+        for ed in self._editors():
+            ed.populate()
         self.update_title()
         self.status(f"Executed {ok} solving action(s)" + (f", {fail} failed" if fail else ""))
         self.validate()
@@ -585,27 +775,26 @@ class App(tk.Tk):
 
         def work(pr):
             return s.validate(progress=lambda i, n, name: pr(f"Validating: {name}", (i + 1) / max(n, 1)), **options)
-
-        def done(results):
-            self._show_results(f"Validation finished in {time.time() - t0:.1f} s")
-        self.run_bg(work, done, "Validating…")
+        self.run_bg(work, lambda res: self._show_results(f"Validation finished in {time.time() - t0:.1f} s"),
+                    "Validating…")
 
     def validate_element(self, el):
         s = self.session
         res = s.validate_container(el)
-        self.val.set_results(res + [r for r in s.dv_results])
-        self.bottom.select(self.val)
+        self.val.set_results(res + list(s.dv_results))
+        self.bottom.select("val")
         self.status(f"{len(res)} result(s) for {s.model.path_of(el)}")
 
     def _show_results(self, msg):
-        s = self.session
         allr = self.all_results()
         self.val.set_results(allr)
-        self.tree.set_marks(allr)
-        self.editor.refresh()
-        e = sum(1 for r in allr if r.severity >= Severity.ERROR and not r.acknowledged)
-        w = sum(1 for r in allr if r.severity == Severity.WARNING and not r.acknowledged)
-        self.counts_var.set(f"Errors {e}   Warnings {w}   ")
+        for ed in self._editors():
+            ed.tree.set_marks(allr)
+        ed = self.current_editor()
+        if ed is not None:
+            ed.refresh()
+        self.nav.rebuild()
+        self.update_counts()
         if self.session.validator and self.session.validator.errors:
             for err in self.session.validator.errors:
                 self.console.write("Rule error: " + err, "ERROR")
@@ -622,7 +811,7 @@ class App(tk.Tk):
             self.cfg["dvcfgcmd"] = inst[0].exe
             self.cfg.save()
             return inst[0].exe
-        messagebox.showerror(APP_NAME, "DVCfgCmd.exe not found. Configure it in Project › Settings.")
+        messagebox.showerror(APP_NAME, "DVCfgCmd.exe not found. Configure it in Project › Project Settings.")
         return None
 
     def _ensure_saved(self):
@@ -644,8 +833,7 @@ class App(tk.Tk):
             return
         report = os.path.join(s.report_dir(), "ValidationReport.xml")
         log = os.path.join(s.report_dir(), "DVCfgCmd_validate.log")
-        cmd = davinci.build_validate_cmd(exe, s.project.path, report, log)
-        self._run_davinci(cmd, report, "validate")
+        self._run_davinci(davinci.build_validate_cmd(exe, s.project.path, report, log), report, "validate")
 
     def generate(self):
         s = self.session
@@ -655,10 +843,12 @@ class App(tk.Tk):
         if self.busy or (self.dv_run is not None and self.dv_run.returncode is None):
             self.status("A task is already running")
             return
-        r = GenerateDialog(self, self).run()
-        if not r:
-            return
-        exe, opts, local_first = r
+        GenerateDialog(self, self).run()
+
+    def start_generation(self, exe, opts, local_first, dialog=None):
+        """Called by the Generate dialog; the dialog stays open and shows the progress."""
+        s = self.session
+        parent = dialog or self
         if local_first:
             names = None
             if opts.modules:
@@ -669,14 +859,17 @@ class App(tk.Tk):
             self._show_results("Local validation before generation")
             if errs and not messagebox.askyesno(
                     APP_NAME, f"Local validation found {len(errs)} error(s) in the selected modules.\n"
-                              f"DaVinci will most likely refuse to generate them.\n\nGenerate anyway?"):
+                              f"DaVinci will most likely refuse to generate them.\n\nGenerate anyway?",
+                    parent=parent):
                 return
         if not self._ensure_saved():
             return
         report = os.path.join(s.report_dir(), "GenerationReport.xml")
         log = os.path.join(s.report_dir(), "DVCfgCmd_generate.log")
-        cmd = davinci.build_generate_cmd(exe, s.project.path, report, opts, log)
-        self._run_davinci(cmd, report, "generate")
+        self.gen_dialog = dialog
+        if dialog is not None:
+            dialog.start_running()
+        self._run_davinci(davinci.build_generate_cmd(exe, s.project.path, report, opts, log), report, "generate")
 
     def _run_davinci(self, cmd, report, what):
         if self.dv_run is not None and self.dv_run.returncode is None:
@@ -687,27 +880,26 @@ class App(tk.Tk):
                 os.remove(report)
             except OSError:
                 pass
-        self.bottom.select(self.console)
+        self.console.set_running(True)
+        self.bottom.select("console")
         self.console.write("")
         self.console.write("> " + davinci.format_cmd(cmd), "cmd")
-        self.console.cancel_btn.config(state="normal")
         self.console.state.config(text=f"DaVinci {what} running…")
         t0 = time.time()
         self.progress.configure(mode="indeterminate")
         self.progress.start(15)
         mtimes = {f.path: os.path.getmtime(f.path) for f in self.session.model.files.values()
                   if os.path.exists(f.path)}
-
-        def on_line(line):
-            self.call_gui(self._dv_line, line)
-
-        def on_done(rc):
-            self.call_gui(self._dv_done, rc, report, what, time.time() - t0, mtimes)
-        self.dv_run = davinci.DvRun(cmd, on_line, on_done).start()
+        self.dv_run = davinci.DvRun(cmd, lambda line: self.call_gui(self._dv_line, line),
+                                    lambda rc: self.call_gui(self._dv_done, rc, report, what, time.time() - t0,
+                                                             mtimes)).start()
 
     def _dv_line(self, line):
         self.console.write(line)
         p = davinci.parse_progress(line)
+        dlg = getattr(self, "gen_dialog", None)
+        if p and dlg is not None and dlg.winfo_exists():
+            dlg.on_progress(*p)
         if p:
             self.status(f"DaVinci: {p[0]} {p[1]} {p[2].split(chr(9))[0]}")
         elif "Action '" in line and "started" in line:
@@ -716,31 +908,33 @@ class App(tk.Tk):
     def _dv_done(self, rc, report, what, secs, mtimes):
         self.progress.stop()
         self.progress.configure(mode="determinate")
-        self.console.cancel_btn.config(state="disabled")
+        self.console.set_running(False)
+        self.bottom.select(self.bottom.current)
         rep = davinci.parse_report(report)
         s = self.session
-        # map DaVinci results to loaded elements for navigation and tree marks
         for r in rep.validation:
             if r.obj:
                 path, _param, _idx = parse_object_ref(r.obj)
                 r.element = s.model.resolve(path)
         s.dv_results = rep.validation
-        explain = davinci.EXIT_CODES.get(rc, "")
-        self.console.write(f"DVCfgCmd finished: exit code {rc} {explain} after {secs:.0f} s — "
+        self.console.write(f"DVCfgCmd finished: exit code {rc} {davinci.EXIT_CODES.get(rc, '')} after {secs:.0f} s — "
                            f"{rep.process_result or 'no report'}", "ok" if rc == 0 else "ERROR")
-        self.console.state.config(text=f"Last run: {what}, exit {rc}")
+        self.console.state.config(text=f"Last run: {what}, exit code {rc}")
         if what == "generate":
             self.genview.show(rep, rc, secs)
-            self.bottom.select(self.genview)
+            self.bottom.select("gen")
+            dlg = getattr(self, "gen_dialog", None)
+            if dlg is not None and dlg.winfo_exists():
+                dlg.finished(rc, rep)
+            self.gen_dialog = None
         else:
-            self.bottom.select(self.val)
+            self.bottom.select("val")
         self._show_results(f"DaVinci {what} finished (exit code {rc}) in {secs:.0f} s — "
                            f"{len(rep.validation)} DaVinci result(s)")
         changed = [p for p, t in mtimes.items() if os.path.exists(p) and os.path.getmtime(p) != t]
-        if changed:
-            if messagebox.askyesno(APP_NAME, "DaVinci modified project files (--saveProject):\n" +
-                                            "\n".join(os.path.basename(c) for c in changed) + "\n\nReload now?"):
-                self.reload()
+        if changed and messagebox.askyesno(APP_NAME, "DaVinci modified project files (--saveProject):\n" +
+                                           "\n".join(os.path.basename(c) for c in changed) + "\n\nReload now?"):
+            self.reload()
 
     def cancel_davinci(self):
         if self.dv_run is not None:
@@ -750,12 +944,9 @@ class App(tk.Tk):
     def open_in_davinci(self):
         s = self.session
         exe = self._dvcfgcmd()
-        if not exe or s.project is None:
+        if not exe or s.project is None or not self._ensure_saved():
             return
         gui = os.path.join(os.path.dirname(exe), "DaVinciCFG.exe")
-        if not self._ensure_saved():
-            return
-        import subprocess
         subprocess.Popen([gui, "--project", s.project.path], cwd=os.path.dirname(gui))
         self.status("DaVinci Configurator started — reload here after saving in DaVinci")
 

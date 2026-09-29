@@ -9,6 +9,7 @@ from tkinter import ttk
 from .. import arxml
 from ..project import MODULE_TAG, container_children, definition_ref
 from .theme import COLORS, SEVERITY_TAG
+from .widgets import FilterEntry
 
 
 @dataclass
@@ -19,35 +20,36 @@ class Node:
     loaded: bool = False
 
 
-class ProjectTree(ttk.Frame):
-    def __init__(self, master, app):
-        super().__init__(master)
+class ProjectTree(tk.Frame):
+    """Context tree of one editor; *modules* limits it to some module configurations."""
+
+    def __init__(self, master, app, editor=None, modules=None):
+        super().__init__(master, background=COLORS["view_bg"])
         self.app = app
+        self.editor = editor
+        self.modules = modules
         self.nodes: dict[str, Node] = {}
         self.by_el: dict = {}
         self.marks: dict = {}           # element -> max severity
         self._counter = 0
         self.search_mode = False
 
-        bar = ttk.Frame(self)
+        bar = tk.Frame(self, background=COLORS["view_bg"])
         bar.pack(fill="x", padx=2, pady=2)
-        self.filter_var = tk.StringVar()
-        ent = ttk.Entry(bar, textvariable=self.filter_var)
+        ent = FilterEntry(bar)
         ent.pack(side="left", fill="x", expand=True)
         ent.bind("<Return>", lambda e: self.search())
         ent.bind("<Escape>", lambda e: self.clear_search())
-        ttk.Button(bar, text="Find", width=5, command=self.search).pack(side="left", padx=(2, 0))
-        ttk.Button(bar, text="x", width=2, command=self.clear_search).pack(side="left")
         self.filter_entry = ent
 
-        frm = ttk.Frame(self)
+        frm = tk.Frame(self, background=COLORS["view_bg"])
         frm.pack(fill="both", expand=True)
         self.tv = ttk.Treeview(frm, show="tree", selectmode="browse")
         ys = ttk.Scrollbar(frm, orient="vertical", command=self.tv.yview)
         self.tv.configure(yscrollcommand=ys.set)
         self.tv.pack(side="left", fill="both", expand=True)
         ys.pack(side="right", fill="y")
-        self.tv.column("#0", width=320, stretch=True)
+        self.tv.column("#0", width=260, stretch=True)
         for tag in ("error", "warning", "info", "improvement"):
             self.tv.tag_configure(tag, foreground=COLORS[tag])
         self.tv.tag_configure("unknown", foreground=COLORS["notinst"])
@@ -73,6 +75,8 @@ class ProjectTree(ttk.Frame):
         self.search_mode = False
         model, defs = self.app.session.model, self.app.session.defs
         for m in model.modules:
+            if self.modules is not None and m not in self.modules:
+                continue
             mdef = defs.module(definition_ref(m))
             self._add(parent="", node=Node("module", m, mdef),
                       text=arxml.short_name(m), image=self.app.icons.module if mdef else self.app.icons.unknown)
@@ -176,8 +180,8 @@ class ProjectTree(ttk.Frame):
         if not sel:
             return
         node = self.nodes.get(sel[0])
-        if node is not None and self.app.editor.node is not node:
-            self.app.show_node(node)
+        if node is not None and self.editor is not None and self.editor.node is not node:
+            self.editor.show_node(node)
 
     # ------------------------------------------------------------- navigation
     def select_element(self, el):
@@ -222,6 +226,15 @@ class ProjectTree(ttk.Frame):
             self._on_select()   # render synchronously so callers can select rows right away
             return True
         return False
+
+    def contains(self, el):
+        """True if *el* belongs to one of the modules shown in this tree."""
+        if self.modules is None:
+            return True
+        m = el
+        while m is not None and arxml.local(m) != MODULE_TAG:
+            m = m.getparent()
+        return m in self.modules
 
     def selected_node(self):
         sel = self.tv.selection()
@@ -280,12 +293,13 @@ class ProjectTree(ttk.Frame):
 
     # ---------------------------------------------------------------- search
     def search(self):
-        text = self.filter_var.get().strip().lower()
+        text = self.filter_entry.get_text().strip().lower()
         if not text:
             self.clear_search()
             return
         model = self.app.session.model
-        hits = [(p, el) for p, el in model.path_index.items() if text in p.rsplit("/", 1)[-1].lower()]
+        hits = [(p, el) for p, el in model.path_index.items() if text in p.rsplit("/", 1)[-1].lower()
+                and self.contains(el)]
         hits.sort(key=lambda x: x[0])
         self.clear()
         self.search_mode = True
@@ -302,7 +316,7 @@ class ProjectTree(ttk.Frame):
 
     def clear_search(self):
         if self.search_mode:
-            self.filter_var.set("")
+            self.filter_entry.set_text("")
             self.populate()
             self.set_marks(self.app.all_results())
 

@@ -94,6 +94,7 @@ class Def:
     lower: int = 0
     upper: float = 1  # math.inf for UPPER-MULTIPLICITY-INFINITE
     desc: str = ""
+    long_name: str = ""
     origin: str = ""
     default: str | None = None
     min: float | int | None = None
@@ -132,6 +133,11 @@ class Def:
     @property
     def value_tag(self) -> str | None:
         return VALUE_TAG.get(self.kind)
+
+    @property
+    def label(self) -> str:
+        """Display label like DaVinci's form editors (LONG-NAME if the BSWMD has one)."""
+        return self.long_name or self.name
 
     @property
     def mandatory(self) -> bool:
@@ -448,6 +454,8 @@ class DefinitionRepository:
     def _fill_common(self, d: Def, el):
         d.uuid = el.get("UUID")
         d.desc = _desc(el)
+        ln = el.find(q("LONG-NAME"))
+        d.long_name = " ".join("".join(x.itertext()).strip() for x in ln) if ln is not None else ""
         lo = text(el, "LOWER-MULTIPLICITY")
         d.lower = int(lo) if lo and lo.isdigit() else 0
         if (text(el, "UPPER-MULTIPLICITY-INFINITE") or "").lower() in ("true", "1"):

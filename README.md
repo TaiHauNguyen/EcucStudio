@@ -21,19 +21,24 @@ Kiểm tra thủ công: `py -m ecucstudio --check`. Lỗi khi khởi động/tro
 
 ## Giao diện
 
+Bố cục theo DaVinci Configurator 5 (icon tự vẽ, không dùng tài nguyên của Vector):
+
 | Vùng | Chức năng |
 |---|---|
-| Cây bên trái | Module → container, nhóm các container nhiều instance (`ComSignal [1034]`), ô tìm kiếm (Enter), menu chuột phải: thêm/đổi tên (F2)/nhân bản/xoá (Del) container |
-| Giữa | Thanh địa chỉ (breadcrumb) + **form** tham số của container (double-click/F2 để sửa, chuột phải: default, user-defined, thêm instance, xoá, tới đích reference) hoặc **grid** khi chọn nhóm |
-| Phải | Properties: Description / Definition (kiểu, multiplicity, range, literal, đơn vị, config class) / Status (derived, pre-configured, user-defined, annotation, lỗi) |
-| Dưới | **Validation** (nhóm theo ID, lọc Error/Warning/Info, nguồn Local/DaVinci/Plugins, Solve / Solve All, Acknowledge), **Console** (output DVCfgCmd), **Generation Result** |
+| **Configuration Editors** (trái) | `<Filter>`, các domain gập/mở (Base Services, Communication, Diagnostics, I/O, Memory, Microcontroller, Mode Management, Network Management, Runtime System, Security, Time Synchronization); link mở editor theo module hoặc cả domain; *Basic Editor*, *Project Settings* ở đáy |
+| **Editor area** (giữa, dạng tab) | Address line (breadcrumb) + trạng thái validation; cây ngữ cảnh có `<Filter>`; **form** tham số: nhãn (LONG-NAME nếu có) · ô nhập/combobox/checkbox · `dec`/đơn vị · ▾ menu (Set to default, Set/Remove user defined, Create/Delete parameter, Copy Path, Physical Units, Show target, Show properties) · biểu tượng lỗi. Chọn nhóm container (`ComIPdu [168]`) → **grid**. Section Sub-Containers có link *Add* |
+| **Properties** (dưới trái) | Tab dọc Description / Status (Derived Value, Preconfigured, Default, Changeable, User defined, Annotations, Path, File) / Definition |
+| **Validation · Find · Generation Result · Console** (dưới phải) | Validation: cột ID / Message, "N messages in M categories", nút Validate / DaVinci validation / Solve All và lọc Error/Warning/Info/Acknowledged trên thanh view; Find: tìm container, tên hoặc giá trị tham số; Generation Result: domain → generator → Generated Files |
+| **Generate** (Ctrl+G) | Wizard: cây Generation Step có checkbox theo domain, cột Calculation / Validation / Generation cập nhật trực tiếp trong lúc DaVinci chạy, *Properties >>* để chọn DVCfgCmd, target, SWC templates, `--saveProject` |
+| Status bar | Thông báo, tiến trình, số lỗi/cảnh báo, configuration phase |
 
-Trạng thái tham số giống DaVinci: *not set* (xám), *default*, *derived* (từ input file — sửa sẽ hỏi
-đặt User-Defined), *pre-configured* (khoá), *user-defined*, *calculated* (IS-AUTO-VALUE). Đơn vị
-hiển thị theo `DV:Unit` (vd ms) nhưng lưu theo `DV:BaseUnit` (vd s).
+Trạng thái tham số giống DaVinci: nhãn xám = *not set* hoặc read-only; icon khoá = *pre-configured*;
+icon mắt xích = *derived* (sửa bằng *Set user defined*); icon người = *user defined*. Đơn vị hiển thị theo
+`DV:Unit` (đổi bằng ▾ › Physical Units), luôn lưu theo `DV:BaseUnit`. Nút □ trên mỗi view để phóng to/thu nhỏ.
 
-Phím tắt: Ctrl+O mở, Ctrl+S lưu, Ctrl+Z/Ctrl+Y undo/redo, F5 validate, Ctrl+G generate,
-Ctrl+F tìm, Ctrl+L đi tới đường dẫn (nhận cả dạng `/ActiveEcuC/Com/ComGeneral[0:ComX]`).
+Phím tắt: Ctrl+O mở, Ctrl+S lưu, Ctrl+Z/Ctrl+Y undo/redo, Alt+←/→ editor trước/sau, F5 validate,
+Ctrl+G generate, Ctrl+F Find, Ctrl+L đi tới đường dẫn (nhận cả `/ActiveEcuC/Com/ComGeneral[0:ComX]`),
+F2 đổi tên, Del xoá container.
 
 ## Validation
 
