@@ -567,10 +567,17 @@ class EcucModel:
             i += 1
         return f"{base}_{i:03d}"
 
-    def add_container(self, parent, cdef, name: str | None = None, with_defaults=True, record=True):
-        """Create a container instance of *cdef* below *parent* (module or container)."""
+    def add_container(self, parent, cdef, name: str | None = None, with_defaults=True, record=True,
+                      prepare=None):
+        """Create a container instance of *cdef* below *parent* (module or container).
+
+        *prepare(el)* may complete the new element before it is inserted (recommended /
+        pre-configuration values), so the whole creation is a single undo step.
+        """
         name = name or self.unique_name(parent, cdef.name)
         el = self._build_container(cdef, name, with_defaults)
+        if prepare is not None:
+            prepare(el)
         grp_name = "CONTAINERS" if arxml.local(parent) == MODULE_TAG else "SUB-CONTAINERS"
 
         def group():
@@ -611,8 +618,8 @@ class EcucModel:
         for c in cdef.children:
             if c.is_container:
                 if c.lower >= 1 and cdef.kind != "choice":
-                    for _ in range(c.lower):
-                        subs.append(self._build_container(c, c.name, True))
+                    for i in range(c.lower):
+                        subs.append(self._build_container(c, c.name if i == 0 else f"{c.name}_{i:03d}", True))
             elif c.lower >= 1:
                 if c.is_ref:
                     continue  # target is unknown; validation will ask for it
@@ -633,6 +640,129 @@ class EcucModel:
             for s in subs:
                 g.append(s)
         return el
+
+    # ------------------------------------------------------------ editing: modules
+    def value_collection(self):
+        """(ECUC-VALUE-COLLECTION element or None, XmlFile, AR-PACKAGE element) that receives new modules."""
+        for xf in self.files.values():
+            for c in xf.root.iter(q("ECUC-VALUE-COLLECTION")):
+                pkg = c.getparent().getparent()
+                return c, xf, pkg
+        if self.modules:
+            m = self.modules[0]
+            return None, self.module_file[m], m.getparent().getparent()
+        return None, None, None
+
+    def module_by_name(self, name):
+        for m in self.modules:
+            if arxml.short_name(m) == name:
+                return m
+        return None
+
+    def add_module(self, mod_el, record=True):
+        """Insert a new ECUC-MODULE-CONFIGURATION-VALUES and list it in the value collection."""
+        coll, xf, pkg = self.value_collection()
+        if pkg is None:
+            raise ValueError("No ECUC file to add the module to")
+        elements = pkg.find(q("ELEMENTS"))
+        if elements is None:
+            elements = arxml.make("ELEMENTS")
+            arxml.insert_child(pkg, elements)
+        pkg_path = arxml.ar_path(pkg)
+        mpath = pkg_path + "/" + arxml.short_name(mod_el)
+        ref_cond = None
+        if coll is not None:
+            vals = coll.find(q("ECUC-VALUES"))
+            if vals is None:
+                vals = arxml.make("ECUC-VALUES")
+                arxml.insert_child(coll, vals)
+            ref_cond = arxml.make("ECUC-MODULE-CONFIGURATION-VALUES-REF-CONDITIONAL")
+            arxml.sub(ref_cond, "ECUC-MODULE-CONFIGURATION-VALUES-REF", mpath,
+                      {"DEST": "ECUC-MODULE-CONFIGURATION-VALUES"})
+
+        def attach():
+            arxml.insert_child(elements, mod_el)
+            if ref_cond is not None:
+                arxml.insert_child(coll.find(q("ECUC-VALUES")), ref_cond)
+                self.active_modules.add(mpath)
+            self.modules.append(mod_el)
+            self.modules.sort(key=lambda m: (arxml.short_name(m) or "").lower())
+            self.module_file[mod_el] = xf
+            self.path_index[mpath] = mod_el
+            self.def_index.setdefault(definition_ref(mod_el), []).append(mod_el)
+            self._index_subtree(mod_el, True, pkg_path)
+            self._touch(mod_el, "added")
+
+        def detach():
+            self._index_subtree(mod_el, False, pkg_path)
+            self.path_index.pop(mpath, None)
+            lst = self.def_index.get(definition_ref(mod_el))
+            if lst and mod_el in lst:
+                lst.remove(mod_el)
+            if mod_el in self.modules:
+                self.modules.remove(mod_el)
+            self.module_file.pop(mod_el, None)
+            self._detach(mod_el)
+            if ref_cond is not None and ref_cond.getparent() is not None:
+                self._detach(ref_cond)
+                self.active_modules.discard(mpath)
+            xf.dirty = True
+            self._touch(pkg, "removed")
+
+        attach()
+        if record:
+            self._record(detach, attach, f"Add module {arxml.short_name(mod_el)}")
+        return mod_el
+
+    def remove_module(self, mod_el):
+        coll, _xf, _pkg = self.value_collection()
+        mpath = self.path_of(mod_el)
+        pkg = mod_el.getparent().getparent()
+        pkg_path = arxml.ar_path(pkg)
+        xf = self.module_file.get(mod_el) or self.file_of(mod_el)
+        ref_cond = None
+        if coll is not None:
+            for r in coll.iter(q("ECUC-MODULE-CONFIGURATION-VALUES-REF")):
+                if r.text and r.text.strip() == mpath:
+                    ref_cond = r.getparent()
+                    break
+        state = {}
+
+        def detach():
+            self._index_subtree(mod_el, False, pkg_path)
+            self.path_index.pop(mpath, None)
+            lst = self.def_index.get(definition_ref(mod_el))
+            if lst and mod_el in lst:
+                lst.remove(mod_el)
+            if mod_el in self.modules:
+                self.modules.remove(mod_el)
+            self.module_file.pop(mod_el, None)
+            state["mod"] = self._detach(mod_el)
+            if ref_cond is not None:
+                state["ref"] = self._detach(ref_cond)
+            self.active_modules.discard(mpath)
+            xf.dirty = True
+            self._ref_index = None
+            for fn in list(self.listeners):
+                fn("removed", pkg)
+
+        def attach():
+            parent, idx = state["mod"]
+            arxml.insert_child(parent, mod_el, idx)
+            if "ref" in state:
+                rp, ri = state["ref"]
+                arxml.insert_child(rp, ref_cond, ri)
+                self.active_modules.add(mpath)
+            self.modules.append(mod_el)
+            self.modules.sort(key=lambda m: (arxml.short_name(m) or "").lower())
+            self.module_file[mod_el] = xf
+            self.path_index[mpath] = mod_el
+            self.def_index.setdefault(definition_ref(mod_el), []).append(mod_el)
+            self._index_subtree(mod_el, True, pkg_path)
+            self._touch(mod_el, "added")
+
+        detach()
+        self._record(attach, detach, f"Remove module {arxml.short_name(mod_el)}")
 
     def rename_container(self, el, new_name: str):
         """Rename a container and update every reference that points into it."""

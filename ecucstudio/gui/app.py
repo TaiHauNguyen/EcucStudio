@@ -18,7 +18,7 @@ from ..session import Session
 from ..settings import Settings
 from ..validation import Severity
 from .console import ConsoleView, FindView, GenerationView
-from .dialogs import AddContainerDialog, GenerateDialog, OpenFilesDialog, SettingsDialog
+from .dialogs import AddContainerDialog, GenerateDialog, ModulesDialog, OpenFilesDialog, SettingsDialog
 from .editor import BasicEditor
 from .navigator import NavigatorView
 from .properties import PropertiesPanel
@@ -103,6 +103,7 @@ class App(tk.Tk):
                       command=self.generate)
         p.add_command(label="Open in DaVinci Configurator", command=self.open_in_davinci)
         p.add_separator()
+        p.add_command(label="Modules…", image=ic.module, compound="left", command=self.modules_dialog)
         p.add_command(label="Project Settings…", image=ic.settings, compound="left", command=self.settings_dialog)
         mb.add_cascade(label="Project", menu=p)
         h = tk.Menu(mb, tearoff=False)
@@ -465,9 +466,25 @@ class App(tk.Tk):
             self.open_editor(None)
             self.status(f"Loaded {len(s.model.modules)} modules, {len(s.model.path_index)} containers, "
                         f"{len(s.defs.module_index)} module definitions in {s.load_time:.1f} s")
+            if s.project is not None and not s.defs.files:
+                self._ask_sip_folder()
+                return
             if self.cfg.get("validate_on_load", True):
                 self.validate()
         self.run_bg(lambda pr: work(pr), done, "Loading project…")
+
+    def _ask_sip_folder(self):
+        s = self.session
+        if not messagebox.askyesno(
+                APP_NAME, f"No module definitions (BSWMD) were found for this project.\n\nSIP folder from the "
+                          f".dpa: {s.project.sip_dir}\n\nWithout the SIP you can only edit existing values. "
+                          f"Select the SIP folder (the folder that contains 'Components' and "
+                          f"'DaVinciConfigurator') now?"):
+            return
+        d = filedialog.askdirectory(title="SIP folder (contains Components\\<Module>\\BSWMD)")
+        if d:
+            s.set_sip_override(s.project.path, os.path.normpath(d))
+            self.open_project(s.project.path)
 
     def reload(self):
         if self.session.project:
@@ -647,6 +664,13 @@ class App(tk.Tk):
         if node.kind == "group":
             m.add_command(label=f"Create {node.cdef.label}…", image=ic.add, compound="left",
                           command=lambda: self.add_container_dialog(node.el, node.cdef))
+        if node.kind in ("module", "container") and node.cdef is not None:
+            m.add_command(label="Create Missing Mandatory Elements", image=ic.add, compound="left",
+                          command=lambda: self.complete_element(node.el))
+        if node.kind == "module":
+            m.add_separator()
+            m.add_command(label="Remove Module…", image=ic.delete, compound="left",
+                          command=lambda: self.remove_module(node.el))
         if node.kind == "container":
             m.add_command(label="Rename…  (F2)", command=lambda: self.rename_container(node.el))
             m.add_command(label="Duplicate", image=ic.copy, compound="left",
@@ -662,6 +686,28 @@ class App(tk.Tk):
                                                                self.clipboard_append(s.model.path_of(node.el))))
         m.tk_popup(x, y)
 
+    def complete_element(self, el):
+        from ..configure import complete_container
+        cdef = self.session.container_def(el)[0]
+        if cdef is None:
+            return
+        n = complete_container(self.session, el, cdef)
+        self.after_edit(el, f"Created {n} mandatory element(s)" if n else "Nothing missing", structure=bool(n))
+
+    def remove_module(self, el):
+        s = self.session
+        name = arxml.short_name(el)
+        mp = s.model.path_of(el)
+        refs = sum(len(v) for k, v in s.model.ref_index().items()
+                   if (k == mp or k.startswith(mp + "/")) and s.model.module_of(v[0]) is not el)
+        msg = f"Remove the module configuration {name}?"
+        if refs:
+            msg += f"\n\n{refs} reference(s) from other modules point into it and will become dangling."
+        if not messagebox.askyesno(APP_NAME, msg):
+            return
+        s.model.remove_module(el)
+        self.modules_changed(f"Removed module {name} (Ctrl+Z to undo)")
+
     def add_container_dialog(self, parent_el, cdef=None):
         if self.busy:
             return
@@ -676,16 +722,16 @@ class App(tk.Tk):
         r = AddContainerDialog(self, self, parent_el, cdefs, cdef).run()
         if not r:
             return
-        cd, name, count, defaults = r
+        cd, name, count, defaults, recommended = r
         existing = len([e for e in container_children(parent_el) if definition_ref(e) == cd.path])
         if existing + count > cd.upper:
             if not messagebox.askyesno(APP_NAME, f"{cd.name} allows at most {cd.multiplicity_str()} instances. "
                                                  f"Add anyway (validation will report AR-ECUC02008)?"):
                 return
-        last = None
-        for i in range(count):
-            nm = name if i == 0 else s.model.unique_name(parent_el, name)
-            last = s.model.add_container(parent_el, cd, nm, with_defaults=defaults)
+        from ..configure import create_container
+        created = create_container(s, parent_el, cd, name, count, with_defaults=defaults,
+                                   apply_recommended=recommended)
+        last = created[-1] if created else None
         self.after_edit(parent_el, f"Added {count} × {cd.name}", structure=True)
         if last is not None:
             ed = self.current_editor()
@@ -954,8 +1000,24 @@ class App(tk.Tk):
         self.status("DaVinci Configurator started — reload here after saving in DaVinci")
 
     def settings_dialog(self):
-        if SettingsDialog(self, self).run():
+        r = SettingsDialog(self, self).run()
+        if r == "reload" and self.session.project is not None:
+            self.status("Definition folders changed — reloading the project")
+            self.reload()
+        elif r:
             self.status("Settings saved")
+
+    def modules_dialog(self):
+        if self.session.model is None or self.busy:
+            return
+        ModulesDialog(self, self).run()
+
+    def modules_changed(self, msg):
+        for ed in self._editors():
+            ed.populate()
+        self.nav.rebuild()
+        self.update_title()
+        self.status(msg)
 
 
 def main(dpa=None):

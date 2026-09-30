@@ -32,8 +32,9 @@ class Session:
         step = progress or (lambda msg, frac=None: None)
         step("Reading project file", 0.02)
         self.project = read_dpa(dpa)
-        self._load(self.project.sip_dir, self.project.add_bswmds, self.project.ecuc_files(),
-                   self.project.initial_ecuc, step)
+        sip = self.sip_override(dpa) or self.project.sip_dir
+        extra = list(self.project.add_bswmds) + [d for d in self.cfg.get("extra_bswmd", []) if d]
+        self._load(sip, extra, self.project.ecuc_files(), self.project.initial_ecuc, step)
         self.load_time = time.time() - t
         return self
 
@@ -58,7 +59,7 @@ class Session:
         step("Loading AUTOSAR standard definitions (fallback)", 0.88)
         from .fallback import FallbackDefinitions, standard_definition_dirs
         self.fallback = FallbackDefinitions(self.defs, self.model,
-                                            standard_definition_dirs(sip_dir, self.cfg.get("dvcfgcmd")),
+                                            self._std_dirs(sip_dir),
                                             cache_dir=settings_mod.CACHE_DIR)
         step("Preparing module definitions", 0.9)
         for m in self.model.modules:
@@ -66,6 +67,31 @@ class Session:
             self.defs.module(definition_ref(m))
         self.validator = default_validator(self.plugin_dirs())
         step("Ready", 1.0)
+
+    # --------------------------------------------------- definition locations
+    def sip_override(self, dpa):
+        """SIP folder chosen by the user for this project (the .dpa's relative SIP path may not exist
+        on another machine)."""
+        o = self.cfg.get("sip_override", {}).get(os.path.normcase(os.path.abspath(dpa)))
+        return o if o and os.path.isdir(o) else None
+
+    def set_sip_override(self, dpa, folder):
+        self.cfg.setdefault("sip_override", {})[os.path.normcase(os.path.abspath(dpa))] = folder
+        self.cfg.save()
+
+    def _std_dirs(self, sip_dir):
+        from .fallback import standard_definition_dirs
+        dirs = standard_definition_dirs(sip_dir, self.cfg.get("dvcfgcmd"))
+        extra = self.cfg.get("std_def_dir")
+        if extra and os.path.isdir(extra) and extra not in dirs:
+            dirs.insert(0, extra)
+        return dirs
+
+    def definition_status(self):
+        """Short text about where definitions come from (shown when a project is opened)."""
+        d = self.defs
+        return (f"SIP: {d.sip_dir or '-'} — {len(d.files)} BSWMD files, {len(d.module_index)} module definitions; "
+                f"standard definitions: {'yes' if getattr(self, 'fallback', None) and self.fallback.std else 'no'}")
 
     def plugin_dirs(self):
         dirs = [BUILTIN_RULES] + list(self.cfg.get("plugin_dirs", []))

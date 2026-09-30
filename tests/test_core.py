@@ -16,7 +16,8 @@ sys.path.insert(0, os.path.dirname(HERE))
 
 from ecucstudio import arxml  # noqa: E402
 from ecucstudio.bswmd import DefinitionRepository  # noqa: E402
-from ecucstudio.project import EcucModel, raw_value, read_dpa, value_elements, parse_object_ref  # noqa: E402
+from ecucstudio.project import (EcucModel, definition_ref, raw_value, read_dpa, value_elements,  # noqa: E402
+                                parse_object_ref)
 from ecucstudio.validation import ValidationContext, default_validator  # noqa: E402
 
 DPA = os.environ.get("ECUCSTUDIO_TEST_DPA", "")
@@ -198,6 +199,42 @@ class CoreTests(unittest.TestCase):
             m.index[base].children[:] = saved[0]
             m.index.clear()
             m.index.update(saved[1])
+
+    def test_add_and_remove_module(self):
+        """Project Settings > Modules: new module from BSWMD with rec/pre configuration, undoable."""
+        from ecucstudio import configure
+        mdef = self.defs.module("/MICROSAR/vSecPrim")
+        el = configure.build_module(self.model, self.defs, mdef)
+        self.model.add_module(el)
+        path = self.model.path_of(el)
+        self.assertEqual(path, "/ActiveEcuC/vSecPrim")
+        self.assertIs(self.model.resolve(path), el)
+        self.assertIn(path, self.model.active_modules)
+        self.assertEqual(arxml.text(el, "MODULE-DESCRIPTION-REF"), mdef.impl.path)
+        coll, _xf, _pkg = self.model.value_collection()
+        self.assertIn(path, [r.text for r in coll.iter(arxml.q("ECUC-MODULE-CONFIGURATION-VALUES-REF"))])
+        self.assertEqual([r.rule_id for r in self.validate("vSecPrim") if r.severity >= 3], [])
+        self.model.remove_module(el)
+        self.assertIsNone(self.model.resolve(path))
+        self.assertNotIn(path, [r.text for r in coll.iter(arxml.q("ECUC-MODULE-CONFIGURATION-VALUES-REF"))])
+        self.model.undo()
+        self.assertIs(self.model.resolve(path), el)
+        saved = self.model.save(backup=False)
+        m2 = EcucModel().load(self.files)
+        self.assertIsNotNone(m2.resolve(path))
+
+    def test_create_container_assigns_free_handle_id(self):
+        from ecucstudio import configure
+        from ecucstudio.session import Session
+        sess = Session.__new__(Session)
+        sess.model, sess.defs = self.model, self.defs
+        cdef = self.pdef("/MICROSAR/Com/ComConfig/ComIPduGroup")
+        used = {raw_value(v) for g in self.model.containers_of_def(cdef.path)
+                for v in value_elements(g) if definition_ref(v).endswith("ComIPduGroupHandleId")}
+        el = configure.create_container(sess, self.cont("/ActiveEcuC/Com/ComConfig"), cdef, "NewGrp")[0]
+        hid = [raw_value(v) for v in value_elements(el) if definition_ref(v).endswith("ComIPduGroupHandleId")]
+        self.assertEqual(len(hid), 1)
+        self.assertNotIn(hid[0], used)
 
     def test_parse_object_ref(self):
         self.assertEqual(parse_object_ref("/ActiveEcuC/Com/ComGeneral[0:ComSupportedIPduGroups](value=14)"),

@@ -79,6 +79,16 @@ def _run_gui(dpa):
     return 0
 
 
+def _dvcfgcmd_candidates(a):
+    """--dvcfgcmd first, then the path chosen in the GUI (Project Settings)."""
+    from .settings import Settings
+    out = [a.dvcfgcmd] if getattr(a, "dvcfgcmd", None) else []
+    cfg = Settings().get("dvcfgcmd")
+    if cfg:
+        out.append(cfg)
+    return out
+
+
 def _session(dpa):
     from .session import Session
     t = time.time()
@@ -162,7 +172,7 @@ def cmd_validate(a):
     print(f"Local validation: {len(res)} result(s) in {time.time() - t:.1f} s")
     if a.davinci:
         from . import davinci
-        inst = davinci.find_installations(s.project.sip_dir, [a.dvcfgcmd] if a.dvcfgcmd else [])
+        inst = davinci.find_installations(s.project.sip_dir, _dvcfgcmd_candidates(a))
         if not inst:
             print("DVCfgCmd.exe not found", file=sys.stderr)
             return 2
@@ -212,7 +222,7 @@ def cmd_generate(a):
     from . import davinci
     from .project import read_dpa
     p = read_dpa(a.project)
-    inst = davinci.find_installations(p.sip_dir, [a.dvcfgcmd] if a.dvcfgcmd else [])
+    inst = davinci.find_installations(p.sip_dir, _dvcfgcmd_candidates(a))
     if not inst:
         print("DVCfgCmd.exe not found", file=sys.stderr)
         return 2

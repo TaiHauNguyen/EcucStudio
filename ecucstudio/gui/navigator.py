@@ -47,6 +47,7 @@ class NavigatorView(tk.Frame):
         tk.Frame(bottom, height=1, background="#d0d7e2").pack(fill="x", pady=(0, 4))
         LinkLabel(bottom, "Basic Editor", lambda: app.open_editor(None), image=app.icons.basic).pack(
             anchor="w", padx=8)
+        LinkLabel(bottom, "Modules", app.modules_dialog, image=app.icons.module).pack(anchor="w", padx=8, pady=(2, 0))
         LinkLabel(bottom, "Project Settings", app.settings_dialog, image=app.icons.settings).pack(
             anchor="w", padx=8, pady=(2, 0))
 

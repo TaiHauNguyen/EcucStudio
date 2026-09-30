@@ -374,8 +374,34 @@ class SettingsDialog(_Dialog):
                 e.configure(state="readonly")
                 e.grid(row=i, column=1, sticky="ew", pady=1)
             info.columnconfigure(1, weight=1)
+        # definition locations (a project copied to another machine may point to a missing SIP)
+        dfr = ttk.LabelFrame(b, text="Definitions (BSWMD)", padding=6)
+        dfr.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        s = app.session
+        self.sip = tk.StringVar(value=(s.sip_override(s.project.path) or "") if s.project else "")
+        self.extra_bswmd = tk.StringVar(value=";".join(app.cfg.get("extra_bswmd", [])))
+        self.std_dir = tk.StringVar(value=app.cfg.get("std_def_dir", ""))
+        rows = (("SIP folder for this project\n(empty = as in the .dpa):", self.sip),
+                ("Extra BSWMD folders (;):", self.extra_bswmd),
+                ("AUTOSAR StandardDefinition folder:", self.std_dir))
+        for i, (lbl, var) in enumerate(rows):
+            ttk.Label(dfr, text=lbl).grid(row=i, column=0, sticky="w", pady=2)
+            ttk.Entry(dfr, textvariable=var, width=80).grid(row=i, column=1, sticky="ew", pady=2)
+            ttk.Button(dfr, text="…", width=3, command=lambda v=var: self._pick_dir(v)).grid(row=i, column=2, padx=2)
+        if s.defs is not None:
+            ttk.Label(dfr, text=s.definition_status(), foreground="#555", wraplength=760).grid(
+                row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        dfr.columnconfigure(1, weight=1)
         b.columnconfigure(1, weight=1)
         self.buttons("OK")
+
+    def _pick_dir(self, var):
+        d = filedialog.askdirectory(parent=self)
+        if not d:
+            return
+        d = os.path.normpath(d)
+        cur = var.get().strip()
+        var.set(cur + ";" + d if (var is self.extra_bswmd and cur) else d)
 
     def ok(self):
         c = self.app.cfg
@@ -383,8 +409,18 @@ class SettingsDialog(_Dialog):
         c["plugin_dirs"] = [l.strip() for l in self.rules.get("1.0", "end").splitlines() if l.strip()]
         c["backup_on_save"] = self.backup.get()
         c["validate_on_load"] = self.val_load.get()
+        old_defs = (c.get("extra_bswmd", []), c.get("std_def_dir", ""))
+        c["extra_bswmd"] = [x.strip() for x in self.extra_bswmd.get().split(";") if x.strip()]
+        c["std_def_dir"] = self.std_dir.get().strip()
+        reload = old_defs != (c["extra_bswmd"], c["std_def_dir"])
+        s = self.app.session
+        if s.project:
+            new = self.sip.get().strip()
+            if new != (s.sip_override(s.project.path) or ""):
+                c.setdefault("sip_override", {})[os.path.normcase(os.path.abspath(s.project.path))] = new
+                reload = True
         c.save()
-        self.result = True
+        self.result = "reload" if reload else True
         self.destroy()
 
 
@@ -413,6 +449,9 @@ class AddContainerDialog(_Dialog):
         self.defaults = tk.BooleanVar(value=True)
         ttk.Checkbutton(b, text="Create mandatory sub-containers and parameters with default values",
                         variable=self.defaults).grid(row=3, column=1, sticky="w")
+        self.recommended = tk.BooleanVar(value=True)
+        ttk.Checkbutton(b, text="Apply the recommended configuration of the SIP (like DaVinci)",
+                        variable=self.recommended).grid(row=4, column=1, sticky="w")
         self.parent_el = parent_el
         self._suggest_name()
         e.focus_set()
@@ -431,7 +470,7 @@ class AddContainerDialog(_Dialog):
         if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]{0,127}$", name):
             messagebox.showerror("Add container", "Invalid short name", parent=self)
             return
-        self.result = (self._cdef(), name, max(1, self.count.get()), self.defaults.get())
+        self.result = (self._cdef(), name, max(1, self.count.get()), self.defaults.get(), self.recommended.get())
         self.destroy()
 
 
@@ -473,3 +512,150 @@ class OpenFilesDialog(_Dialog):
         self.app.cfg["last_sip"] = self.sip.get()
         self.result = (files, self.sip.get(), [self.extra.get()] if self.extra.get() else [])
         self.destroy()
+
+
+class ModulesDialog(_Dialog):
+    """Project Settings › Modules: add module configurations from the SIP's BSWMD or remove them."""
+
+    def __init__(self, master, app):
+        super().__init__(master, "Modules", "Modules",
+                         "Activate BSW modules for this project. A new module configuration is created from its "
+                         "BSWMD with the mandatory containers, default values and the SIP's recommended and "
+                         "pre-configuration — like DaVinci's Project Settings › Modules.", app.icons.module)
+        self.app = app
+        b = self.body
+        cols = ttk.Frame(b)
+        cols.pack(fill="both", expand=True)
+        left = ttk.LabelFrame(cols, text="Configured modules", padding=4)
+        left.pack(side="left", fill="both", expand=True)
+        mid = ttk.Frame(cols, padding=6)
+        mid.pack(side="left", fill="y")
+        right = ttk.LabelFrame(cols, text="Available module definitions (SIP / BSWMD)", padding=4)
+        right.pack(side="left", fill="both", expand=True)
+
+        self.cur = ttk.Treeview(left, columns=("def", "variant"), height=18, selectmode="extended")
+        for c, t, w in (("#0", "Module", 140), ("def", "Definition", 230), ("variant", "Variant", 150)):
+            self.cur.heading(c, text=t, anchor="w")
+            self.cur.column(c, width=w)
+        self.cur.pack(fill="both", expand=True)
+        self.avail = ttk.Treeview(right, columns=("impl",), height=18, selectmode="extended")
+        for c, t, w in (("#0", "Definition", 280), ("impl", "BSW implementation", 220)):
+            self.avail.heading(c, text=t, anchor="w")
+            self.avail.column(c, width=w)
+        self.avail.pack(fill="both", expand=True)
+        self.avail.bind("<Double-1>", lambda e: self.add())
+        ttk.Button(mid, text="◀  Add", width=12, command=self.add).pack(pady=(80, 4))
+        ttk.Button(mid, text="Remove  ▶", width=12, command=self.remove).pack(pady=4)
+
+        opt = ttk.Frame(b)
+        opt.pack(fill="x", pady=(8, 0))
+        ttk.Label(opt, text="Short name:").pack(side="left")
+        self.name = tk.StringVar()
+        ttk.Entry(opt, textvariable=self.name, width=24).pack(side="left", padx=4)
+        ttk.Label(opt, text="Configuration variant:").pack(side="left", padx=(12, 0))
+        self.variant = tk.StringVar()
+        self.var_cb = ttk.Combobox(opt, textvariable=self.variant, width=30, state="readonly")
+        self.var_cb.pack(side="left", padx=4)
+        self.templates = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt, text="Apply recommended / pre-configuration", variable=self.templates).pack(
+            side="left", padx=12)
+        self.avail.bind("<<TreeviewSelect>>", lambda e: self._on_avail())
+        self.info = ttk.Label(b, text="", foreground="#555")
+        self.info.pack(fill="x", pady=(4, 0))
+        self.buttons("Close")
+        self.ok_btn.pack_forget()
+        self.cancel_btn.configure(text="Close")
+        self.geometry("1100x640")
+        self.refresh()
+
+    def refresh(self):
+        s = self.app.session
+        self.cur.delete(*self.cur.get_children(""))
+        self.avail.delete(*self.avail.get_children(""))
+        used = {}
+        for m in s.model.modules:
+            d = definition_ref(m)
+            used[d] = used.get(d, 0) + 1
+            self.cur.insert("", "end", iid=f"m{id(m)}", text=arxml.short_name(m), image=self.app.icons.module,
+                            values=(d, arxml.text(m, "IMPLEMENTATION-CONFIG-VARIANT", "")))
+        self._mods = {f"m{id(m)}": m for m in s.model.modules}
+        groups = {}
+        order = [d for d, _ in DOMAINS] + ["Other"]
+        paths = sorted(s.defs.module_paths(), key=lambda p: (order.index(domain_of(p.rsplit("/", 1)[-1])),
+                                                             p.lower()))
+        self._defs = {}
+        n = 0
+        for p in paths:
+            mdef_upper = None
+            try:
+                mdef = s.defs.module(p)
+                mdef_upper = mdef.upper if mdef is not None else 1
+            except Exception:
+                mdef = None
+            if mdef is None or (used.get(p, 0) >= (mdef_upper or 1)):
+                continue
+            dom = domain_of(p.rsplit("/", 1)[-1])
+            if dom not in groups:
+                groups[dom] = self.avail.insert("", "end", text=dom, open=True)
+            iid = self.avail.insert(groups[dom], "end", text=p, image=self.app.icons.module,
+                                    values=(mdef.impl.path if mdef.impl else "(no BSW implementation)",))
+            self._defs[iid] = mdef
+            n += 1
+        self.info.configure(text=f"{len(s.model.modules)} configured, {n} more module definitions available in "
+                                 f"{s.defs.sip_dir or 'the loaded BSWMD folders'}")
+
+    def _on_avail(self):
+        sel = [i for i in self.avail.selection() if i in self._defs]
+        if not sel:
+            return
+        mdef = self._defs[sel[0]]
+        self.name.set(mdef.name)
+        from ..configure import default_variant
+        vals = mdef.supported_variants or ["VARIANT-PRE-COMPILE"]
+        self.var_cb.configure(values=vals)
+        self.variant.set(default_variant(mdef))
+
+    def add(self):
+        from ..configure import build_module
+        s = self.app.session
+        sel = [i for i in self.avail.selection() if i in self._defs]
+        if not sel:
+            return
+        added = []
+        for iid in sel:
+            mdef = self._defs[iid]
+            name = self.name.get().strip() if len(sel) == 1 and self.name.get().strip() else mdef.name
+            if s.model.module_by_name(name) is not None:
+                messagebox.showerror("Modules", f"A module named '{name}' already exists.", parent=self)
+                continue
+            if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]{0,127}$", name):
+                messagebox.showerror("Modules", "Invalid short name", parent=self)
+                continue
+            variant = self.variant.get() if len(sel) == 1 and self.variant.get() else None
+            el = build_module(s.model, s.defs, mdef, name, variant, apply_templates=self.templates.get())
+            s.model.add_module(el)
+            added.append(name)
+        if added:
+            self.app.modules_changed(f"Added module(s): {', '.join(added)}")
+            self.refresh()
+
+    def remove(self):
+        s = self.app.session
+        mods = [self._mods[i] for i in self.cur.selection() if i in self._mods]
+        if not mods:
+            return
+        names = ", ".join(arxml.short_name(m) for m in mods)
+        refs = 0
+        for m in mods:
+            mp = s.model.path_of(m)
+            refs += sum(len(v) for k, v in s.model.ref_index().items()
+                        if (k == mp or k.startswith(mp + "/")) and s.model.module_of(v[0]) is not m)
+        msg = f"Remove the module configuration(s) {names}?"
+        if refs:
+            msg += f"\n\n{refs} reference(s) from other modules point into them and will become dangling."
+        if not messagebox.askyesno("Modules", msg, parent=self):
+            return
+        for m in mods:
+            s.model.remove_module(m)
+        self.app.modules_changed(f"Removed module(s): {names}")
+        self.refresh()

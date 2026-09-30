@@ -40,6 +40,26 @@ Phím tắt: Ctrl+O mở, Ctrl+S lưu, Ctrl+Z/Ctrl+Y undo/redo, Alt+←/→ edit
 Ctrl+G generate, Ctrl+F Find, Ctrl+L đi tới đường dẫn (nhận cả `/ActiveEcuC/Com/ComGeneral[0:ComX]`),
 F2 đổi tên, Del xoá container.
 
+### Tạo cấu hình như DaVinci
+
+| Việc | Cách làm | Tool làm gì |
+|---|---|---|
+| Thêm / bỏ module | *Project › Modules…* (hoặc link *Modules* trong Configuration Editors); bỏ: chuột phải module › *Remove Module* | Tạo `ECUC-MODULE-CONFIGURATION-VALUES` từ BSWMD: `DEFINITION-REF`, variant, `MODULE-DESCRIPTION-REF` (BSW implementation), container bắt buộc + default, áp **recommended** (`<Mod>_Rec`) rồi **pre-configuration** (`<Mod>_Pre`) của SIP; thêm vào `ECUC-VALUE-COLLECTION` của file ECUC chính |
+| Thêm container | Chuột phải › *Create Sub-Container*, link *Add* ở Sub-Containers, nút + ở grid | Default + recommended configuration; tham số handle ID (symbolic name value) nhận **ID còn trống** kế tiếp |
+| Thêm tham số | Gõ vào ô của tham số chưa đặt, hoặc ▾ › *Create parameter* (tham số nhiều instance) | Tạo value đúng thứ tự định nghĩa |
+| Tạo phần bắt buộc còn thiếu | Chuột phải module/container › *Create Missing Mandatory Elements* | Tạo tham số bắt buộc (có default) và sub-container bắt buộc |
+
+Tất cả đều Undo/Redo được. Đã kiểm chứng: module/container tạo bằng tool → lưu → `DVCfgCmd -g` sinh code
+(vd `#define ComConf_ComIPduGroup_<Tên> 14u` trong `Com_Cfg.h`, `vSecPrim_Cfg.h`). Lỗi cấu hình thật (vd module
+rỗng như `IpduM` không có PDU, `Rtm` cần bật measurement trong RTE) vẫn do người cấu hình quyết định — DaVinci
+báo chúng khi validate.
+
+### Mở project trên máy khác
+
+Nếu đường dẫn SIP trong `.dpa` (thường `..\Core`) không tồn tại, tool hỏi thư mục SIP khi mở project.
+Có thể đặt/đổi ở *Project › Project Settings › Definitions*: thư mục SIP riêng cho project, thư mục BSWMD bổ
+sung, thư mục `StandardDefinition`. Không có SIP thì chỉ sửa được các giá trị đã có sẵn.
+
 ### Khi SIP thiếu định nghĩa (BSWMD)
 
 Mọi module/container vẫn xem và sửa được, theo thứ tự nguồn định nghĩa:

@@ -58,4 +58,23 @@ class OsTaskStackRule(Rule):
                                                         preferred=True)] if d else [])
 
 
-RULES = [ComTxPeriodRule(), OsTaskStackRule()]
+class ComUnusedIPduGroupRule(Rule):
+    """A ComIPduGroup that no ComIPdu references makes the MICROSAR Com generator fail
+    (COM90005, IndexOutOfBoundsException) — found while testing containers created by this tool."""
+    id = "EST10002"
+    title = "I-PDU group not referenced by any I-PDU"
+
+    def check(self, ctx):
+        refs = ctx.model.ref_index()
+        for c, path in containers(ctx, "/MICROSAR/Com/ComConfig/ComIPduGroup"):
+            users = [r for r in refs.get(path, []) if r.getparent() is not None]
+            if not users:
+                yield Result(self.id, Severity.ERROR, self.title,
+                             f"{path} is not referenced by any ComIPdu (ComIPduGroupRef). The Com generator "
+                             f"aborts with COM90005 for such groups — reference it from an I-PDU or delete it.",
+                             obj=path, element=c, definition="/MICROSAR/Com/ComConfig/ComIPduGroup",
+                             actions=[SolvingAction("Delete the I-PDU group",
+                                                    lambda c=c: ctx.model.delete_element(c))])
+
+
+RULES = [ComTxPeriodRule(), OsTaskStackRule(), ComUnusedIPduGroupRule()]
