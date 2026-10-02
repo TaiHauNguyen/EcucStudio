@@ -1,6 +1,7 @@
 @echo off
 rem ---------------------------------------------------------------------------
 rem EcucStudio launcher.   Usage: run.bat [project.dpa]
+rem                        run.bat gateway [gateway.json]   (CAN-Ethernet gateway generator)
 rem Checks Python and the required packages first and shows every problem in
 rem this window, then starts the GUI. Startup errors are also written to
 rem %LOCALAPPDATA%\EcucStudio\ecucstudio.log
@@ -32,14 +33,23 @@ if errorlevel 1 (
   if errorlevel 1 goto :fail
 )
 
-rem --- 3. start the GUI without a console window (pythonw), fall back to python
+rem --- 3. cantools is only needed by the CAN-Ethernet gateway generator: try to install, never block
+%PY% -c "import cantools" >nul 2>nul
+if errorlevel 1 (
+  echo Installing cantools for the CAN-Ethernet gateway generator ...
+  %PY% -m pip install "cantools>=39"
+)
+
+rem --- 4. start the GUI without a console window (pythonw), fall back to python
 set "PYW="
 where pyw >nul 2>nul && set "PYW=pyw -3"
 if not defined PYW (
   where pythonw >nul 2>nul && set "PYW=pythonw"
 )
 if not defined PYW set "PYW=%PY%"
-if "%~1"=="" (
+if /i "%~1"=="gateway" (
+  start "EcucStudio Gateway" %PYW% -m ecucstudio gateway gui %2
+) else if "%~1"=="" (
   start "EcucStudio" %PYW% -m ecucstudio gui
 ) else (
   start "EcucStudio" %PYW% -m ecucstudio gui "%~1"

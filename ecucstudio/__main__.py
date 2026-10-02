@@ -6,6 +6,7 @@
     python -m ecucstudio validate project.dpa [--modules Com,Det] [--json out.json] [--davinci]
     python -m ecucstudio set      project.dpa "/ActiveEcuC/Det/DetGeneral[0:DetEnableDet]" true [--save]
     python -m ecucstudio generate project.dpa [-m /MICROSAR/Det,/MICROSAR/Com] [--gen-type REAL]
+    python -m ecucstudio gateway  ...                  (CAN <-> Ethernet gateway generator, see --help)
 """
 from __future__ import annotations
 
@@ -53,6 +54,11 @@ def check_environment() -> int:
     except ImportError:
         print("[MISSING] lxml  ->  pip install -r requirements.txt")
         rc = max(rc, 1)
+    try:
+        import cantools
+        print(f"[OK]    cantools {cantools.__version__}")
+    except ImportError:
+        print("[OPTIONAL] cantools is missing (only the CAN-Ethernet gateway generator needs it)")
     return rc
 
 
@@ -247,6 +253,9 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "--check":
         return check_environment()
+    if argv and argv[0] == "gateway":
+        from .gateway.cli import main as gateway_main
+        return gateway_main(argv[1:])
     if not argv or argv[0].lower().endswith(".dpa") or argv[0] == "gui":
         if argv and argv[0] == "gui":
             argv = argv[1:]

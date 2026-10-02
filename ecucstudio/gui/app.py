@@ -106,6 +106,9 @@ class App(tk.Tk):
         p.add_command(label="Modules…", image=ic.module, compound="left", command=self.modules_dialog)
         p.add_command(label="Project Settings…", image=ic.settings, compound="left", command=self.settings_dialog)
         mb.add_cascade(label="Project", menu=p)
+        t = tk.Menu(mb, tearoff=False)
+        t.add_command(label="CAN-Ethernet Gateway Generator…", command=self.gateway_generator)
+        mb.add_cascade(label="Tools", menu=t)
         h = tk.Menu(mb, tearoff=False)
         h.add_command(label="About", command=lambda: messagebox.showinfo(
             APP_NAME, f"{APP_NAME} {__version__}\nECUC configurator with DaVinci compatible validation\n"
@@ -119,6 +122,11 @@ class App(tk.Tk):
         self.recent_menu.delete(0, "end")
         for pth in self.cfg.get("recent", []):
             self.recent_menu.add_command(label=pth, command=lambda p=pth: self.open_project(p))
+
+    def gateway_generator(self):
+        """CAN <-> Ethernet PduR gateway generator (writes a system description for DaVinci)."""
+        from ..gateway.gui import open_window
+        open_window(self)
 
     def _build_toolbar(self):
         tb = tk.Frame(self, background=COLORS["bg"])

@@ -9,3 +9,5 @@ dist/
 *.arxml
 *.dpa
 *.dcf
+# synthetic test data (no project content)
+!tests/fixtures/*.arxml

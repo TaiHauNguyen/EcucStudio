@@ -1,0 +1,465 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AUTOSAR xmlns="http://autosar.org/schema/r4.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://autosar.org/schema/r4.0 AUTOSAR_00052.xsd">
+  <AR-PACKAGES>
+    <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a01">
+      <SHORT-NAME>DataTypes</SHORT-NAME>
+      <AR-PACKAGES>
+        <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a02">
+          <SHORT-NAME>BaseTypes</SHORT-NAME>
+          <ELEMENTS>
+            <SW-BASE-TYPE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a03">
+              <SHORT-NAME>uint8</SHORT-NAME>
+              <CATEGORY>FIXED_LENGTH</CATEGORY>
+              <BASE-TYPE-SIZE>8</BASE-TYPE-SIZE>
+              <BASE-TYPE-ENCODING>NONE</BASE-TYPE-ENCODING>
+              <MEM-ALIGNMENT>8</MEM-ALIGNMENT>
+              <NATIVE-DECLARATION>unsigned char</NATIVE-DECLARATION>
+            </SW-BASE-TYPE>
+            <SW-BASE-TYPE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a04">
+              <SHORT-NAME>uint16</SHORT-NAME>
+              <CATEGORY>FIXED_LENGTH</CATEGORY>
+              <BASE-TYPE-SIZE>16</BASE-TYPE-SIZE>
+              <BASE-TYPE-ENCODING>NONE</BASE-TYPE-ENCODING>
+              <MEM-ALIGNMENT>16</MEM-ALIGNMENT>
+              <NATIVE-DECLARATION>unsigned short</NATIVE-DECLARATION>
+            </SW-BASE-TYPE>
+            <SW-BASE-TYPE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a05">
+              <SHORT-NAME>uint32</SHORT-NAME>
+              <CATEGORY>FIXED_LENGTH</CATEGORY>
+              <BASE-TYPE-SIZE>32</BASE-TYPE-SIZE>
+              <BASE-TYPE-ENCODING>NONE</BASE-TYPE-ENCODING>
+              <MEM-ALIGNMENT>32</MEM-ALIGNMENT>
+              <NATIVE-DECLARATION>unsigned long</NATIVE-DECLARATION>
+            </SW-BASE-TYPE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+      </AR-PACKAGES>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a10">
+      <SHORT-NAME>Topology</SHORT-NAME>
+      <AR-PACKAGES>
+        <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a11">
+          <SHORT-NAME>Clusters</SHORT-NAME>
+          <ELEMENTS>
+            <CAN-CLUSTER UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a12">
+              <SHORT-NAME>Body_Cluster</SHORT-NAME>
+              <CAN-CLUSTER-VARIANTS>
+                <CAN-CLUSTER-CONDITIONAL>
+                  <BAUDRATE>500000</BAUDRATE>
+                  <PHYSICAL-CHANNELS>
+                    <CAN-PHYSICAL-CHANNEL UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a13">
+                      <SHORT-NAME>Body</SHORT-NAME>
+                      <COMM-CONNECTORS>
+                        <COMMUNICATION-CONNECTOR-REF-CONDITIONAL>
+                          <COMMUNICATION-CONNECTOR-REF DEST="CAN-COMMUNICATION-CONNECTOR">/Topology/Ecus/GwEcu/CN_Body</COMMUNICATION-CONNECTOR-REF>
+                        </COMMUNICATION-CONNECTOR-REF-CONDITIONAL>
+                      </COMM-CONNECTORS>
+                      <FRAME-TRIGGERINGS>
+                        <CAN-FRAME-TRIGGERING UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a14">
+                          <SHORT-NAME>DoorStatus_FT</SHORT-NAME>
+                          <FRAME-PORT-REFS>
+                            <FRAME-PORT-REF DEST="FRAME-PORT">/Topology/Ecus/GwEcu/CN_Body/DoorStatus_FT_GwEcu</FRAME-PORT-REF>
+                          </FRAME-PORT-REFS>
+                          <FRAME-REF DEST="CAN-FRAME">/Communication/Frames/DoorStatus</FRAME-REF>
+                          <PDU-TRIGGERINGS>
+                            <PDU-TRIGGERING-REF-CONDITIONAL>
+                              <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/Body_Cluster/Body/DoorStatus_PT</PDU-TRIGGERING-REF>
+                            </PDU-TRIGGERING-REF-CONDITIONAL>
+                          </PDU-TRIGGERINGS>
+                          <CAN-ADDRESSING-MODE>STANDARD</CAN-ADDRESSING-MODE>
+                          <CAN-FRAME-RX-BEHAVIOR>CAN-20</CAN-FRAME-RX-BEHAVIOR>
+                          <CAN-FRAME-TX-BEHAVIOR>CAN-20</CAN-FRAME-TX-BEHAVIOR>
+                          <IDENTIFIER>512</IDENTIFIER>
+                        </CAN-FRAME-TRIGGERING>
+                      </FRAME-TRIGGERINGS>
+                      <I-SIGNAL-TRIGGERINGS>
+                        <I-SIGNAL-TRIGGERING UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a15">
+                          <SHORT-NAME>DoorOpen_ST</SHORT-NAME>
+                          <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/DoorOpen</I-SIGNAL-REF>
+                        </I-SIGNAL-TRIGGERING>
+                      </I-SIGNAL-TRIGGERINGS>
+                      <PDU-TRIGGERINGS>
+                        <PDU-TRIGGERING UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a16">
+                          <SHORT-NAME>DoorStatus_PT</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/Ecus/GwEcu/CN_Body/DoorStatus_CN_Body</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/DoorStatus</I-PDU-REF>
+                          <I-SIGNAL-TRIGGERINGS>
+                            <I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                              <I-SIGNAL-TRIGGERING-REF DEST="I-SIGNAL-TRIGGERING">/Topology/Clusters/Body_Cluster/Body/DoorOpen_ST</I-SIGNAL-TRIGGERING-REF>
+                            </I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                          </I-SIGNAL-TRIGGERINGS>
+                        </PDU-TRIGGERING>
+                      </PDU-TRIGGERINGS>
+                    </CAN-PHYSICAL-CHANNEL>
+                  </PHYSICAL-CHANNELS>
+                </CAN-CLUSTER-CONDITIONAL>
+              </CAN-CLUSTER-VARIANTS>
+            </CAN-CLUSTER>
+            <ETHERNET-CLUSTER UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a20">
+              <SHORT-NAME>EthCluster</SHORT-NAME>
+              <ETHERNET-CLUSTER-VARIANTS>
+                <ETHERNET-CLUSTER-CONDITIONAL>
+                  <BAUDRATE>100000000</BAUDRATE>
+                  <PHYSICAL-CHANNELS>
+                    <ETHERNET-PHYSICAL-CHANNEL UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a21">
+                      <SHORT-NAME>Eth_VLAN10</SHORT-NAME>
+                      <CATEGORY>WIRED</CATEGORY>
+                      <COMM-CONNECTORS>
+                        <COMMUNICATION-CONNECTOR-REF-CONDITIONAL>
+                          <COMMUNICATION-CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/Ecus/GwEcu/GwEcu_Eth_VLAN10</COMMUNICATION-CONNECTOR-REF>
+                        </COMMUNICATION-CONNECTOR-REF-CONDITIONAL>
+                      </COMM-CONNECTORS>
+                      <I-SIGNAL-TRIGGERINGS>
+                        <I-SIGNAL-TRIGGERING UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a22">
+                          <SHORT-NAME>LampCmd_ST</SHORT-NAME>
+                          <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/LampCmd</I-SIGNAL-REF>
+                        </I-SIGNAL-TRIGGERING>
+                      </I-SIGNAL-TRIGGERINGS>
+                      <PDU-TRIGGERINGS>
+                        <PDU-TRIGGERING UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a23">
+                          <SHORT-NAME>LampCmd_Eth_PT</SHORT-NAME>
+                          <I-PDU-PORT-REFS>
+                            <I-PDU-PORT-REF DEST="I-PDU-PORT">/Topology/Ecus/GwEcu/GwEcu_Eth_VLAN10/LampCmd_Eth_GwEcu_Eth_VLAN10</I-PDU-PORT-REF>
+                          </I-PDU-PORT-REFS>
+                          <I-PDU-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/LampCmd_Eth</I-PDU-REF>
+                          <I-SIGNAL-TRIGGERINGS>
+                            <I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                              <I-SIGNAL-TRIGGERING-REF DEST="I-SIGNAL-TRIGGERING">/Topology/Clusters/EthCluster/Eth_VLAN10/LampCmd_ST</I-SIGNAL-TRIGGERING-REF>
+                            </I-SIGNAL-TRIGGERING-REF-CONDITIONAL>
+                          </I-SIGNAL-TRIGGERINGS>
+                        </PDU-TRIGGERING>
+                      </PDU-TRIGGERINGS>
+                      <NETWORK-ENDPOINTS>
+                        <NETWORK-ENDPOINT UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a24">
+                          <SHORT-NAME>NEP_GwEcu</SHORT-NAME>
+                          <NETWORK-ENDPOINT-ADDRESSES>
+                            <IPV-4-CONFIGURATION>
+                              <IPV-4-ADDRESS>10.0.10.1</IPV-4-ADDRESS>
+                              <IPV-4-ADDRESS-SOURCE>FIXED</IPV-4-ADDRESS-SOURCE>
+                              <NETWORK-MASK>255.255.255.0</NETWORK-MASK>
+                            </IPV-4-CONFIGURATION>
+                          </NETWORK-ENDPOINT-ADDRESSES>
+                        </NETWORK-ENDPOINT>
+                        <NETWORK-ENDPOINT UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a25">
+                          <SHORT-NAME>NEP_Tester</SHORT-NAME>
+                          <NETWORK-ENDPOINT-ADDRESSES>
+                            <IPV-4-CONFIGURATION>
+                              <IPV-4-ADDRESS>10.0.10.2</IPV-4-ADDRESS>
+                              <IPV-4-ADDRESS-SOURCE>FIXED</IPV-4-ADDRESS-SOURCE>
+                              <NETWORK-MASK>255.255.255.0</NETWORK-MASK>
+                            </IPV-4-CONFIGURATION>
+                          </NETWORK-ENDPOINT-ADDRESSES>
+                        </NETWORK-ENDPOINT>
+                      </NETWORK-ENDPOINTS>
+                      <SO-AD-CONFIG>
+                        <SOCKET-ADDRESSS>
+                          <SOCKET-ADDRESS UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a26">
+                            <SHORT-NAME>SA_Tester_Rx</SHORT-NAME>
+                            <APPLICATION-ENDPOINT UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a27">
+                              <SHORT-NAME>AEP_Tester_Rx</SHORT-NAME>
+                              <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthCluster/Eth_VLAN10/NEP_Tester</NETWORK-ENDPOINT-REF>
+                              <TP-CONFIGURATION>
+                                <UDP-TP>
+                                  <UDP-TP-PORT>
+                                    <PORT-NUMBER>42000</PORT-NUMBER>
+                                  </UDP-TP-PORT>
+                                </UDP-TP>
+                              </TP-CONFIGURATION>
+                            </APPLICATION-ENDPOINT>
+                          </SOCKET-ADDRESS>
+                          <SOCKET-ADDRESS UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a28">
+                            <SHORT-NAME>SA_GwEcu_Tx</SHORT-NAME>
+                            <APPLICATION-ENDPOINT UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a29">
+                              <SHORT-NAME>AEP_GwEcu_Tx</SHORT-NAME>
+                              <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthCluster/Eth_VLAN10/NEP_GwEcu</NETWORK-ENDPOINT-REF>
+                              <TP-CONFIGURATION>
+                                <UDP-TP>
+                                  <UDP-TP-PORT>
+                                    <PORT-NUMBER>42000</PORT-NUMBER>
+                                  </UDP-TP-PORT>
+                                </UDP-TP>
+                              </TP-CONFIGURATION>
+                            </APPLICATION-ENDPOINT>
+                            <CONNECTOR-REF DEST="ETHERNET-COMMUNICATION-CONNECTOR">/Topology/Ecus/GwEcu/GwEcu_Eth_VLAN10</CONNECTOR-REF>
+                            <STATIC-SOCKET-CONNECTIONS>
+                              <STATIC-SOCKET-CONNECTION>
+                                <SHORT-NAME>GwEcu_to_Tester</SHORT-NAME>
+                                <I-PDU-IDENTIFIERS>
+                                  <SO-CON-I-PDU-IDENTIFIER-REF-CONDITIONAL>
+                                    <SO-CON-I-PDU-IDENTIFIER-REF DEST="SO-CON-I-PDU-IDENTIFIER">/Topology/Clusters/VLAN10_Ids/LampCmd_Eth_ID</SO-CON-I-PDU-IDENTIFIER-REF>
+                                  </SO-CON-I-PDU-IDENTIFIER-REF-CONDITIONAL>
+                                </I-PDU-IDENTIFIERS>
+                                <REMOTE-ADDRESSS>
+                                  <SOCKET-ADDRESS-REF-CONDITIONAL>
+                                    <SOCKET-ADDRESS-REF DEST="SOCKET-ADDRESS">/Topology/Clusters/EthCluster/Eth_VLAN10/SA_Tester_Rx</SOCKET-ADDRESS-REF>
+                                  </SOCKET-ADDRESS-REF-CONDITIONAL>
+                                </REMOTE-ADDRESSS>
+                              </STATIC-SOCKET-CONNECTION>
+                            </STATIC-SOCKET-CONNECTIONS>
+                          </SOCKET-ADDRESS>
+                        </SOCKET-ADDRESSS>
+                      </SO-AD-CONFIG>
+                      <VLAN UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a2a">
+                        <SHORT-NAME>VLAN10</SHORT-NAME>
+                        <VLAN-IDENTIFIER>10</VLAN-IDENTIFIER>
+                      </VLAN>
+                    </ETHERNET-PHYSICAL-CHANNEL>
+                  </PHYSICAL-CHANNELS>
+                </ETHERNET-CLUSTER-CONDITIONAL>
+              </ETHERNET-CLUSTER-VARIANTS>
+            </ETHERNET-CLUSTER>
+            <SOCKET-CONNECTION-IPDU-IDENTIFIER-SET UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a2b">
+              <SHORT-NAME>VLAN10_Ids</SHORT-NAME>
+              <I-PDU-IDENTIFIERS>
+                <SO-CON-I-PDU-IDENTIFIER>
+                  <SHORT-NAME>LampCmd_Eth_ID</SHORT-NAME>
+                  <HEADER-ID>256</HEADER-ID>
+                  <PDU-TRIGGERING-REF DEST="PDU-TRIGGERING">/Topology/Clusters/EthCluster/Eth_VLAN10/LampCmd_Eth_PT</PDU-TRIGGERING-REF>
+                </SO-CON-I-PDU-IDENTIFIER>
+              </I-PDU-IDENTIFIERS>
+            </SOCKET-CONNECTION-IPDU-IDENTIFIER-SET>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a30">
+          <SHORT-NAME>Ecus</SHORT-NAME>
+          <ELEMENTS>
+            <ECU-INSTANCE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a31">
+              <SHORT-NAME>GwEcu</SHORT-NAME>
+              <COM-CONFIGURATION-GW-TIME-BASE>0.005</COM-CONFIGURATION-GW-TIME-BASE>
+              <COM-CONFIGURATION-RX-TIME-BASE>0.005</COM-CONFIGURATION-RX-TIME-BASE>
+              <COM-CONFIGURATION-TX-TIME-BASE>0.005</COM-CONFIGURATION-TX-TIME-BASE>
+              <COMM-CONTROLLERS>
+                <CAN-COMMUNICATION-CONTROLLER UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a32">
+                  <SHORT-NAME>CT_Body</SHORT-NAME>
+                </CAN-COMMUNICATION-CONTROLLER>
+                <ETHERNET-COMMUNICATION-CONTROLLER UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a33">
+                  <SHORT-NAME>GwEcu_EthCtrl</SHORT-NAME>
+                  <ETHERNET-COMMUNICATION-CONTROLLER-VARIANTS>
+                    <ETHERNET-COMMUNICATION-CONTROLLER-CONDITIONAL>
+                      <COUPLING-PORTS>
+                        <COUPLING-PORT UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a34">
+                          <SHORT-NAME>GwEcu_EthPort</SHORT-NAME>
+                          <VLAN-MEMBERSHIPS>
+                            <VLAN-MEMBERSHIP>
+                              <DEFAULT-PRIORITY>0</DEFAULT-PRIORITY>
+                              <SEND-ACTIVITY>SENT-TAGGED</SEND-ACTIVITY>
+                              <VLAN-REF DEST="ETHERNET-PHYSICAL-CHANNEL">/Topology/Clusters/EthCluster/Eth_VLAN10</VLAN-REF>
+                            </VLAN-MEMBERSHIP>
+                          </VLAN-MEMBERSHIPS>
+                        </COUPLING-PORT>
+                      </COUPLING-PORTS>
+                      <MAC-UNICAST-ADDRESS>02:00:00:00:00:01</MAC-UNICAST-ADDRESS>
+                      <MAXIMUM-RECEIVE-BUFFER-LENGTH>1522</MAXIMUM-RECEIVE-BUFFER-LENGTH>
+                      <MAXIMUM-TRANSMIT-BUFFER-LENGTH>1522</MAXIMUM-TRANSMIT-BUFFER-LENGTH>
+                    </ETHERNET-COMMUNICATION-CONTROLLER-CONDITIONAL>
+                  </ETHERNET-COMMUNICATION-CONTROLLER-VARIANTS>
+                </ETHERNET-COMMUNICATION-CONTROLLER>
+              </COMM-CONTROLLERS>
+              <CONNECTORS>
+                <CAN-COMMUNICATION-CONNECTOR UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a35">
+                  <SHORT-NAME>CN_Body</SHORT-NAME>
+                  <COMM-CONTROLLER-REF DEST="CAN-COMMUNICATION-CONTROLLER">/Topology/Ecus/GwEcu/CT_Body</COMM-CONTROLLER-REF>
+                  <ECU-COMM-PORT-INSTANCES>
+                    <FRAME-PORT UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a36">
+                      <SHORT-NAME>DoorStatus_FT_GwEcu</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </FRAME-PORT>
+                    <I-PDU-PORT UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a37">
+                      <SHORT-NAME>DoorStatus_CN_Body</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>IN</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                  </ECU-COMM-PORT-INSTANCES>
+                </CAN-COMMUNICATION-CONNECTOR>
+                <ETHERNET-COMMUNICATION-CONNECTOR UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a38">
+                  <SHORT-NAME>GwEcu_Eth_VLAN10</SHORT-NAME>
+                  <COMM-CONTROLLER-REF DEST="ETHERNET-COMMUNICATION-CONTROLLER">/Topology/Ecus/GwEcu/GwEcu_EthCtrl</COMM-CONTROLLER-REF>
+                  <ECU-COMM-PORT-INSTANCES>
+                    <I-PDU-PORT UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a39">
+                      <SHORT-NAME>LampCmd_Eth_GwEcu_Eth_VLAN10</SHORT-NAME>
+                      <COMMUNICATION-DIRECTION>OUT</COMMUNICATION-DIRECTION>
+                    </I-PDU-PORT>
+                  </ECU-COMM-PORT-INSTANCES>
+                  <NETWORK-ENDPOINT-REFS>
+                    <NETWORK-ENDPOINT-REF DEST="NETWORK-ENDPOINT">/Topology/Clusters/EthCluster/Eth_VLAN10/NEP_GwEcu</NETWORK-ENDPOINT-REF>
+                  </NETWORK-ENDPOINT-REFS>
+                </ETHERNET-COMMUNICATION-CONNECTOR>
+              </CONNECTORS>
+              <SLEEP-MODE-SUPPORTED>false</SLEEP-MODE-SUPPORTED>
+              <WAKE-UP-OVER-BUS-SUPPORTED>false</WAKE-UP-OVER-BUS-SUPPORTED>
+            </ECU-INSTANCE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+      </AR-PACKAGES>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a40">
+      <SHORT-NAME>Communication</SHORT-NAME>
+      <AR-PACKAGES>
+        <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a41">
+          <SHORT-NAME>Frames</SHORT-NAME>
+          <ELEMENTS>
+            <CAN-FRAME UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a42">
+              <SHORT-NAME>DoorStatus</SHORT-NAME>
+              <FRAME-LENGTH>2</FRAME-LENGTH>
+              <PDU-TO-FRAME-MAPPINGS>
+                <PDU-TO-FRAME-MAPPING UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a43">
+                  <SHORT-NAME>DoorStatus</SHORT-NAME>
+                  <PACKING-BYTE-ORDER>MOST-SIGNIFICANT-BYTE-LAST</PACKING-BYTE-ORDER>
+                  <PDU-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/DoorStatus</PDU-REF>
+                  <START-POSITION>0</START-POSITION>
+                </PDU-TO-FRAME-MAPPING>
+              </PDU-TO-FRAME-MAPPINGS>
+            </CAN-FRAME>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a44">
+          <SHORT-NAME>PDUs</SHORT-NAME>
+          <ELEMENTS>
+            <I-SIGNAL-I-PDU UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a45">
+              <SHORT-NAME>DoorStatus</SHORT-NAME>
+              <LENGTH>2</LENGTH>
+              <I-PDU-TIMING-SPECIFICATIONS>
+                <I-PDU-TIMING>
+                  <TRANSMISSION-MODE-DECLARATION>
+                    <TRANSMISSION-MODE-TRUE-TIMING>
+                      <CYCLIC-TIMING>
+                        <TIME-PERIOD>
+                          <VALUE>0.1</VALUE>
+                        </TIME-PERIOD>
+                      </CYCLIC-TIMING>
+                    </TRANSMISSION-MODE-TRUE-TIMING>
+                  </TRANSMISSION-MODE-DECLARATION>
+                </I-PDU-TIMING>
+              </I-PDU-TIMING-SPECIFICATIONS>
+              <I-SIGNAL-TO-PDU-MAPPINGS>
+                <I-SIGNAL-TO-I-PDU-MAPPING UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a46">
+                  <SHORT-NAME>DoorOpen</SHORT-NAME>
+                  <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/DoorOpen</I-SIGNAL-REF>
+                  <PACKING-BYTE-ORDER>MOST-SIGNIFICANT-BYTE-LAST</PACKING-BYTE-ORDER>
+                  <START-POSITION>0</START-POSITION>
+                  <TRANSFER-PROPERTY>PENDING</TRANSFER-PROPERTY>
+                </I-SIGNAL-TO-I-PDU-MAPPING>
+              </I-SIGNAL-TO-PDU-MAPPINGS>
+            </I-SIGNAL-I-PDU>
+            <I-SIGNAL-I-PDU UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a47">
+              <SHORT-NAME>LampCmd_Eth</SHORT-NAME>
+              <LENGTH>1</LENGTH>
+              <I-PDU-TIMING-SPECIFICATIONS>
+                <I-PDU-TIMING>
+                  <TRANSMISSION-MODE-DECLARATION>
+                    <TRANSMISSION-MODE-TRUE-TIMING>
+                      <EVENT-CONTROLLED-TIMING>
+                        <NUMBER-OF-REPETITIONS>0</NUMBER-OF-REPETITIONS>
+                      </EVENT-CONTROLLED-TIMING>
+                    </TRANSMISSION-MODE-TRUE-TIMING>
+                  </TRANSMISSION-MODE-DECLARATION>
+                </I-PDU-TIMING>
+              </I-PDU-TIMING-SPECIFICATIONS>
+              <I-SIGNAL-TO-PDU-MAPPINGS>
+                <I-SIGNAL-TO-I-PDU-MAPPING UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a48">
+                  <SHORT-NAME>LampCmd</SHORT-NAME>
+                  <I-SIGNAL-REF DEST="I-SIGNAL">/Communication/Signals/LampCmd</I-SIGNAL-REF>
+                  <START-POSITION>0</START-POSITION>
+                  <TRANSFER-PROPERTY>TRIGGERED</TRANSFER-PROPERTY>
+                </I-SIGNAL-TO-I-PDU-MAPPING>
+              </I-SIGNAL-TO-PDU-MAPPINGS>
+            </I-SIGNAL-I-PDU>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a50">
+          <SHORT-NAME>Signals</SHORT-NAME>
+          <ELEMENTS>
+            <I-SIGNAL UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a51">
+              <SHORT-NAME>DoorOpen</SHORT-NAME>
+              <DATA-TYPE-POLICY>OVERRIDE</DATA-TYPE-POLICY>
+              <INIT-VALUE>
+                <NUMERICAL-VALUE-SPECIFICATION>
+                  <VALUE>0</VALUE>
+                </NUMERICAL-VALUE-SPECIFICATION>
+              </INIT-VALUE>
+              <LENGTH>1</LENGTH>
+              <NETWORK-REPRESENTATION-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/uint8</BASE-TYPE-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </NETWORK-REPRESENTATION-PROPS>
+              <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/DoorOpen</SYSTEM-SIGNAL-REF>
+            </I-SIGNAL>
+            <I-SIGNAL UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a52">
+              <SHORT-NAME>LampCmd</SHORT-NAME>
+              <DATA-TYPE-POLICY>OVERRIDE</DATA-TYPE-POLICY>
+              <INIT-VALUE>
+                <NUMERICAL-VALUE-SPECIFICATION>
+                  <VALUE>0</VALUE>
+                </NUMERICAL-VALUE-SPECIFICATION>
+              </INIT-VALUE>
+              <LENGTH>8</LENGTH>
+              <NETWORK-REPRESENTATION-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/DataTypes/BaseTypes/uint8</BASE-TYPE-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </NETWORK-REPRESENTATION-PROPS>
+              <SYSTEM-SIGNAL-REF DEST="SYSTEM-SIGNAL">/Communication/SystemSignals/LampCmd</SYSTEM-SIGNAL-REF>
+            </I-SIGNAL>
+          </ELEMENTS>
+        </AR-PACKAGE>
+        <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a53">
+          <SHORT-NAME>SystemSignals</SHORT-NAME>
+          <ELEMENTS>
+            <SYSTEM-SIGNAL UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a54">
+              <SHORT-NAME>DoorOpen</SHORT-NAME>
+              <DYNAMIC-LENGTH>false</DYNAMIC-LENGTH>
+            </SYSTEM-SIGNAL>
+            <SYSTEM-SIGNAL UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a55">
+              <SHORT-NAME>LampCmd</SHORT-NAME>
+              <DYNAMIC-LENGTH>false</DYNAMIC-LENGTH>
+            </SYSTEM-SIGNAL>
+          </ELEMENTS>
+        </AR-PACKAGE>
+      </AR-PACKAGES>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a60">
+      <SHORT-NAME>System</SHORT-NAME>
+      <ELEMENTS>
+        <SYSTEM UUID="0a5f3c7e2b1d4e6f8a9b0c1d2e3f4a61">
+          <SHORT-NAME>GwSystem</SHORT-NAME>
+          <CATEGORY>ECU_EXTRACT</CATEGORY>
+          <FIBEX-ELEMENTS>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="ECU-INSTANCE">/Topology/Ecus/GwEcu</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="CAN-CLUSTER">/Topology/Clusters/Body_Cluster</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="ETHERNET-CLUSTER">/Topology/Clusters/EthCluster</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="SOCKET-CONNECTION-IPDU-IDENTIFIER-SET">/Topology/Clusters/VLAN10_Ids</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="CAN-FRAME">/Communication/Frames/DoorStatus</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/DoorStatus</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="I-SIGNAL-I-PDU">/Communication/PDUs/LampCmd_Eth</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="I-SIGNAL">/Communication/Signals/DoorOpen</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="I-SIGNAL">/Communication/Signals/LampCmd</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+          </FIBEX-ELEMENTS>
+        </SYSTEM>
+      </ELEMENTS>
+    </AR-PACKAGE>
+  </AR-PACKAGES>
+</AUTOSAR>

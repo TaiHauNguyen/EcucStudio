@@ -11,7 +11,7 @@ rem hoặc
 python -m ecucstudio gui D:\MyEcu\Project\MyEcu.dpa
 ```
 Yêu cầu: Python 3.10+ (bản cài từ python.org, có chọn *tcl/tk and IDLE* và *Add python.exe to PATH*)
-và gói `lxml`:
+và gói `lxml` (gateway CAN-Ethernet cần thêm `cantools`):
 ```bat
 py -m pip install -r requirements.txt
 ```
@@ -118,6 +118,52 @@ python -m ecucstudio generate Project.dpa -m /MICROSAR/Det [--gen-type REAL]
 ```
 `validate` trả exit code 1 nếu còn Error chưa acknowledge (dùng được trong CI).
 
+## Gateway CAN ↔ Ethernet (PduR)
+
+Sinh **System Description** (file network ARXML) có gateway PduR giữa CAN và Ethernet để import vào
+DaVinci Configurator (*Input Files*). Từ file này DaVinci tự suy ra PduR routing path, SoAd PduRoute /
+SocketRoute (header ID) và CanIf PDU — không phải sửa ECUC bằng tay.
+
+Mở: menu **Tools → CAN-Ethernet Gateway Generator…**, `run.bat gateway`, hoặc
+`python -m ecucstudio gateway gui [gateway.json]`. Cần thêm gói `cantools` (có trong requirements.txt).
+
+**Input**
+
+| Mục | Nội dung |
+|---|---|
+| Base system description | file network ARXML hiện có của project (ví dụ export từ PREEvision), phải có Ethernet cluster. Tool tự dò ECU, kênh Ethernet/VLAN, connector, endpoint (IP), socket, header ID đang dùng, kênh CAN và cách chia package — không có tên cố định của project nào |
+| DBC + node | node = ECU gateway trong DBC. Message node **nhận** → CAN→ETH, message node **gửi** → ETH→CAN, map 1:1. NM và diagnostic mặc định bỏ (bật được) |
+| Kênh CAN | dùng kênh có sẵn trong base (frame tìm theo CAN ID, chỉ thêm port nếu thiếu) hoặc tạo CAN cluster mới từ DBC (baud rate từ DBC hoặc nhập) |
+| Ethernet (nhập tay) | VLAN, connector của ECU, IP local; mỗi chiều chọn socket có sẵn hoặc nhập port local + IP/port remote để tạo socket mới; header ID set |
+
+**Header ID**: = CAN ID đệm 0 thành 32 bit (`0x123` → `0x00000123`). Nếu trùng với PDU khác được nhận trên
+cùng socket (tính cả PDU có sẵn trong base) tool tự đặt cờ ở bit 29..31 (`k << 29`, k = 1..7 — CAN ID 29 bit
+không dùng các bit này) và báo warning. Header ID nhập tay trong bảng route không bao giờ bị đổi, trùng thì
+báo lỗi. Tùy chọn: luôn đặt bit 31 cho ID extended (kiểu `Can_IdType`).
+
+**Output**: base + phần tử mới, phần còn lại của file giữ nguyên từng byte; kèm
+`<output>_gateway_routes.csv`. Phần tử được ghi theo thứ tự schema AUTOSAR và theo phong cách của base
+(package, UUID). Tên/UUID ổn định khi chạy lại; chạy lại trên chính file output thì route đã có được bỏ qua.
+
+| Chiều | Phần tử tạo ra |
+|---|---|
+| CAN (mới) | CAN-FRAME, I-SIGNAL-I-PDU, I-SIGNAL, SYSTEM-SIGNAL, frame/PDU/signal triggering, FRAME-PORT/I-PDU-PORT trên connector CAN của ECU (+ CAN cluster/controller/connector nếu bus mới) |
+| Ethernet | I-SIGNAL-I-PDU cùng độ dài (cùng layout signal, hoặc không signal), PDU-TRIGGERING + I-PDU-PORT trên connector Ethernet, SO-CON-I-PDU-IDENTIFIER (HEADER-ID), SOCKET-ADDRESS / STATIC-SOCKET-CONNECTION / NETWORK-ENDPOINT khi tạo mới |
+| Gateway | I-PDU-MAPPING trong GATEWAY của ECU (tạo GATEWAY nếu chưa có), FIBEX-ELEMENTS của SYSTEM |
+
+Sau khi import, DaVinci còn yêu cầu vài tham số chỉ có trong ECUC (giống mọi route import từ system
+description): PDUR13200 `PduRPduLengthHandlingStrategy`, PDUR10510 `PduRDestPduDataProvision`,
+SOAD01616/01698/01736 `SoAdTxIf…`, handle ID → dùng *Solve*.
+
+```bat
+python -m ecucstudio gateway inspect  --base network.arxml --dbc Body.dbc      :: ECU, VLAN, socket, node có trong file
+python -m ecucstudio gateway template --base network.arxml --dbc Body.dbc --node GwEcu -o gateway.json
+python -m ecucstudio gateway plan     gateway.json                             :: bảng route, header ID, warning
+python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml]
+```
+Cấu hình (`gateway.json`) lưu đường dẫn tương đối, các lựa chọn Ethernet, mẫu đặt tên và các route bị
+tắt / header ID nhập tay, để chạy lại từ file base gốc.
+
 ## An toàn dữ liệu
 
 - Chỉ ghi các file ECUC đã sửa; phần không sửa giữ nguyên từng byte (đã test trên 70 file của project).
@@ -138,8 +184,10 @@ ecucstudio/
   davinci.py    dò DVCfgCmd, dựng command line, chạy nền, parse DaVinciExecutionReport
   session.py    gom project/definition/model/validation, trạng thái tham số
   gui/          tkinter: app, tree, editor, properties, validation_view, console, dialogs
+  gateway/      gateway CAN <-> Ethernet: dbcread, base (dò file network), planner (route, header ID),
+                writer (ghi ARXML theo thứ tự schema), xmlorder, report, cli, gui
 rules/          rule plugin (*.py)
-tests/          unittest trên bản sao project thật
+tests/          unittest trên bản sao project thật; tests/fixtures: dữ liệu tổng hợp cho gateway
 ```
 Test: `set ECUCSTUDIO_TEST_DPA=<project>.dpa` rồi `python -m unittest discover -s tests -v`
 (các test trên project thật sẽ được bỏ qua nếu không đặt biến này).

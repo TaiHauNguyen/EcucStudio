@@ -1,0 +1,89 @@
+"""Human readable output of a gateway plan: route table, CSV report and an inventory of the base file."""
+from __future__ import annotations
+
+import csv
+
+from .base import Base
+from .planner import Plan
+
+COLUMNS = ("Enabled", "Direction", "Bus", "Message", "CAN ID", "Frame", "Length", "Cycle ms", "CAN PDU",
+           "Ethernet PDU", "Header ID", "Header note", "Remark")
+
+
+def route_rows(plan: Plan) -> list[tuple]:
+    rows = []
+    for r in plan.routes:
+        m = r.message
+        rows.append((
+            "yes" if r.enabled else "no", r.direction, r.bus.name, m.name, m.id_text,
+            ("EXT" if m.extended else "STD") + (" FD" if m.fd else ""), r.length, m.cycle_ms or "",
+            (r.can_pdu or "").rsplit("/", 1)[-1] or r.can_pdu, r.eth_pdu,
+            r.header_text if r.header_id >= 0 else "", r.header_note,
+            "; ".join(([r.reason] if r.reason else []) + r.notes)))
+    return rows
+
+
+def write_csv(plan: Plan, path: str):
+    with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+        w = csv.writer(fh, delimiter=";")
+        w.writerow(COLUMNS)
+        w.writerows(route_rows(plan))
+
+
+def text_table(plan: Plan) -> str:
+    cols = (0, 1, 2, 3, 4, 5, 6, 9, 10, 11)
+    rows = [tuple(str(x) for x in r) for r in route_rows(plan)]
+    head = tuple(COLUMNS[i] for i in cols)
+    data = [tuple(r[i] for i in cols) for r in rows]
+    widths = [max(len(h), *(len(d[k]) for d in data)) if data else len(h) for k, h in enumerate(head)]
+    line = lambda vals: "  ".join(v.ljust(w) for v, w in zip(vals, widths)).rstrip()
+    out = [line(head), line(tuple("-" * w for w in widths))] + [line(d) for d in data]
+    return "\n".join(out)
+
+
+def summary(plan: Plan) -> str:
+    lines = [f"ECU              : {plan.ecu or '-'}",
+             f"Ethernet channel : {plan.eth_channel or '-'}",
+             f"ECU connector    : {plan.eth_connector or '-'}",
+             f"Local endpoint   : {plan.local_endpoint or '-'}",
+             f"Header id set    : {plan.id_set or '-'}{' (new)' if plan.id_set_new else ''}",
+             f"Gateway          : {plan.gateway or '-'}{' (new)' if plan.gateway_new else ''}"]
+    for d, sp in plan.sides.items():
+        lines.append(f"{d:<17}: {sp.local.rsplit('/', 1)[-1]}{' (new' if sp.local_new else ' (existing'}, port "
+                     f"{sp.local_port}) -> {sp.remote.rsplit('/', 1)[-1]}{' (new' if sp.remote_new else ' (existing'}"
+                     f", port {sp.remote_port}) via {sp.connection.rsplit('/', 1)[-1]}")
+    for bp in plan.buses:
+        lines.append(f"CAN bus {bp.name:<9}: {bp.channel}{' (new cluster)' if bp.new_cluster else ''}, "
+                     f"connector {bp.connector.rsplit('/', 1)[-1]}{' (new)' if bp.new_connector else ''}")
+    n = len(plan.enabled_routes)
+    lines.append(f"Routes           : {n} enabled of {len(plan.routes)}")
+    return "\n".join(lines)
+
+
+def inventory(base: Base) -> str:
+    """What the base file offers for the Ethernet settings (ECUs, channels, connectors, endpoints, sockets)."""
+    out = [f"Schema: {base.schema or '?'}", "ECU instances:"]
+    for e in base.ecus():
+        gw = base.gateway_of(e)
+        out.append(f"  {e}" + (f"   (gateway {gw.rsplit('/', 1)[-1]})" if gw else ""))
+    out.append("Ethernet channels:")
+    for ch in base.eth_channels():
+        out.append(f"  {ch.label}   {ch.path}")
+        for c in ch.connectors:
+            out.append(f"      connector {c}")
+        for ep in ch.endpoints:
+            out.append(f"      endpoint  {ep.name:<40} {ep.ip or ''}")
+        for s in ch.sockets:
+            owner = f"local, {s.connector.rsplit('/', 1)[-1]}" if s.connector else "remote"
+            out.append(f"      socket    {s.name:<40} {s.ip or '?'}:{s.port} {s.protocol} ({owner})")
+            for c in s.connections:
+                out.append(f"          -> {', '.join(r.rsplit('/', 1)[-1] for r in c.remotes)}  "
+                           f"[{c.name}, {len(c.ids)} PDU ids]")
+    out.append("CAN channels:")
+    for c in base.can_channels():
+        out.append(f"  {c.name:<20} {c.path}  baud {c.baudrate or '?'}" +
+                   (f" / FD {c.fd_baudrate}" if c.fd_baudrate else ""))
+    out.append("Header id sets:")
+    for s in base.id_sets():
+        out.append(f"  {s}")
+    return "\n".join(out)
