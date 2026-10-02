@@ -14,6 +14,8 @@ from . import dbcread, dvproject, report
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
 from .config import BusInput, GatewayConfig, Naming, SocketSide
 from .planner import load_base, make_plan, new_ecu_name
+from .suggest import apply as apply_suggestions
+from .suggest import suggest as suggest_settings
 from .writer import generate
 
 NEW = "<create new>"
@@ -452,6 +454,10 @@ class GatewayWindow:
         self._new_eth_frame(row)
         ttk.Label(top, text="Ethernet channel (VLAN):").grid(row=0, column=0, sticky="w", pady=2)
         self.c_chan = Choice(top, width=62, on_change=self.channel_changed).grid(row=0, column=1, sticky="w")
+        b_sug = ttk.Button(top, text="Suggest values", command=self.suggest_eth)
+        b_sug.grid(row=0, column=2, padx=(6, 0))
+        Tooltip(b_sug, "Fill the empty Ethernet settings (channel, ECU IP, remote node, ports, MAC) from what the "
+                       "base file / project already contains. Values you entered are kept.")
         ttk.Label(top, text="ECU connector:").grid(row=1, column=0, sticky="w", pady=2)
         self.c_conn = Choice(top, width=62, on_change=self.connector_changed).grid(row=1, column=1, sticky="w")
         ttk.Label(top, text="Local endpoint (ECU IP):").grid(row=2, column=0, sticky="w", pady=2)
@@ -783,6 +789,36 @@ class GatewayWindow:
         self.side_rx.fill(ch, conn)
         self.side_tx.load(self.cfg.ethernet.can_to_eth)
         self.side_rx.load(self.cfg.ethernet.eth_to_can)
+
+    # ------------------------------------------------------------------ suggestions
+    def suggest_eth(self):
+        """Fill the empty Ethernet settings with suggested values (and tell why)."""
+        if not self.v_base.get().strip() and not self.cfg.buses:
+            messagebox.showwarning(TITLE, "Select the network file / DaVinci project or add a DBC file first.",
+                                   parent=self.win)
+            return
+
+        def run():
+            cfg = self.collect()
+            try:
+                sugg = suggest_settings(cfg, self.base)
+            except Exception as exc:  # noqa: BLE001 - shown to the user
+                self.show_messages(errors=[f"No suggestion possible: {exc}"])
+                return
+            applied = apply_suggestions(cfg, sugg)
+            e = cfg.ethernet
+            self.c_chan.set(NEW_VALUE if e.new_channel else e.channel)
+            self.v_vlan.set("" if e.vlan_id is None else e.vlan_id)
+            self.v_ecuip.set(e.ecu_ip)
+            self.v_mask.set(e.ecu_netmask or "255.255.255.0")
+            self.v_mac.set(e.mac)
+            self.channel_changed()          # refreshes connector, endpoint and both socket frames from cfg
+            kept = [s for s in sugg if s not in applied]
+            self.show_messages(infos=[f"Suggested {s}" for s in applied] +
+                               [f"Kept your value for {s.field} (suggestion: {s.value})" for s in kept]
+                               or ["Nothing to suggest: all Ethernet settings are filled in."])
+            self.status.config(text=f"{len(applied)} Ethernet setting(s) suggested - check them, then Analyze.")
+        self.load_base(then=run)
 
     # ------------------------------------------------------------------ buses
     def refresh_buses(self):

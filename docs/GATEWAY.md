@@ -130,6 +130,24 @@ Quy tắc của chế độ này:
 | Protocol | UDP (mặc định) hoặc TCP (chọn TCP role CONNECT / LISTEN) |
 | Header id set | nơi lưu các SO-CON-I-PDU-IDENTIFIER: `<auto>` = set đang dùng cho socket đã chọn (hoặc tạo `CanEthGateway_Ids`), chọn set có sẵn, hoặc gõ tên set mới |
 
+### 3.0 Nút **Suggest values** (gợi ý thông số)
+
+Bấm **Suggest values** (cạnh ô kênh Ethernet) để tool điền các ô **còn trống** của tab Ethernet. Giá trị bạn đã nhập
+được giữ nguyên. Mỗi giá trị gợi ý được liệt kê kèm lý do ở khung thông báo. Kiểm tra lại rồi bấm Analyze.
+
+| Thông số | Cách gợi ý |
+|---|---|
+| Kênh Ethernet | kênh duy nhất ECU đang nối; nếu nhiều kênh thì chọn kênh có nhiều PDU dùng SoAd header nhất; nếu ECU chưa nối kênh nào mà file chỉ có một kênh thì chọn kênh đó (tool tạo connector) |
+| Kênh mới / VLAN id | ECU chưa nối kênh nào, hoặc đã chọn `<create new channel (VLAN)>`: VLAN = bội số 10 kế tiếp sau VLAN lớn nhất đang dùng (10 → 20; 20, 40, 60, 80 → 100). File chưa có VLAN nào thì để untagged |
+| Connector | nếu ECU có nhiều connector trên kênh: connector có IP và nhiều socket nhất |
+| ECU IP / netmask | chỉ khi ECU chưa có IP trên kênh: địa chỉ trống kế tiếp sau địa chỉ lớn nhất trong subnet đang dùng của kênh; kênh chưa có địa chỉ nào thì dùng `192.168.<VLAN>.1/24` (untagged: `192.168.1.1/24`) |
+| IP node bên kia | node mà ECU đang có nhiều socket connection nhất trên kênh (ví dụ tester); kênh chỉ có một node khác thì chọn node đó; không có node nào thì lấy địa chỉ trống kế tiếp sau IP của ECU |
+| Port | cặp port trống kế tiếp sau port lớn nhất đang dùng trên kênh: CAN→ETH = p, ETH→CAN = p+1; kênh chưa dùng port nào thì 50000 / 50001. Port phía node bên kia lấy cùng số |
+| MAC | chỉ khi phải tạo controller mới: `02:00:` + 4 byte của IP ECU (địa chỉ locally administered) |
+
+Command line: `gateway suggest gateway.json` in gợi ý ra màn hình; thêm `--write` để ghi vào các trường còn trống của
+file. Lệnh `gateway template` tự điền gợi ý (tắt bằng `--no-suggest`).
+
 ### 3.1 Khung **New channel / ECU connection**
 
 Chỉ dùng trong ba trường hợp (dòng chữ xám ở cuối khung cho biết trường hợp nào đang áp dụng):
@@ -300,7 +318,9 @@ python -m ecucstudio gateway template --dbc Body.dbc --node GwEcu --vlan 20 --ec
 :: file base chưa có Ethernet (hoặc thêm VLAN mới với --new-channel): cho VLAN và IP của ECU
 python -m ecucstudio gateway template --base can_only.arxml --dbc Body.dbc --node GwEcu --vlan 20 --ecu-ip 10.0.20.1 -o gateway.json
 
-:: 3. điền phần Ethernet trong gateway.json (xem mục 9), rồi xem trước kết quả (không ghi file)
+:: 3. template đã điền gợi ý Ethernet (mục 3.0); kiểm tra / sửa gateway.json (mục 9). Gợi ý lại các ô còn trống:
+python -m ecucstudio gateway suggest gateway.json --write
+:: xem trước kết quả (không ghi file)
 python -m ecucstudio gateway plan gateway.json
 
 :: 4. ghi file network mới + CSV (exit code 1 nếu còn ERROR)

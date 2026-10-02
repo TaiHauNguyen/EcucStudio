@@ -137,7 +137,7 @@ Mở: menu **Tools → CAN-Ethernet Gateway Generator…**, `run.bat gateway`, h
 | Project DaVinci (.dpa) | thay cho DBC: chọn file `.dpa` của project đã import DBC; tool đọc message của ECU từ `Config\System\Communication.arxml` và tạo **file bổ sung** (Ethernet + gateway) để thêm vào Input Files, DBC giữ nguyên |
 | DBC + node | node = ECU gateway trong DBC. Message node **nhận** → CAN→ETH, message node **gửi** → ETH→CAN, map 1:1. NM và diagnostic mặc định bỏ (bật được) |
 | Kênh CAN | dùng kênh có sẵn trong base (frame tìm theo CAN ID, chỉ thêm port nếu thiếu) hoặc tạo CAN cluster mới từ DBC (baud rate từ DBC hoặc nhập) |
-| Ethernet (nhập tay) | VLAN (có sẵn hoặc tạo mới), connector của ECU, IP local; mỗi chiều chọn socket có sẵn hoặc nhập port local + IP/port remote để tạo socket mới; header ID set |
+| Ethernet (nhập tay hoặc **Suggest values**) | VLAN (có sẵn hoặc tạo mới), connector của ECU, IP local; mỗi chiều chọn socket có sẵn hoặc nhập port local + IP/port remote để tạo socket mới; header ID set. Nút *Suggest values* / lệnh `gateway suggest` điền các ô trống từ nội dung file (kênh ECU đang dùng, IP trống kế tiếp, node đối tác, cặp port trống, MAC) kèm lý do |
 
 **Header ID**: = CAN ID đệm 0 thành 32 bit (`0x123` → `0x00000123`). Nếu trùng với PDU khác được nhận trên
 cùng socket (tính cả PDU có sẵn trong base) tool tự đặt cờ ở bit 29..31 (`k << 29`, k = 1..7 — CAN ID 29 bit

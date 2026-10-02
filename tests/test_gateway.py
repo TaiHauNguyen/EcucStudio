@@ -477,6 +477,51 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual([m.findtext(q("SOURCE-I-PDU-REF")) for m in gw], [r.can_pt])
         self._xsd(res.output)
 
+    # ------------------------------------------------------------------ suggested Ethernet settings
+    def test_suggest_with_existing_ethernet(self):
+        from ecucstudio.gateway.suggest import apply, suggest
+        cfg = GatewayConfig(base=BASE, output=self.out)
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+        sugg = {x.field: x.value for x in suggest(cfg)}
+        self.assertEqual(sugg["ethernet.channel"], "/Topology/Clusters/EthCluster/Eth_VLAN10")
+        self.assertNotIn("ethernet.ecu_ip", sugg)                      # the ECU already has an address
+        self.assertEqual(sugg["ethernet.can_to_eth.remote_ip"], "10.0.10.2")      # partner of the ECU
+        self.assertEqual((sugg["ethernet.can_to_eth.local_port"], sugg["ethernet.eth_to_can.local_port"]),
+                         (42001, 42002))                               # next free pair after 42000
+        apply(cfg, suggest(cfg))
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self._xsd(generate(plan).output)
+
+    def test_suggest_without_ethernet(self):
+        from ecucstudio.gateway.suggest import apply, suggest
+        cfg = GatewayConfig(base=CAN_ONLY, output=self.out)
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+        cfg.ethernet.vlan_id = 30
+        sugg = {x.field: x.value for x in suggest(cfg)}
+        self.assertEqual(sugg["ethernet.ecu_ip"], "192.168.30.1")
+        self.assertEqual(sugg["ethernet.eth_to_can.remote_ip"], "192.168.30.2")
+        self.assertEqual(sugg["ethernet.mac"], "02:00:C0:A8:1E:01")     # new controller
+        self.assertEqual(sugg["ethernet.can_to_eth.local_port"], 50000)
+        apply(cfg, suggest(cfg))
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self._xsd(generate(plan).output)
+
+    def test_suggest_keeps_user_values_and_new_vlan(self):
+        from ecucstudio.gateway.suggest import apply, suggest
+        cfg = GatewayConfig(base=BASE, output=self.out, buses=[BusInput(dbc=DBC, node="GwEcu")])
+        cfg.ethernet.new_channel = True
+        cfg.ethernet.can_to_eth.local_port = 4000
+        sugg = suggest(cfg)
+        fields = {x.field: x.value for x in sugg}
+        self.assertEqual(fields["ethernet.vlan_id"], 20)                # next free VLAN after 10
+        self.assertEqual(fields["ethernet.ecu_ip"], "192.168.20.1")
+        applied = apply(cfg, sugg)
+        self.assertEqual(cfg.ethernet.can_to_eth.local_port, 4000)      # user value kept
+        self.assertNotIn("ethernet.can_to_eth.local_port", {x.field for x in applied})
+        self.assertEqual(make_plan(cfg).errors, [])
+
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))
         self.assertTrue(any("already has VLAN 10" in e for e in plan.errors), plan.errors)

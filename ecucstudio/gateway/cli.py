@@ -2,6 +2,7 @@
 
     python -m ecucstudio gateway inspect  --base network.arxml [--dbc bus.dbc]
     python -m ecucstudio gateway template [--base network.arxml] --dbc bus.dbc --node ECU -o gateway.json
+    python -m ecucstudio gateway suggest  gateway.json [--write]
     python -m ecucstudio gateway plan     gateway.json
     python -m ecucstudio gateway generate gateway.json [-o out.arxml]
     python -m ecucstudio gateway gui      [gateway.json]
@@ -86,11 +87,34 @@ def cmd_template(a):
     cfg.ethernet.vlan_id = a.vlan
     cfg.ethernet.ecu_ip = a.ecu_ip or ""
     cfg.ethernet.new_channel = bool(a.new_channel)
+    if not a.no_suggest:
+        from .suggest import apply, suggest
+        try:
+            for s in apply(cfg, suggest(cfg)):
+                print("[SUGGESTED]", s)
+        except (OSError, RuntimeError, ValueError) as exc:
+            print("[INFO]      no Ethernet suggestion:", exc)
     cfg.save(a.out)
-    print("Written", os.path.abspath(a.out), "- fill in the Ethernet settings (ports, remote IP) and run 'plan'.")
+    print("Written", os.path.abspath(a.out), "- check the Ethernet settings and run 'plan'.")
     if proj and not a.can_channel:
         print(f"All {len(cfg.buses)} CAN channel(s) of {proj.ecu_name} are listed in 'buses'; remove the ones "
               f"that are not routed.")
+    return 0
+
+
+def cmd_suggest(a):
+    from .suggest import apply, suggest
+    cfg = _load(a.config)
+    sugg = suggest(cfg)
+    applied = apply(cfg, sugg) if a.write else []
+    for s in sugg:
+        tag = "[WRITTEN]  " if s in applied else ("[KEPT]     " if a.write else "[SUGGESTED]")
+        print(tag, s)
+    if not sugg:
+        print("Nothing to suggest: all Ethernet settings are filled in.")
+    if a.write and applied:
+        cfg.save(a.config)
+        print("Updated", os.path.abspath(a.config))
     return 0
 
 
@@ -156,8 +180,13 @@ def main(argv=None):
     p.add_argument("--vlan", type=int, help="VLAN id of a new channel (base file without Ethernet / --new-channel)")
     p.add_argument("--ecu-ip", help="IP address of the ECU when its network endpoint is created")
     p.add_argument("--output-arxml")
+    p.add_argument("--no-suggest", action="store_true", help="do not fill in suggested Ethernet settings")
     p.add_argument("-o", "--out", required=True)
     p.set_defaults(fn=cmd_template)
+    p = sub.add_parser("suggest", help="suggest the empty Ethernet settings of a gateway.json")
+    p.add_argument("config")
+    p.add_argument("--write", action="store_true", help="write the suggestions into the empty fields of the file")
+    p.set_defaults(fn=cmd_suggest)
     p = sub.add_parser("plan", help="show the routes, header ids and warnings without writing")
     p.add_argument("config")
     p.set_defaults(fn=cmd_plan)
