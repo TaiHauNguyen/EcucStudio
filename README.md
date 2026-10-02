@@ -124,6 +124,8 @@ Sinh **System Description** (file network ARXML) có gateway PduR giữa CAN và
 DaVinci Configurator (*Input Files*). Từ file này DaVinci tự suy ra PduR routing path, SoAd PduRoute /
 SocketRoute (header ID) và CanIf PDU — không phải sửa ECUC bằng tay.
 
+Hướng dẫn sử dụng đầy đủ: [docs/GATEWAY.md](docs/GATEWAY.md).
+
 Mở: menu **Tools → CAN-Ethernet Gateway Generator…**, `run.bat gateway`, hoặc
 `python -m ecucstudio gateway gui [gateway.json]`. Cần thêm gói `cantools` (có trong requirements.txt).
 
