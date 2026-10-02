@@ -158,7 +158,7 @@ class GatewayConfig:
     @classmethod
     def load(cls, path: str) -> "GatewayConfig":
         path = os.path.abspath(path)
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:      # Notepad saves UTF-8 with a BOM
             return cls.from_dict(json.load(fh), os.path.dirname(path))
 
 

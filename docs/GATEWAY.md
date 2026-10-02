@@ -15,7 +15,8 @@ Có hai cách dùng: **giao diện** (mục 1–7) hoặc **command line** (mụ
 - File network ARXML mà project đang dùng (ví dụ export từ PREEvision). Có Ethernet cluster thì gateway được gộp
   vào cluster đó. **Chưa có** Ethernet cluster (file chỉ có CAN) thì tool tự tạo cluster, kênh (VLAN), controller,
   connector và địa chỉ IP của ECU, xem mục 3.1.
-- File DBC của các bus CAN cần gateway, và tên node của ECU gateway trong DBC.
+- File DBC của các bus CAN cần gateway, và tên node của ECU gateway trong DBC. Encoding được tự nhận dạng:
+  UTF-8 có/không BOM, UTF-16, cp1252 (mặc định của tool Vector).
 - Thông tin Ethernet: VLAN, port UDP/TCP của ECU, IP và port của node bên kia (hoặc dùng socket đã có
   trong file network). Nếu tool phải tạo kênh mới: thêm IP của ECU (và MAC nếu muốn).
 
@@ -307,6 +308,7 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
 | `the connector has no network endpoint` | chọn **Local endpoint** (IP của ECU) |
 | `header id 0x… is already used by …` (ERROR) | header ID nhập tay bị trùng: đổi giá trị hoặc xoá để tool tự gán |
 | `node '…' is not in …` | tên node không có trong DBC: chọn lại ở hộp thoại DBC |
+| `… is not a valid DBC file: …` | file không phải DBC hoặc bị hỏng; xem dòng/cột trong thông báo. (Bản cũ báo `Invalid syntax at line 1, column 1: ">>!<<ï»¿VERSION"` với DBC lưu kèm BOM UTF-8 — đã sửa, cập nhật tool bằng `git pull`) |
 | Warning `remote endpoint … is an address of <ECU> itself` | IP remote đang là IP của chính ECU: nhập IP của node bên kia |
 | Warning `… N:1 route` | PDU CAN đó đã là đích của một route khác; N:1 chỉ có trong MICROSAR dạng extension, tắt route nếu không cần |
 

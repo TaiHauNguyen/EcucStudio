@@ -1,6 +1,7 @@
 """Read a CAN database (DBC) into the small model the gateway generator needs."""
 from __future__ import annotations
 
+import codecs
 import os
 from dataclasses import dataclass, field
 
@@ -103,12 +104,31 @@ def _int(v):
         return None
 
 
+def read_text(path: str) -> str:
+    """DBC text with the encoding detected: a BOM (UTF-8 / UTF-16, written by some editors and export tools),
+    else UTF-8, else the Windows code page Vector tools use (cp1252)."""
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    if raw.startswith(codecs.BOM_UTF8):
+        return raw[len(codecs.BOM_UTF8):].decode("utf-8", errors="replace")
+    if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return raw.decode("utf-16", errors="replace")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
 def load(path: str) -> Database:
     try:
         import cantools
     except ImportError as exc:     # pragma: no cover - depends on the installation
         raise RuntimeError("Reading DBC files needs the 'cantools' package: pip install cantools") from exc
-    db = cantools.database.load_file(path, database_format="dbc", strict=False)
+    text = read_text(path)
+    try:
+        db = cantools.database.load_string(text, database_format="dbc", strict=False)
+    except Exception as exc:       # cantools raises its own ParseError types
+        raise RuntimeError(f"{os.path.basename(path)} is not a valid DBC file: {exc}") from None
     defs = dict(getattr(db.dbc, "attribute_definitions", {}) or {}) if db.dbc else {}
     name = _attr(db, defs, "DBName") or os.path.splitext(os.path.basename(path))[0]
     bus_type = str(_attr(db, defs, "BusType", "") or "")

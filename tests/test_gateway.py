@@ -2,6 +2,7 @@
 
 Set ECUCSTUDIO_TEST_XSD to an AUTOSAR schema (e.g. AUTOSAR_4-7-0.xsd) to also validate the output.
 """
+import codecs
 import collections
 import json
 import os
@@ -81,6 +82,27 @@ class GatewayTest(unittest.TestCase):
         sig = {s.name: s for s in m["BrakeStatus"].signals}
         self.assertFalse(sig["BrakePressure"].little_endian)
         self.assertEqual(sig["BrakePressure"].start, 7)
+
+    def test_dbc_encodings(self):
+        """DBC files with a UTF-8 BOM, in UTF-16 or with cp1252 characters are read like plain ones."""
+        with open(DBC, "rb") as fh:
+            plain = fh.read().decode("ascii")
+        text = plain.replace('"degC"', '"' + chr(0xB0) + 'C"')   # degree sign: not in ASCII
+        variants = {"bom.dbc": codecs.BOM_UTF8 + text.encode("utf-8"),
+                    "utf16.dbc": text.encode("utf-16"),
+                    "cp1252.dbc": text.encode("cp1252")}
+        for name, data in variants.items():
+            path = os.path.join(self.tmp, name)
+            with open(path, "wb") as fh:
+                fh.write(data)
+            db = dbcread.load(path)
+            self.assertEqual(len(db.messages), 6, name)
+            self.assertEqual(db.name, "Body", name)
+        bad = os.path.join(self.tmp, "bad.dbc")
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write("this is not a dbc file\n")
+        with self.assertRaises(RuntimeError):
+            dbcread.load(bad)
 
     # ------------------------------------------------------------------ plan
     def test_plan_routes_and_header_ids(self):
@@ -233,6 +255,10 @@ class GatewayTest(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
         self.assertEqual(raw["ethernet"]["eth_to_can"]["local_port"], 42001)
+        with open(path, "rb") as fh:                    # as saved by Notepad: UTF-8 with BOM
+            data = fh.read()
+        with open(path, "wb") as fh:
+            fh.write(codecs.BOM_UTF8 + data)
         back = GatewayConfig.load(path)
         self.assertEqual(os.path.normcase(back.base), os.path.normcase(BASE))
         self.assertEqual(back.buses[0].messages, {"DoorStatus": {"enabled": False}})
