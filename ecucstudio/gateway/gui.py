@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from ..gui.theme import COLORS, init_style
 from ..gui.widgets import Tooltip, dialog_header
-from . import dbcread, report
+from . import dbcread, dvproject, report
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
 from .config import BusInput, GatewayConfig, Naming, SocketSide
 from .planner import load_base, make_plan, new_ecu_name
@@ -74,20 +74,27 @@ class Choice:
 class BusDialog(tk.Toplevel):
     """Add / edit one DBC input."""
 
-    def __init__(self, master, bus: BusInput, base: Base | None, dbc_cache: dict):
+    def __init__(self, master, bus: BusInput, base: Base | None, dbc_cache: dict, project_ecu: str = ""):
         super().__init__(master)
         self.title("CAN Bus Input")
         self.transient(master)
         self.resizable(True, False)
         self.bus, self.base, self.cache, self.result = bus, base, dbc_cache, None
-        dialog_header(self, "CAN bus input",
-                      "Select the DBC and the node that is the gateway ECU in it. Messages the node receives are "
-                      "routed CAN -> Ethernet, messages it sends Ethernet -> CAN.")
+        self.project_ecu = project_ecu
+        if project_ecu:
+            text = ("Select a CAN channel of the DaVinci project: the messages the ECU "
+                    f"{project_ecu.rsplit('/', 1)[-1]} receives are routed CAN -> Ethernet, the ones it sends "
+                    "Ethernet -> CAN. A DBC file is only needed for a bus that is not in the project.")
+        else:
+            text = ("Select the DBC and the node that is the gateway ECU in it. Messages the node receives are "
+                    "routed CAN -> Ethernet, messages it sends Ethernet -> CAN.")
+        dialog_header(self, "CAN bus input", text)
         f = ttk.Frame(self, padding=10)
         f.pack(fill="both", expand=True)
         f.columnconfigure(1, weight=1)
         r = 0
-        ttk.Label(f, text="DBC file:").grid(row=r, column=0, sticky="w", pady=2)
+        ttk.Label(f, text="DBC file (optional):" if project_ecu else "DBC file:").grid(row=r, column=0, sticky="w",
+                                                                                      pady=2)
         self.dbc = tk.StringVar(value=bus.dbc)
         ttk.Entry(f, textvariable=self.dbc, width=70).grid(row=r, column=1, sticky="we", pady=2)
         ttk.Button(f, text="Browse…", command=self.browse).grid(row=r, column=2, padx=(4, 0))
@@ -130,7 +137,11 @@ class BusDialog(tk.Toplevel):
         ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
         ttk.Button(bb, text="OK", command=self.ok).pack(side="right", padx=6)
         chans = [(NEW_CLUSTER, "")]
-        if base is not None:
+        if base is not None and project_ecu:
+            counts = {ch: (rx, tx) for ch, rx, tx in dvproject.ecu_can_channels(base, project_ecu)}
+            chans = [(f"{c.cluster_name}   ({c.path})   - ECU receives {counts[c.path][0]}, sends "
+                      f"{counts[c.path][1]}", c.path) for c in base.can_channels() if c.path in counts] + chans
+        elif base is not None:
             chans += [(f"{c.name}   ({c.path})", c.path) for c in base.can_channels()]
         self.channel.set_items(chans, keep=False)
         self.channel.set(bus.channel if not bus.new_channel else "")
@@ -179,16 +190,22 @@ class BusDialog(tk.Toplevel):
 
     def channel_changed(self):
         ch = self.channel.get()
-        if ch:
-            self.busname.set(ch.rsplit("/", 1)[-1])
+        if ch and self.base is not None and self.base.el(ch) is not None:
+            c = next((x for x in self.base.can_channels() if x.path == ch), None)
+            generic = c is not None and c.name.upper() in ("CHNL", "CHANNEL", "CH")
+            self.busname.set(c.cluster_name if generic else ch.rsplit("/", 1)[-1])
 
     def ok(self):
-        if not self.dbc.get().strip() or not self.node.get():
+        project_only = self.project_ecu and not self.dbc.get().strip()
+        if project_only and not self.channel.get():
+            messagebox.showwarning(TITLE, "Select a CAN channel of the project.", parent=self)
+            return
+        if not project_only and (not self.dbc.get().strip() or not self.node.get()):
             messagebox.showwarning(TITLE, "Select a DBC file and the gateway node.", parent=self)
             return
         b = self.bus
-        b.dbc = os.path.abspath(self.dbc.get().strip())
-        b.node = self.node.get()
+        b.dbc = "" if project_only else os.path.abspath(self.dbc.get().strip())
+        b.node = "" if project_only else self.node.get()
         b.channel = self.channel.get()
         b.new_channel = not b.channel
         b.bus = self.busname.get().strip()
@@ -335,6 +352,7 @@ class GatewayWindow:
         self.cfg = GatewayConfig()
         self.cfg_path = None
         self.base: Base | None = None
+        self.project = None                 # DvProject when the base is a DaVinci project (.dpa)
         self._base_key = None
         self.dbc_cache: dict = {}
         self.plan = None
@@ -379,14 +397,14 @@ class GatewayWindow:
         nb.add(f, text="  Input  ")
         f.columnconfigure(1, weight=1)
         self.v_base, self.v_out = tk.StringVar(), tk.StringVar()
-        ttk.Label(f, text="Base system description:").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Label(f, text="Network file / DaVinci project:").grid(row=0, column=0, sticky="w", pady=2)
         e = ttk.Entry(f, textvariable=self.v_base)
         e.grid(row=0, column=1, sticky="we", pady=2)
         e.bind("<FocusOut>", lambda _e: self.load_base())
         e.bind("<Return>", lambda _e: self.load_base())
         ttk.Button(f, text="Browse…", command=self.browse_base).grid(row=0, column=2, padx=4)
-        Tooltip(e, "Network file of the project. Leave empty when you only have DBC files: "
-                   "a new network file is created")
+        Tooltip(e, "Network ARXML of the project, or the DaVinci project (.dpa) in which the CAN databases are "
+                   "already imported. Leave empty when you only have DBC files: a new network file is created")
         ttk.Label(f, text="Output file:").grid(row=1, column=0, sticky="w", pady=2)
         ttk.Entry(f, textvariable=self.v_out).grid(row=1, column=1, sticky="we", pady=2)
         ttk.Button(f, text="Browse…", command=self.browse_out).grid(row=1, column=2, padx=4)
@@ -583,11 +601,13 @@ class GatewayWindow:
 
     # ------------------------------------------------------------------ base file
     def browse_base(self):
-        p = filedialog.askopenfilename(parent=self.win, title="Base system description",
-                                       filetypes=[("AUTOSAR XML", "*.arxml"), ("All files", "*.*")])
+        p = filedialog.askopenfilename(parent=self.win, title="Network file or DaVinci project",
+                                       filetypes=[("Network ARXML / DaVinci project", "*.arxml *.dpa"),
+                                                  ("AUTOSAR XML", "*.arxml"), ("DaVinci project", "*.dpa"),
+                                                  ("All files", "*.*")])
         if p:
             self.v_base.set(os.path.normpath(p))
-            if not self.v_out.get():
+            if not self.v_out.get() and not dvproject.is_project(p):
                 self.v_out.set(os.path.splitext(p)[0] + "_gateway.arxml")
             self.load_base()
 
@@ -612,6 +632,7 @@ class GatewayWindow:
             name = new_ecu_name(cfg)
             key = ("new", name, cfg.schema)
             if key != self._base_key:
+                self.project = None
                 self.base, self._base_key = new_document("new.arxml", name, cfg.schema), key
                 self.base_info.config(text=f"No base file: a new network file ({cfg.schema}) is created with the "
                                            f"ECU {name} (type another name in Gateway ECU).")
@@ -628,15 +649,30 @@ class GatewayWindow:
                 then()
             return
 
-        def done(base):
-            self.base, self._base_key = base, key
-            self.base_info.config(text=f"{base.schema}: {len(base.ecus())} ECU, {len(base.eth_channels())} "
-                                       f"Ethernet channel(s), {len(base.can_channels())} CAN channel(s)")
+        def done(res):
+            proj, base = res
+            self.project, self.base, self._base_key = proj, base, key
+            if proj:
+                chans = dvproject.ecu_can_channels(base, proj.ecu_path)
+                self.base_info.config(text=f"DaVinci project {proj.name} ({base.schema}): ECU instance "
+                                           f"{proj.ecu_name}, {len(chans)} CAN channel(s). The output is an "
+                                           f"additional input file (Ethernet + gateway); the DBC files stay imported.")
+                if not self.v_out.get():
+                    self.v_out.set(os.path.join(proj.dir, f"{proj.ecu_name}_CanEthGateway.arxml"))
+            else:
+                self.base_info.config(text=f"{base.schema}: {len(base.ecus())} ECU, {len(base.eth_channels())} "
+                                           f"Ethernet channel(s), {len(base.can_channels())} CAN channel(s)")
             self.fill_from_base()
-            self.status.config(text="Base file loaded.")
+            self.status.config(text="Project loaded." if proj else "Base file loaded.")
             if then:
                 then()
-        self._run("Loading " + os.path.basename(path), lambda: Base(path), done)
+
+        def work():
+            if dvproject.is_project(path):
+                proj = dvproject.read(path)
+                return proj, dvproject.load_communication(proj)
+            return None, Base(path)
+        self._run("Loading " + os.path.basename(path), work, done)
 
     def fill_from_base(self):
         b = self.base
@@ -648,6 +684,13 @@ class GatewayWindow:
         self.c_cluster.set_items([(AUTO, "")] + [(p.rsplit("/", 1)[-1], p) for p in b.eth_clusters()])
         self.c_cluster.set(self.cfg.ethernet.cluster)
         self.ecu_changed()
+
+    def project_ecu(self) -> str:
+        """ECU instance of the loaded DaVinci project ('' when the base is not a project)."""
+        proj = getattr(self, "project", None)
+        if not proj or self.base is None:
+            return ""
+        return self.ecu() or proj.ecu_path
 
     def ecu(self):
         if self.base is None:
@@ -712,6 +755,9 @@ class GatewayWindow:
         elif ch is not None and not conns:
             hint = ("The ECU is not connected to this channel: a connector is created. Enter the ECU IP "
                     "address unless the channel already has it.")
+        elif ch is not None and not [e for e in ch.endpoints if e.path in set(self.own_endpoints())]:
+            hint = ("The ECU has no IP address on this channel: enter the ECU IP address (its network endpoint "
+                    "is created).")
         else:
             hint = "Not used: the ECU is already connected to the selected channel."
         self.new_eth_hint.config(text=hint)
@@ -744,10 +790,11 @@ class GatewayWindow:
         for i, b in enumerate(self.cfg.buses):
             dirs = ", ".join(x for x, on in (("CAN->ETH", b.rx), ("ETH->CAN", b.tx)) if on)
             self.t_bus.insert("", "end", iid=str(i), values=(
-                os.path.basename(b.dbc), b.node, b.channel or NEW_CLUSTER, b.bus or "(auto)", dirs))
+                os.path.basename(b.dbc) if b.dbc else "(DaVinci project)", b.node or "(project ECU)",
+                b.channel or NEW_CLUSTER, b.bus or "(auto)", dirs))
 
     def add_bus(self):
-        d = BusDialog(self.win, BusInput(), self.base, self.dbc_cache)
+        d = BusDialog(self.win, BusInput(), self.base, self.dbc_cache, self.project_ecu())
         self.win.wait_window(d)
         if d.result:
             self.cfg.buses.append(d.result)
@@ -763,7 +810,7 @@ class GatewayWindow:
         sel = self.t_bus.selection()
         if not sel:
             return
-        d = BusDialog(self.win, self.cfg.buses[int(sel[0])], self.base, self.dbc_cache)
+        d = BusDialog(self.win, self.cfg.buses[int(sel[0])], self.base, self.dbc_cache, self.project_ecu())
         self.win.wait_window(d)
         self.refresh_buses()
 
@@ -906,8 +953,13 @@ class GatewayWindow:
                 res, csv_path = r
                 self.show_messages([], res.warnings, [f"Written {res.output}", f"Route table: {csv_path}"])
                 self.status.config(text=f"Written {os.path.basename(res.output)}: {len(res.routes)} route(s)")
-                how = ("instead of the base file" if cfg.base else
-                       f"for the ECU instance {new_ecu_name(cfg)} (do not import the same DBC files again)")
+                if dvproject.is_project(cfg.base):
+                    how = ("as an additional system description for the ECU instance next to the DBC files, "
+                           "then run Update")
+                elif cfg.base:
+                    how = "instead of the base file"
+                else:
+                    how = f"for the ECU instance {new_ecu_name(cfg)} (do not import the same DBC files again)"
                 messagebox.showinfo(TITLE, f"Written {res.output}\n\n{len(res.routes)} route(s).\n"
                                            f"Import this file into DaVinci Configurator (Input Files) {how}.",
                                     parent=self.win)

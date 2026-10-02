@@ -34,9 +34,20 @@ def _print_plan(plan, verbose=True):
 
 
 def cmd_inspect(a):
-    from . import dbcread, report
+    from . import dbcread, dvproject, report
     from .base import Base
-    if a.base:
+    if a.base and dvproject.is_project(a.base):
+        proj = dvproject.read(a.base)
+        base = dvproject.load_communication(proj)
+        print(f"DaVinci project {proj.name}: ECU instance {proj.ecu_path}")
+        print(f"Communication description: {proj.communication}")
+        for i in proj.inputs:
+            print(f"  input {i.category:<34} {os.path.basename(i.path)}")
+        print(report.inventory(base))
+        print(f"CAN channels of {proj.ecu_name} (messages received / sent):")
+        for ch, rx, tx in dvproject.ecu_can_channels(base, proj.ecu_path):
+            print(f"  {ch:<50} {rx:>4} / {tx:<4}")
+    elif a.base:
         print(report.inventory(Base(a.base)))
     for path in a.dbc or []:
         db = dbcread.load(path)
@@ -49,22 +60,37 @@ def cmd_inspect(a):
 
 
 def cmd_template(a):
+    from . import dvproject
     from .config import BusInput, GatewayConfig
-    if a.base:
+    proj = dvproject.read(a.base) if a.base and dvproject.is_project(a.base) else None
+    if not proj and not a.dbc:
+        print("[ERROR] give --dbc (or --base with a DaVinci project .dpa)", file=sys.stderr)
+        return 2
+    if proj:                    # additional input file of the project
+        default_out = os.path.join(proj.dir, f"{proj.ecu_name}_CanEthGateway.arxml")
+    elif a.base:
         default_out = os.path.splitext(a.base)[0] + "_gateway.arxml"
     else:                       # only DBC files: a new network file next to the first DBC
         default_out = os.path.splitext(a.dbc[0])[0] + "_network.arxml"
     cfg = GatewayConfig(base=os.path.abspath(a.base) if a.base else "",
                         output=os.path.abspath(a.output_arxml or default_out), ecu=a.ecu or "",
                         schema=a.schema)
-    for d in a.dbc:
+    for d in a.dbc or []:
         cfg.buses.append(BusInput(dbc=os.path.abspath(d), node=a.node or ""))
+    if proj:
+        channels = a.can_channel or [c for c, _rx, _tx in dvproject.ecu_can_channels(
+            dvproject.load_communication(proj), proj.ecu_path)]
+        for c in channels:
+            cfg.buses.append(BusInput(channel=c))
     cfg.ethernet.channel = a.channel or ""
     cfg.ethernet.vlan_id = a.vlan
     cfg.ethernet.ecu_ip = a.ecu_ip or ""
     cfg.ethernet.new_channel = bool(a.new_channel)
     cfg.save(a.out)
     print("Written", os.path.abspath(a.out), "- fill in the Ethernet settings (ports, remote IP) and run 'plan'.")
+    if proj and not a.can_channel:
+        print(f"All {len(cfg.buses)} CAN channel(s) of {proj.ecu_name} are listed in 'buses'; remove the ones "
+              f"that are not routed.")
     return 0
 
 
@@ -117,11 +143,13 @@ def main(argv=None):
     p.add_argument("--dbc", action="append")
     p.set_defaults(fn=cmd_inspect)
     p = sub.add_parser("template", help="write a starting gateway.json")
-    p.add_argument("--base", help="network file of the project (omit when there are only DBC files)")
+    p.add_argument("--base", help="network file or DaVinci project .dpa (omit when there are only DBC files)")
     p.add_argument("--ecu", help="ECU instance name of a new file (default: the DBC node)")
     p.add_argument("--schema", default="AUTOSAR_00052", help="schema of a new file (DaVinci 5.24: AUTOSAR_00049 "
                                                              "or older)")
-    p.add_argument("--dbc", action="append", required=True)
+    p.add_argument("--dbc", action="append", help="DBC file (repeat for several buses)")
+    p.add_argument("--can-channel", action="append",
+                   help="with a .dpa: CAN channel of the project (path or cluster name; default: all of the ECU)")
     p.add_argument("--node")
     p.add_argument("--channel", help="Ethernet channel (path, short name or VLANnn)")
     p.add_argument("--new-channel", action="store_true", help="create a new Ethernet channel (VLAN)")

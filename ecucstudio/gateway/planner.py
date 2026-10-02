@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 
 from .. import arxml
 from ..arxml import local, q
-from . import dbcread
+from . import dbcread, dvproject
 from .base import Base, CanChannel, EthChannel, new_document
 from .config import BusInput, GatewayConfig, SocketSide
 
@@ -142,6 +142,7 @@ class Plan:
     cfg: GatewayConfig
     ecu: str = ""
     ecu_name: str = ""
+    delta: bool = False             # output = additional input file for a DaVinci project (not base + gateway)
     system: str | None = None
     eth_cluster: str = ""
     eth_cluster_new: bool = False
@@ -214,7 +215,10 @@ def new_ecu_name(cfg: GatewayConfig) -> str:
 
 
 def load_base(cfg: GatewayConfig) -> Base:
-    """The base file of *cfg*, or a new system description when no base file is given."""
+    """The base file of *cfg*: a network file, the communication description of a DaVinci project (.dpa),
+    or a new system description when no base file is given."""
+    if dvproject.is_project(cfg.base):
+        return dvproject.load_communication(dvproject.read(cfg.base))
     if cfg.base:
         return Base(cfg.base)
     return new_document(cfg.output or "network_gateway.arxml", new_ecu_name(cfg), cfg.schema or "AUTOSAR_00052")
@@ -233,6 +237,7 @@ def choose_package(base: Base, tag: str) -> str:
 class Planner:
     def __init__(self, cfg: GatewayConfig, base: Base | None = None, dbc_cache: dict | None = None):
         self.cfg = cfg
+        self.project = dvproject.read(cfg.base) if dvproject.is_project(cfg.base) else None
         self.base = base or load_base(cfg)
         self.dbc_cache = dbc_cache if dbc_cache is not None else {}
         self.plan = Plan(cfg)
@@ -280,6 +285,11 @@ class Planner:
     # ------------------------------------------------------------------ main
     def run(self) -> Plan:
         b, cfg, plan = self.base, self.cfg, self.plan
+        if self.project:
+            plan.delta = True
+            self.info(f"DaVinci project {self.project.name}: CAN messages are read from "
+                      f"{os.path.basename(self.project.communication)}; the output is an additional input file "
+                      f"(Ethernet + gateway) for ECU instance {self.project.ecu_name}, the DBC files stay imported.")
         if not cfg.base:
             self.info(f"No base file: a new system description ({self.base.schema}) is created with the ECU "
                       f"{self.base.ecus()[0].rsplit('/', 1)[-1] if self.base.ecus() else '?'}.")
@@ -317,6 +327,8 @@ class Planner:
         ecus = b.ecus()
         if not cfg.base and len(ecus) == 1:          # new file: the ECU created from cfg.ecu / the DBC node
             plan.ecu = ecus[0]
+        elif self.project and not cfg.ecu and self._find(self.project.ecu_path, "ECU-INSTANCE"):
+            plan.ecu = self._find(self.project.ecu_path, "ECU-INSTANCE")
         elif cfg.ecu:
             plan.ecu = self._find(cfg.ecu, "ECU-INSTANCE") or ""
             if not plan.ecu:
@@ -481,27 +493,38 @@ class Planner:
     # ------------------------------------------------------------------ buses
     def _plan_bus(self, bc: BusInput):
         b, plan, naming = self.base, self.plan, self.cfg.naming
-        if not bc.dbc:
-            raise ValueError("no DBC file selected")
-        db = self.dbc(bc.dbc)
-        if not bc.node:
-            raise ValueError("select the gateway node of the DBC")
-        if bc.node not in db.nodes and not any(bc.node in m.senders or bc.node in m.receivers for m in db.messages):
-            raise ValueError(f"node '{bc.node}' is not in {db.name} (nodes: {', '.join(db.nodes)})")
         can_channels = b.can_channels()
+        if not bc.dbc:
+            if not self.project:
+                raise ValueError("no DBC file selected")
+            # messages of the ECU on a CAN channel of the DaVinci project
+            hits = [c for c in can_channels if bc.channel and bc.channel in (c.path, c.name, c.cluster_name)]
+            if len(hits) != 1:
+                raise ValueError(f"select the CAN channel of the project ('{bc.channel}' not found or ambiguous)")
+            db = dvproject.channel_database(b, hits[0].path, plan.ecu)
+            node = plan.ecu_name
+            if not b.ecu_connector_on(plan.ecu, hits[0].path):
+                raise ValueError(f"{plan.ecu_name} is not connected to {hits[0].path}")
+        else:
+            db = self.dbc(bc.dbc)
+            node = bc.node
+            if not node:
+                raise ValueError("select the gateway node of the DBC")
+            if node not in db.nodes and not any(node in m.senders or node in m.receivers for m in db.messages):
+                raise ValueError(f"node '{node}' is not in {db.name} (nodes: {', '.join(db.nodes)})")
         ch: CanChannel | None = None
         if bc.channel and not bc.new_channel:
             hits = [c for c in can_channels if bc.channel in (c.path, c.name, c.cluster_name)]
             if len(hits) != 1:
                 raise ValueError(f"CAN channel '{bc.channel}' not found (or ambiguous) in the base file")
             ch = hits[0]
-        busname = sanitize(bc.bus or (ch.name if ch else db.name))
+        busname = sanitize(bc.bus or (db.name if not bc.dbc else (ch.name if ch else db.name)))
         if ch is None and not bc.new_channel and not bc.channel:
             hits = [c for c in can_channels if busname.lower() in (c.name.lower(), c.cluster_name.lower())]
             if len(hits) == 1:
                 ch = hits[0]
                 self.info(f"{db.name}: using the existing CAN channel {ch.path} (same name as the bus).")
-        fields = dict(bus=busname, ecu=plan.ecu_name, node=bc.node)
+        fields = dict(bus=busname, ecu=plan.ecu_name, node=node)
         if ch is not None:
             bp = BusPlan(bc, db, busname, ch.path, False, ch.cluster, baudrate=ch.baudrate,
                          fd_baudrate=ch.fd_baudrate)
@@ -523,10 +546,10 @@ class Planner:
             cname = self._unique(plan.ecu, fmt(naming.can_connector, **fields), "CAN connector")
             bp.connector, bp.controller, bp.new_connector = f"{plan.ecu}/{cname}", f"{plan.ecu}/{ctrl}", True
         plan.buses.append(bp)
-        rx, tx = db.node_messages(bc.node)
+        rx, tx = db.node_messages(node)
         todo = ([(m, CAN_TO_ETH) for m in rx] if bc.rx else []) + ([(m, ETH_TO_CAN) for m in tx] if bc.tx else [])
         if not todo:
-            self.warn(f"{db.name}: node {bc.node} has no {'/'.join(x for x, f in (('RX', bc.rx), ('TX', bc.tx)) if f)} "
+            self.warn(f"{db.name}: node {node} has no {'/'.join(x for x, f in (('RX', bc.rx), ('TX', bc.tx)) if f)} "
                       f"messages.")
         for m, direction in todo:
             self._plan_route(bp, m, direction)
@@ -545,7 +568,7 @@ class Planner:
                 r.reason = ""
             elif not r.reason:
                 r.reason = "deselected"
-        fields = dict(bus=bp.name, msg=m.name, ecu=plan.ecu_name, node=bp.cfg.node,
+        fields = dict(bus=bp.name, msg=m.name, ecu=plan.ecu_name, node=bp.cfg.node or plan.ecu_name,
                       canid=f"{m.can_id:X}")
         # ---------------------------------------------------------- CAN side
         ft = None if bp.new_cluster else b.frame_triggering(bp.channel, m.can_id, m.extended)
@@ -576,6 +599,7 @@ class Planner:
             return
         if r.can_pt:
             self._gateway_notes(r)
+            self._com_usage(r)
         r.eth_pdu = self._unique(pdu_pkg, eth_name, "Ethernet PDU")
         r.eth_pt_name = self._unique(plan.eth_channel, fmt(naming.pdu_triggering, pdu=r.eth_pdu, **fields),
                                      "PDU triggering")
@@ -655,6 +679,23 @@ class Planner:
                     r.notes.append(f"already a gateway target of {other} (N:1)")
                     self.warn(f"{r.key}: the CAN PDU is already the target of {other}; a second source makes an "
                               f"N:1 route (only supported as a MICROSAR extension).")
+
+    def _com_usage(self, r: Route):
+        """The ECU itself may send / receive the CAN PDU through Com (its signals have I-SIGNAL-PORTs)."""
+        b, bp = self.base, r.bus
+        if bp.new_connector:
+            return
+        com = b.com_direction(r.can_pt, bp.connector)
+        if com == "IN" and r.direction == CAN_TO_ETH:
+            r.notes.append("also received by Com (CanIf -> Com + Ethernet, 1:N)")
+        elif com == "OUT" and r.direction == ETH_TO_CAN:
+            over = bp.cfg.messages.get(r.message.name, {}) if isinstance(bp.cfg.messages, dict) else {}
+            if over.get("enabled"):
+                self.warn(f"{r.key}: the PDU is also sent by Com of {self.plan.ecu_name}; routing it from Ethernet "
+                          f"gives the CAN PDU two sources (N:1).")
+                r.notes.append("also sent by Com (N:1)")
+            elif r.enabled:
+                r.enabled, r.reason = False, f"sent by Com of {self.plan.ecu_name} (Ethernet would be a 2nd source)"
 
     def _already_routed(self, can_pt: str, eth_pdu: str, direction: str) -> bool:
         """True when a gateway of the base file already maps *can_pt* to / from a triggering of *eth_pdu*."""

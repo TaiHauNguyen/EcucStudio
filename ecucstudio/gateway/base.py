@@ -393,6 +393,24 @@ class Base:
     def id_sets(self) -> list[str]:
         return self.of_type("SOCKET-CONNECTION-IPDU-IDENTIFIER-SET")
 
+    def com_direction(self, pt_path: str, connector: str) -> str | None:
+        """IN / OUT when the ECU (*connector*) processes signals of the PDU triggering itself (I-SIGNAL-PORTs,
+        i.e. Com sends / receives the PDU), else None."""
+        pt = self.el(pt_path)
+        if pt is None:
+            return None
+        for st_path in self.refs(pt.find(q("I-SIGNAL-TRIGGERINGS")), "I-SIGNAL-TRIGGERING-REF"):
+            st = self.el(st_path)
+            if st is None:
+                continue
+            for r in st.iter(q("I-SIGNAL-PORT-REF")):
+                path = (r.text or "").strip()
+                if path.rsplit("/", 1)[0] == connector and self.el(path) is not None:
+                    d = (arxml.text(self.el(path), "COMMUNICATION-DIRECTION") or "").upper()
+                    if d:
+                        return d
+        return None
+
     def pdu_direction(self, pt_path: str, ecu: str) -> str | None:
         """IN / OUT of a PDU triggering seen from *ecu* (via its I-PDU-PORTs)."""
         pt = self.el(pt_path)

@@ -8,6 +8,8 @@ from __future__ import annotations
 import collections
 import copy
 import os
+
+from lxml import etree
 from dataclasses import dataclass, field
 
 from .. import arxml
@@ -64,6 +66,7 @@ class Writer:
                     with_uuid.add(local(e))
         self.uuid_tags = with_uuid | ({t for t in xmlorder.IDENTIFIABLE if t not in present} if with_uuid else set())
         self.created = collections.Counter()
+        self.added: list = []          # every new element / entry, in creation order (for the delta file)
         self.fibex: list[tuple[str, str]] = []
         self.warnings: list[str] = []
         self._sys_signals: set[str] = set()
@@ -79,6 +82,7 @@ class Writer:
     def attach(self, parent, el, parent_path: str):
         """Insert *el* into *parent* (schema order) and index it."""
         xmlorder.insert(parent, el)
+        self.added.append(el)
         self.b.register_tree(el, parent_path)
         if el.find(q("SHORT-NAME")) is not None:
             self.created[local(el)] += 1
@@ -472,7 +476,8 @@ class Writer:
 
     def attach_ref(self, parent, el):
         """Insert a non-identifiable entry (reference wrapper, mapping) into a list container."""
-        arxml.insert_child(parent, el)
+        xmlorder.insert(parent, el)
+        self.added.append(el)
 
     def ensure_port(self, trig_path: str, refs_tag: str, ref_tag: str, port_tag: str, connector: str,
                     name: str, direction: str):
@@ -482,12 +487,14 @@ class Writer:
             return
         path = self.port(connector, port_tag, name, direction)
         refs = xmlorder.ensure(trig, refs_tag)
-        arxml.insert_child(refs, R(ref_tag, port_tag, path))
+        self.attach_ref(refs, R(ref_tag, port_tag, path))
 
     # ------------------------------------------------------------------ system
     def fibex_refs(self):
         p = self.p
-        if not self.cfg.options.add_fibex or not p.system or not self.fibex:
+        # an additional input file of a DaVinci project must not contain a SYSTEM: DaVinci builds the
+        # system of the project from all input files ("Duplicate shortname 'System'" otherwise)
+        if p.delta or not self.cfg.options.add_fibex or not p.system or not self.fibex:
             return
         sys_el = self.b.el(p.system)
         allowed = FIBEX_TYPES | self.b.fibex_types(p.system)
@@ -495,7 +502,7 @@ class Writer:
         lst = xmlorder.ensure(sys_el, "FIBEX-ELEMENTS")
         for dest, path in self.fibex:
             if dest in allowed and path not in have:
-                arxml.insert_child(lst, E("FIBEX-ELEMENT-REF-CONDITIONAL", R("FIBEX-ELEMENT-REF", dest, path)))
+                self.attach_ref(lst, E("FIBEX-ELEMENT-REF-CONDITIONAL", R("FIBEX-ELEMENT-REF", dest, path)))
                 have.add(path)
 
 
@@ -516,6 +523,50 @@ def _restamp(el, path: str, uuid_tags: set[str]):
             sub.attrib.pop("UUID")
 
 
+def extract_delta(base: Base, added: list, path: str) -> arxml.XmlFile:
+    """A file with only the *added* elements of *base*. Their existing ancestors are written as skeletons
+    (SHORT-NAME only) so that DaVinci merges the file with the other input files of the project by path."""
+    added_set = set(added)
+    src_root = base.root
+    droot = etree.Element(src_root.tag, dict(src_root.attrib), nsmap=src_root.nsmap)
+    mapping = {src_root: droot}
+
+    def place(dparent, child):
+        kids = [c for c in dparent if isinstance(c.tag, str)]
+        idx = xmlorder.position(local(dparent), local(child), [local(c) for c in kids])
+        if idx is None:
+            dparent.append(child)
+        else:
+            kids[idx].addprevious(child)
+
+    def skeleton(el):
+        # no UUID: DaVinci rejects a UUID that appears in two files of the input file set
+        sk = etree.Element(el.tag)
+        sn = el.find(q("SHORT-NAME"))
+        if sn is not None:
+            etree.SubElement(sk, sn.tag).text = sn.text
+        return sk
+
+    for el in added:
+        ancestors = list(el.iterancestors())[::-1]          # root first
+        if any(a in added_set for a in ancestors):
+            continue                                       # copied with its new ancestor
+        for anc in ancestors[1:]:
+            if anc not in mapping:
+                mapping[anc] = skeleton(anc)
+                place(mapping[anc.getparent()], mapping[anc])
+        dup = copy.deepcopy(el)
+        _strip_ws(dup)
+        place(mapping[el.getparent()], dup)
+    for e in droot.iter():
+        e.tail = None
+        if len(e):
+            e.text = None
+    etree.indent(droot, space="  ")
+    raw = b'<?xml version="1.0" encoding="UTF-8"?>\n' + etree.tostring(droot, encoding="UTF-8") + b"\n"
+    return arxml.XmlFile(path, raw)
+
+
 def generate(plan: Plan, base: Base | None = None, output: str | None = None) -> Result:
     """Apply *plan* to a fresh copy of the base file and write *output* (default: plan.cfg.output)."""
     if not plan.ok:
@@ -527,6 +578,11 @@ def generate(plan: Plan, base: Base | None = None, output: str | None = None) ->
     base = base or load_base(cfg)
     w = Writer(plan, base)
     w.apply()
-    base.xf.path = out
-    base.xf.save(backup=os.path.exists(out))
+    if plan.delta:
+        # DaVinci project: only the new elements, as an additional input file next to the DBC files
+        doc = extract_delta(base, w.added, out)
+        doc.save(backup=os.path.exists(out))
+    else:
+        base.xf.path = out
+        base.xf.save(backup=os.path.exists(out))
     return Result(out, plan.enabled_routes, w.created, plan.warnings + w.warnings)

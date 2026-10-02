@@ -401,6 +401,82 @@ class GatewayTest(unittest.TestCase):
         cfg.output = ""
         self.assertTrue(any("output file" in e for e in make_plan(cfg).errors))
 
+    # ------------------------------------------------------------------ DaVinci project as the source
+    def _project(self):
+        """A DaVinci project folder whose merged communication description is the synthetic base file."""
+        proj = os.path.join(self.tmp, "Proj")
+        os.makedirs(os.path.join(proj, "Config", "System"))
+        shutil.copy(BASE, os.path.join(proj, "Config", "System", "Communication.arxml"))
+        dpa = os.path.join(proj, "Proj.dpa")
+        with open(dpa, "w", encoding="utf-8") as fh:
+            fh.write('''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<ProjectAssistant Version="5.24.40 SP3">
+    <General><Name>Proj</Name></General>
+    <References><OEMCommunicationExtract>Config/System/Communication.arxml</OEMCommunicationExtract></References>
+    <Display>
+        <FileSet Id="">
+            <File Order="0" EcuInstance="GwEcu" Hash="0" FileCategory="legacy_communication_data">$(DpaProjectFolder)/Body.dbc</File>
+        </FileSet>
+        <Merge>
+            <Path Id="ECU-INSTANCE" ARPath="/Topology/Ecus/GwEcu"/>
+            <Path Id="SYSTEM" ARPath="/System/GwSystem"/>
+        </Merge>
+    </Display>
+</ProjectAssistant>
+''')
+        return dpa
+
+    def test_project_reader(self):
+        from ecucstudio.gateway import dvproject
+        p = dvproject.read(self._project())
+        self.assertEqual(p.ecu_path, "/Topology/Ecus/GwEcu")
+        self.assertEqual(p.system_path, "/System/GwSystem")
+        self.assertTrue(p.communication.endswith(os.path.join("Config", "System", "Communication.arxml")))
+        self.assertEqual(p.inputs[0].category, "legacy_communication_data")
+        base = dvproject.load_communication(p)
+        self.assertEqual(dvproject.ecu_can_channels(base, p.ecu_path), [("/Topology/Clusters/Body_Cluster/Body", 1, 0)])
+        db = dvproject.channel_database(base, "/Topology/Clusters/Body_Cluster/Body", p.ecu_path)
+        m = db.messages[0]
+        self.assertEqual((db.name, m.name, m.can_id, m.length, m.cycle_ms, m.receivers), ("Body_Cluster", "DoorStatus",
+                                                                                        0x200, 2, 100, ["GwEcu"]))
+
+    def test_project_as_source_writes_an_additional_input_file(self):
+        cfg = GatewayConfig(base=self._project(), output=self.out)
+        cfg.buses.append(BusInput(channel="Body"))
+        cfg.ethernet.can_to_eth = SocketSide(local_socket="SA_GwEcu_Tx", remote_socket="SA_Tester_Rx")
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertTrue(plan.delta)
+        self.assertEqual([r.message.name for r in plan.enabled_routes], ["DoorStatus"])
+        r = plan.enabled_routes[0]
+        self.assertEqual(r.can_pt, "/Topology/Clusters/Body_Cluster/Body/DoorStatus_PT")   # existing CAN element
+        res = generate(plan)
+        root, idx = index(res.output)
+        base_root, base_idx = index(BASE)
+        # only Ethernet / gateway content: no CAN cluster, frame or CAN PDU is defined again
+        self.assertNotIn("CAN-FRAME", {local(e) for e in idx.values()})
+        self.assertNotIn("/Topology/Clusters/Body_Cluster", idx)
+        self.assertIn("/Communication/PDUs/DoorStatus_oBody_Cluster_Eth", idx)
+        # existing parents are skeletons: SHORT-NAME only, no UUID (DaVinci rejects a UUID used in two files)
+        conn = idx["/Topology/Clusters/EthCluster/Eth_VLAN10/SA_GwEcu_Tx/GwEcu_to_Tester"]
+        self.assertEqual([x.text for x in conn.iter(q("SO-CON-I-PDU-IDENTIFIER-REF"))],
+                         ["/Topology/Clusters/VLAN10_Ids/DoorStatus_oBody_Cluster_Eth_ID"])
+        for p in ("/Topology/Clusters/EthCluster", "/Topology/Ecus/GwEcu"):
+            self.assertIsNone(idx[p].get("UUID"), p)
+        self.assertNotIn("SYSTEM", {local(e) for e in idx.values()})     # DaVinci builds the project SYSTEM
+        base_uuids = {e.get("UUID") for e in base_root.iter() if isinstance(e.tag, str) and e.get("UUID")}
+        self.assertFalse(base_uuids & {e.get("UUID") for e in root.iter() if isinstance(e.tag, str) and e.get("UUID")})
+        # every reference resolves in project + new file
+        union = dict(base_idx)
+        union.update(idx)
+        for ref in root.iter():
+            if isinstance(ref.tag, str) and ref.get("DEST"):
+                self.assertIn(ref.text.strip(), union, ref.text)
+                self.assertEqual(local(union[ref.text.strip()]), ref.get("DEST"), ref.text)
+        gw = [m for m in root.iter(q("I-PDU-MAPPING"))]
+        self.assertEqual([m.findtext(q("SOURCE-I-PDU-REF")) for m in gw], [r.can_pt])
+        self._xsd(res.output)
+
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))
         self.assertTrue(any("already has VLAN 10" in e for e in plan.errors), plan.errors)
