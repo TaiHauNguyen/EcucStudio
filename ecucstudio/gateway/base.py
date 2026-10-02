@@ -94,6 +94,62 @@ def _int(text):
             return None
 
 
+# schemas offered for new files: DaVinci 5.24 reads up to AUTOSAR_00049, DaVinci 5.31 up to AUTOSAR_00053
+SCHEMAS = ("AUTOSAR_00046", "AUTOSAR_00047", "AUTOSAR_00048", "AUTOSAR_00049", "AUTOSAR_00050",
+           "AUTOSAR_00051", "AUTOSAR_00052", "AUTOSAR_00053")
+DEFAULT_SCHEMA = "AUTOSAR_00052"
+
+_NEW_FILE = """<?xml version="1.0" encoding="UTF-8"?>
+<AUTOSAR xmlns="http://autosar.org/schema/r4.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://autosar.org/schema/r4.0 {schema}.xsd">
+  <AR-PACKAGES>
+    <AR-PACKAGE UUID="{u_top}">
+      <SHORT-NAME>Topology</SHORT-NAME>
+      <AR-PACKAGES>
+        <AR-PACKAGE UUID="{u_hw}">
+          <SHORT-NAME>HardwareComponents</SHORT-NAME>
+          <ELEMENTS>
+            <ECU-INSTANCE UUID="{u_ecu}">
+              <SHORT-NAME>{ecu}</SHORT-NAME>
+              <SLEEP-MODE-SUPPORTED>false</SLEEP-MODE-SUPPORTED>
+              <WAKE-UP-OVER-BUS-SUPPORTED>false</WAKE-UP-OVER-BUS-SUPPORTED>
+            </ECU-INSTANCE>
+          </ELEMENTS>
+        </AR-PACKAGE>
+      </AR-PACKAGES>
+    </AR-PACKAGE>
+    <AR-PACKAGE UUID="{u_syspkg}">
+      <SHORT-NAME>System</SHORT-NAME>
+      <ELEMENTS>
+        <SYSTEM UUID="{u_sys}">
+          <SHORT-NAME>{system}</SHORT-NAME>
+          <CATEGORY>ECU_EXTRACT</CATEGORY>
+          <FIBEX-ELEMENTS>
+            <FIBEX-ELEMENT-REF-CONDITIONAL>
+              <FIBEX-ELEMENT-REF DEST="ECU-INSTANCE">/Topology/HardwareComponents/{ecu}</FIBEX-ELEMENT-REF>
+            </FIBEX-ELEMENT-REF-CONDITIONAL>
+          </FIBEX-ELEMENTS>
+        </SYSTEM>
+      </ELEMENTS>
+    </AR-PACKAGE>
+  </AR-PACKAGES>
+</AUTOSAR>
+"""
+
+
+def new_document(path: str, ecu: str, schema: str = DEFAULT_SCHEMA, system: str = "System") -> "Base":
+    """A new, nearly empty system description (ECU-INSTANCE + SYSTEM) that the generator fills; it is
+    written to *path*. *ecu* and *system* must be valid short names."""
+    from .xmlorder import stable_uuid
+    if schema not in SCHEMAS:
+        raise ValueError(f"Unknown schema '{schema}' (use one of {', '.join(SCHEMAS)})")
+    text = _NEW_FILE.format(
+        schema=schema, ecu=ecu, system=system, u_top=stable_uuid("/Topology"),
+        u_hw=stable_uuid("/Topology/HardwareComponents"), u_ecu=stable_uuid(f"/Topology/HardwareComponents/{ecu}"),
+        u_syspkg=stable_uuid("/System"), u_sys=stable_uuid(f"/System/{system}"))
+    return Base(xml=arxml.XmlFile(path, text.encode("utf-8")))
+
+
 class Base:
     """Read-only view of a system description file (plus helpers to keep the index current)."""
 

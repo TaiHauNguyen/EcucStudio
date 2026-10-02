@@ -133,7 +133,7 @@ Mở: menu **Tools → CAN-Ethernet Gateway Generator…**, `run.bat gateway`, h
 
 | Mục | Nội dung |
 |---|---|
-| Base system description | file network ARXML hiện có của project (ví dụ export từ PREEvision). Có Ethernet cluster thì gộp vào đó; chưa có (file chỉ có CAN) thì tool tạo cluster, kênh/VLAN, controller, connector và IP của ECU. Tool tự dò ECU, kênh Ethernet/VLAN, connector, endpoint (IP), socket, header ID đang dùng, kênh CAN và cách chia package — không có tên cố định của project nào |
+| Base system description | file network ARXML hiện có của project (ví dụ export từ PREEvision), **không bắt buộc**. Có Ethernet cluster thì gộp vào đó; chưa có (file chỉ có CAN) thì tool tạo cluster, kênh/VLAN, controller, connector và IP của ECU. Bỏ trống (chỉ có DBC) thì tool tạo file network mới hoàn toàn (ECU, SYSTEM, bus CAN, Ethernet, gateway). Tool tự dò ECU, kênh Ethernet/VLAN, connector, endpoint (IP), socket, header ID đang dùng, kênh CAN và cách chia package — không có tên cố định của project nào |
 | DBC + node | node = ECU gateway trong DBC. Message node **nhận** → CAN→ETH, message node **gửi** → ETH→CAN, map 1:1. NM và diagnostic mặc định bỏ (bật được) |
 | Kênh CAN | dùng kênh có sẵn trong base (frame tìm theo CAN ID, chỉ thêm port nếu thiếu) hoặc tạo CAN cluster mới từ DBC (baud rate từ DBC hoặc nhập) |
 | Ethernet (nhập tay) | VLAN (có sẵn hoặc tạo mới), connector của ECU, IP local; mỗi chiều chọn socket có sẵn hoặc nhập port local + IP/port remote để tạo socket mới; header ID set |

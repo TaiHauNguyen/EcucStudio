@@ -179,11 +179,13 @@ _DECL = re.compile(rb"^\s*(<\?xml[^>]*\?>)")
 class XmlFile:
     """An ARXML file loaded with lxml that can be written back byte-faithfully."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, raw: bytes | None = None):
+        """Load *path*; with *raw* the content is taken from memory (a new file that is saved to *path*)."""
         self.path = os.path.abspath(path)
-        with open(self.path, "rb") as fh:
-            raw = fh.read()
-        m = _DECL.match(raw)
+        if raw is None:
+            with open(self.path, "rb") as fh:
+                raw = fh.read()
+        m = _DECL.match(raw[3:] if raw.startswith(b"\xef\xbb\xbf") else raw)
         self.decl = m.group(1).decode("ascii") if m else '<?xml version="1.0" encoding="UTF-8"?>'
         self.bom = raw.startswith(b"\xef\xbb\xbf")
         self.crlf = b"\r\n" in raw[:4096]
@@ -191,7 +193,7 @@ class XmlFile:
         parser = etree.XMLParser(remove_blank_text=False, huge_tree=True, resolve_entities=False)
         self.tree = etree.ElementTree(etree.fromstring(raw, parser))
         self.dirty = False
-        self.mtime = os.path.getmtime(self.path)
+        self.mtime = os.path.getmtime(self.path) if os.path.exists(self.path) else None
 
     @property
     def root(self):

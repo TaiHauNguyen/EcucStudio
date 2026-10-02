@@ -1,7 +1,7 @@
 """Command line of the CAN <-> Ethernet gateway generator.
 
     python -m ecucstudio gateway inspect  --base network.arxml [--dbc bus.dbc]
-    python -m ecucstudio gateway template --base network.arxml --dbc bus.dbc --node ECU -o gateway.json
+    python -m ecucstudio gateway template [--base network.arxml] --dbc bus.dbc --node ECU -o gateway.json
     python -m ecucstudio gateway plan     gateway.json
     python -m ecucstudio gateway generate gateway.json [-o out.arxml]
     python -m ecucstudio gateway gui      [gateway.json]
@@ -50,9 +50,13 @@ def cmd_inspect(a):
 
 def cmd_template(a):
     from .config import BusInput, GatewayConfig
-    cfg = GatewayConfig(base=os.path.abspath(a.base),
-                        output=os.path.abspath(a.output_arxml or
-                                               os.path.splitext(a.base)[0] + "_gateway.arxml"))
+    if a.base:
+        default_out = os.path.splitext(a.base)[0] + "_gateway.arxml"
+    else:                       # only DBC files: a new network file next to the first DBC
+        default_out = os.path.splitext(a.dbc[0])[0] + "_network.arxml"
+    cfg = GatewayConfig(base=os.path.abspath(a.base) if a.base else "",
+                        output=os.path.abspath(a.output_arxml or default_out), ecu=a.ecu or "",
+                        schema=a.schema)
     for d in a.dbc:
         cfg.buses.append(BusInput(dbc=os.path.abspath(d), node=a.node or ""))
     cfg.ethernet.channel = a.channel or ""
@@ -113,7 +117,10 @@ def main(argv=None):
     p.add_argument("--dbc", action="append")
     p.set_defaults(fn=cmd_inspect)
     p = sub.add_parser("template", help="write a starting gateway.json")
-    p.add_argument("--base", required=True)
+    p.add_argument("--base", help="network file of the project (omit when there are only DBC files)")
+    p.add_argument("--ecu", help="ECU instance name of a new file (default: the DBC node)")
+    p.add_argument("--schema", default="AUTOSAR_00052", help="schema of a new file (DaVinci 5.24: AUTOSAR_00049 "
+                                                             "or older)")
     p.add_argument("--dbc", action="append", required=True)
     p.add_argument("--node")
     p.add_argument("--channel", help="Ethernet channel (path, short name or VLANnn)")

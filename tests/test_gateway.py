@@ -358,6 +358,49 @@ class GatewayTest(unittest.TestCase):
                          "/Topology/Ecus/GwEcu/GwEcu_EthCtrl")
         self._xsd(res.output)
 
+    # ------------------------------------------------------------------ only DBC files, no base file
+    def _no_base(self, **cfg_fields):
+        cfg = self._can_only(vlan_id=20, ecu_ip="10.0.20.1")
+        cfg.base = ""
+        for k, v in cfg_fields.items():
+            setattr(cfg, k, v)
+        return cfg
+
+    def test_without_base_file(self):
+        cfg = self._no_base(schema="AUTOSAR_00048")
+        cfg.ethernet.ecu_ip = ""
+        self.assertTrue(any("IP address of GwEcu" in e for e in make_plan(cfg).errors))
+        cfg.ethernet.ecu_ip = "10.0.20.1"
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual(plan.ecu, "/Topology/HardwareComponents/GwEcu")       # ECU = DBC node
+        res = generate(plan)
+        with open(res.output, encoding="utf-8") as fh:
+            self.assertIn("AUTOSAR_00048.xsd", fh.read(600))
+        root, idx = index(res.output)
+        system = idx["/System/System"]
+        fibex = {x.text for x in system.iter(q("FIBEX-ELEMENT-REF"))}
+        for path in ("/Topology/HardwareComponents/GwEcu", "/Topology/Clusters/Body_Cluster",
+                     "/Topology/Clusters/EthernetCluster", "/Topology/HardwareComponents/Gateway_GwEcu"):
+            self.assertIn(path, idx)
+            self.assertIn(path, fibex)
+        self.assertIn("/Topology/HardwareComponents/GwEcu/CN_Body", idx)
+        self.assertIn("/DataTypes/BaseTypes/uint8", idx)
+        self.assertEqual(len(list(idx["/Topology/HardwareComponents/Gateway_GwEcu"].iter(q("I-PDU-MAPPING")))), 5)
+        for r in root.iter():
+            if isinstance(r.tag, str) and r.get("DEST"):
+                self.assertIn(r.text.strip(), idx, r.text)
+                self.assertEqual(local(idx[r.text.strip()]), r.get("DEST"), r.text)
+        self._xsd(res.output)
+
+    def test_without_base_file_ecu_name_and_output(self):
+        cfg = self._no_base(ecu="Zone Gateway")
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual(plan.ecu, "/Topology/HardwareComponents/Zone_Gateway")
+        cfg.output = ""
+        self.assertTrue(any("output file" in e for e in make_plan(cfg).errors))
+
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))
         self.assertTrue(any("already has VLAN 10" in e for e in plan.errors), plan.errors)

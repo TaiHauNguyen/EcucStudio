@@ -11,9 +11,9 @@ from tkinter import filedialog, messagebox, ttk
 from ..gui.theme import COLORS, init_style
 from ..gui.widgets import Tooltip, dialog_header
 from . import dbcread, report
-from .base import Base
+from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
 from .config import BusInput, GatewayConfig, Naming, SocketSide
-from .planner import make_plan
+from .planner import load_base, make_plan, new_ecu_name
 from .writer import generate
 
 NEW = "<create new>"
@@ -358,7 +358,8 @@ class GatewayWindow:
         self.b_plan.pack(side="left", padx=(0, 4))
         self.b_gen = ttk.Button(tb, text="Generate network ARXML", command=self.generate)
         self.b_gen.pack(side="left")
-        self.status = ttk.Label(tb, text="Select the base system description and the DBC files.")
+        self.status = ttk.Label(tb, text="Add the DBC files (and the base system description if the project has "
+                                         "one).")
         self.status.pack(side="left", padx=12)
         pw = ttk.PanedWindow(w, orient="vertical")
         pw.pack(fill="both", expand=True)
@@ -384,11 +385,25 @@ class GatewayWindow:
         e.bind("<FocusOut>", lambda _e: self.load_base())
         e.bind("<Return>", lambda _e: self.load_base())
         ttk.Button(f, text="Browse…", command=self.browse_base).grid(row=0, column=2, padx=4)
+        Tooltip(e, "Network file of the project. Leave empty when you only have DBC files: "
+                   "a new network file is created")
         ttk.Label(f, text="Output file:").grid(row=1, column=0, sticky="w", pady=2)
         ttk.Entry(f, textvariable=self.v_out).grid(row=1, column=1, sticky="we", pady=2)
         ttk.Button(f, text="Browse…", command=self.browse_out).grid(row=1, column=2, padx=4)
         ttk.Label(f, text="Gateway ECU:").grid(row=2, column=0, sticky="w", pady=2)
-        self.c_ecu = Choice(f, width=60, on_change=self.ecu_changed).grid(row=2, column=1, sticky="w", pady=2)
+        ef = ttk.Frame(f)
+        ef.grid(row=2, column=1, sticky="w", pady=2)
+        self.c_ecu = Choice(ef, width=60, on_change=self.ecu_changed)
+        self.c_ecu.cb.pack(side="left")
+        self.c_ecu.cb.bind("<FocusOut>", lambda _e: self.new_file_changed())
+        self.c_ecu.cb.bind("<Return>", lambda _e: self.new_file_changed())
+        ttk.Label(ef, text="   Schema (new file):").pack(side="left")
+        self.v_schema = tk.StringVar(value=DEFAULT_SCHEMA)
+        self.c_schema = ttk.Combobox(ef, textvariable=self.v_schema, values=SCHEMAS, width=16, state="readonly")
+        self.c_schema.pack(side="left", padx=4)
+        self.c_schema.bind("<<ComboboxSelected>>", lambda _e: self.new_file_changed())
+        Tooltip(self.c_schema, "Only for a new file (no base file). DaVinci 5.24 reads up to AUTOSAR_00049, "
+                               "DaVinci 5.31 up to AUTOSAR_00053")
         self.base_info = ttk.Label(f, text="", foreground="#666666")
         self.base_info.grid(row=3, column=1, sticky="w")
         lf = ttk.LabelFrame(f, text="CAN buses (DBC)", padding=6)
@@ -582,9 +597,30 @@ class GatewayWindow:
         if p:
             self.v_out.set(os.path.normpath(p))
 
+    def new_file_changed(self):
+        if not self.v_base.get().strip():
+            self.load_base()
+
     def load_base(self, then=None):
         path = self.v_base.get().strip()
-        if not path or not os.path.isfile(path):
+        new_mode = not path
+        self.c_schema.configure(state="readonly" if new_mode else "disabled")
+        self.c_ecu.cb.configure(state="normal" if new_mode else "readonly")
+        if new_mode:
+            # no base file: the generator creates a new system description with this ECU
+            cfg = GatewayConfig(ecu=self.c_ecu.get(), buses=self.cfg.buses, schema=self.v_schema.get())
+            name = new_ecu_name(cfg)
+            key = ("new", name, cfg.schema)
+            if key != self._base_key:
+                self.base, self._base_key = new_document("new.arxml", name, cfg.schema), key
+                self.base_info.config(text=f"No base file: a new network file ({cfg.schema}) is created with the "
+                                           f"ECU {name} (type another name in Gateway ECU).")
+                self.fill_from_base()
+                self.c_ecu.var.set(name)
+            if then:
+                then()
+            return
+        if not os.path.isfile(path):
             return
         key = (os.path.abspath(path), os.path.getmtime(path))
         if key == self._base_key:
@@ -671,7 +707,7 @@ class GatewayWindow:
         new_channel = self.c_chan.get() == NEW_VALUE or not self._channels
         if new_channel:
             hint = ("A new Ethernet channel is created" +
-                    ("" if self._channels else " in a new Ethernet cluster (the base file has none)") +
+                    ("" if self._channels else " in a new Ethernet cluster") +
                     ", with a connector and the IP address of the ECU. Empty VLAN id = untagged.")
         elif ch is not None and not conns:
             hint = ("The ECU is not connected to this channel: a connector is created. Enter the ECU IP "
@@ -716,6 +752,12 @@ class GatewayWindow:
         if d.result:
             self.cfg.buses.append(d.result)
             self.refresh_buses()
+            if not self.v_base.get().strip():
+                if not self.v_out.get().strip():
+                    db = self.dbc_cache.get(os.path.abspath(d.result.dbc))
+                    stem = db.name if db else os.path.splitext(os.path.basename(d.result.dbc))[0]
+                    self.v_out.set(os.path.join(os.path.dirname(d.result.dbc), f"{stem}_network.arxml"))
+                self.load_base()
 
     def edit_bus(self):
         sel = self.t_bus.selection()
@@ -737,6 +779,7 @@ class GatewayWindow:
         c.base = self.v_base.get().strip()
         c.output = self.v_out.get().strip()
         c.ecu = self.c_ecu.get()
+        c.schema = self.v_schema.get() or DEFAULT_SCHEMA
         e = c.ethernet
         chan = self.c_chan.get()
         e.new_channel = chan == NEW_VALUE
@@ -768,6 +811,7 @@ class GatewayWindow:
         self.v_base.set(c.base)
         self.v_out.set(c.output)
         self.v_proto.set(c.ethernet.protocol or "UDP")
+        self.v_schema.set(c.schema or DEFAULT_SCHEMA)
         self.v_chname.set(c.ethernet.channel_name)
         self.v_vlan.set("" if c.ethernet.vlan_id is None else c.ethernet.vlan_id)
         self.v_ecuip.set(c.ethernet.ecu_ip)
@@ -781,6 +825,7 @@ class GatewayWindow:
         for k, v in self.v_naming.items():
             v.set(getattr(c.naming, k))
         self.refresh_buses()
+        self.c_ecu.var.set(c.ecu)
         self._base_key = None
         self.load_base()
 
@@ -822,8 +867,9 @@ class GatewayWindow:
     # ------------------------------------------------------------------ plan / generate
     def analyze(self, then=None):
         cfg = self.collect()
-        if not cfg.base:
-            messagebox.showwarning(TITLE, "Select the base system description first.", parent=self.win)
+        if not cfg.base and not cfg.buses:
+            messagebox.showwarning(TITLE, "Add a DBC file (and select the base system description if the project "
+                                          "already has one).", parent=self.win)
             return
 
         def run_plan():
@@ -851,7 +897,7 @@ class GatewayWindow:
 
         def write(plan):
             def work():
-                res = generate(plan, Base(cfg.base))
+                res = generate(plan, load_base(cfg))
                 csv_path = os.path.splitext(res.output)[0] + "_gateway_routes.csv"
                 report.write_csv(plan, csv_path)
                 return res, csv_path
@@ -860,9 +906,11 @@ class GatewayWindow:
                 res, csv_path = r
                 self.show_messages([], res.warnings, [f"Written {res.output}", f"Route table: {csv_path}"])
                 self.status.config(text=f"Written {os.path.basename(res.output)}: {len(res.routes)} route(s)")
+                how = ("instead of the base file" if cfg.base else
+                       f"for the ECU instance {new_ecu_name(cfg)} (do not import the same DBC files again)")
                 messagebox.showinfo(TITLE, f"Written {res.output}\n\n{len(res.routes)} route(s).\n"
-                                           f"Import this file into DaVinci Configurator (Input Files) instead of the "
-                                           f"base file.", parent=self.win)
+                                           f"Import this file into DaVinci Configurator (Input Files) {how}.",
+                                    parent=self.win)
             self._run("Generating", work, done)
         self.analyze(then=write)
 

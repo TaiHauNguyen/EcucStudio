@@ -14,7 +14,7 @@ from .. import arxml
 from ..arxml import local, q
 from . import xmlorder
 from .base import Base
-from .planner import CAN_TO_ETH, Plan, Route, SignalSpec, choose_package, fmt
+from .planner import CAN_TO_ETH, Plan, Route, SignalSpec, choose_package, fmt, load_base
 from .xmlorder import E, R, T
 
 # FIBEX-ELEMENTS of the SYSTEM get these new element types (others only if the base file lists the type)
@@ -524,7 +524,7 @@ def generate(plan: Plan, base: Base | None = None, output: str | None = None) ->
     out = os.path.abspath(output or cfg.output)
     if not out:
         raise ValueError("No output file given.")
-    base = base or Base(cfg.base)
+    base = base or load_base(cfg)
     w = Writer(plan, base)
     w.apply()
     base.xf.path = out

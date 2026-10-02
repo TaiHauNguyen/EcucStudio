@@ -105,9 +105,11 @@ class Options:
 
 @dataclass
 class GatewayConfig:
-    base: str = ""                  # existing system description (network.arxml)
+    base: str = ""                  # existing system description (network.arxml); empty = create a new file
     output: str = ""                # file to write (base + gateway)
-    ecu: str = ""                   # gateway ECU-INSTANCE (path or short name; empty = auto)
+    ecu: str = ""                   # gateway ECU-INSTANCE (path or short name; empty = auto). Without a base
+                                    # file: name of the new ECU-INSTANCE (empty = node of the first DBC)
+    schema: str = "AUTOSAR_00052"   # schema of a new file (without base file); DaVinci 5.24 reads <= AUTOSAR_00049
     system: str = ""                # SYSTEM to extend (empty = auto)
     buses: list[BusInput] = field(default_factory=list)
     ethernet: EthernetSettings = field(default_factory=EthernetSettings)
@@ -142,7 +144,7 @@ class GatewayConfig:
         eth["can_to_eth"] = build(SocketSide, eth.get("can_to_eth"))
         eth["eth_to_can"] = build(SocketSide, eth.get("eth_to_can"))
         cfg = cls(base=d.get("base", ""), output=d.get("output", ""), ecu=d.get("ecu", ""),
-                  system=d.get("system", ""),
+                  system=d.get("system", ""), schema=d.get("schema", "AUTOSAR_00052"),
                   buses=[build(BusInput, b) for b in d.get("buses", [])],
                   ethernet=build(EthernetSettings, eth),
                   header=build(HeaderSettings, d.get("header")),

@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from .. import arxml
 from ..arxml import local, q
 from . import dbcread
-from .base import Base, CanChannel, EthChannel
+from .base import Base, CanChannel, EthChannel, new_document
 from .config import BusInput, GatewayConfig, SocketSide
 
 CAN_TO_ETH = "CAN->ETH"
@@ -207,6 +207,19 @@ _TRANSFER = {"cyclic": "PENDING", "onwrite": "TRIGGERED", "onwritewithrepetition
              "ifactive": "PENDING", "ifactivewithrepetition": "PENDING"}
 
 
+def new_ecu_name(cfg: GatewayConfig) -> str:
+    """Name of the ECU-INSTANCE of a new file: cfg.ecu, else the gateway node of the first DBC."""
+    name = (cfg.ecu or "").rsplit("/", 1)[-1] or next((b.node for b in cfg.buses if b.node), "") or "GatewayEcu"
+    return sanitize(name)
+
+
+def load_base(cfg: GatewayConfig) -> Base:
+    """The base file of *cfg*, or a new system description when no base file is given."""
+    if cfg.base:
+        return Base(cfg.base)
+    return new_document(cfg.output or "network_gateway.arxml", new_ecu_name(cfg), cfg.schema or "AUTOSAR_00052")
+
+
 def choose_package(base: Base, tag: str) -> str:
     """Package for new elements of *tag*: where the base file keeps that type (or a related one)."""
     pkg = base.package_for(tag)
@@ -220,7 +233,7 @@ def choose_package(base: Base, tag: str) -> str:
 class Planner:
     def __init__(self, cfg: GatewayConfig, base: Base | None = None, dbc_cache: dict | None = None):
         self.cfg = cfg
-        self.base = base or Base(cfg.base)
+        self.base = base or load_base(cfg)
         self.dbc_cache = dbc_cache if dbc_cache is not None else {}
         self.plan = Plan(cfg)
         self._taken: set[str] = set()          # planned paths (to keep new names unique)
@@ -267,6 +280,11 @@ class Planner:
     # ------------------------------------------------------------------ main
     def run(self) -> Plan:
         b, cfg, plan = self.base, self.cfg, self.plan
+        if not cfg.base:
+            self.info(f"No base file: a new system description ({self.base.schema}) is created with the ECU "
+                      f"{self.base.ecus()[0].rsplit('/', 1)[-1] if self.base.ecus() else '?'}.")
+            if not cfg.output:
+                self.err("Select the output file (there is no base file).")
         self._resolve_ecu()
         if plan.errors:
             return plan
@@ -297,7 +315,9 @@ class Planner:
     def _resolve_ecu(self):
         b, cfg, plan = self.base, self.cfg, self.plan
         ecus = b.ecus()
-        if cfg.ecu:
+        if not cfg.base and len(ecus) == 1:          # new file: the ECU created from cfg.ecu / the DBC node
+            plan.ecu = ecus[0]
+        elif cfg.ecu:
             plan.ecu = self._find(cfg.ecu, "ECU-INSTANCE") or ""
             if not plan.ecu:
                 names = ", ".join(p.rsplit("/", 1)[-1] for p in ecus)
@@ -340,7 +360,7 @@ class Planner:
                          f"{len(channels)} channels (or create a new channel).")
                 return
         if ch is None:
-            if not channels:
+            if not channels and self.cfg.base:
                 self.info("The base file has no Ethernet channel: a new Ethernet cluster / channel is created.")
             ch = self._new_channel()
             if ch is None:

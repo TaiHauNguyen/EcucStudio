@@ -6,15 +6,24 @@ CanIf PDU, không phải cấu hình ECUC bằng tay.
 
 Có hai cách dùng: **giao diện** (mục 1–7) hoặc **command line** (mục 8). Cả hai ra cùng một kết quả.
 
+Tool dùng được cho ba tình huống:
+
+| Bạn đang có | Kết quả |
+|---|---|
+| File network ARXML **có** Ethernet cluster | gateway được gộp vào file đó |
+| File network ARXML **chỉ có CAN** | tool tạo thêm phần Ethernet (mục 3.1) |
+| **Chỉ có file DBC**, không có file network | tool tạo một file network ARXML **mới hoàn toàn** (mục 2.1) |
+
 ---
 
 ## 0. Chuẩn bị
 
 - Python 3.10+ cùng các gói `lxml` và `cantools` (`py -m pip install -r requirements.txt`).
   `run.bat` tự kiểm tra và tự cài nếu thiếu.
-- File network ARXML mà project đang dùng (ví dụ export từ PREEvision). Có Ethernet cluster thì gateway được gộp
-  vào cluster đó. **Chưa có** Ethernet cluster (file chỉ có CAN) thì tool tự tạo cluster, kênh (VLAN), controller,
-  connector và địa chỉ IP của ECU, xem mục 3.1.
+- File network ARXML mà project đang dùng (ví dụ export từ PREEvision), **nếu có**. Có Ethernet cluster thì
+  gateway được gộp vào cluster đó. **Chưa có** Ethernet cluster (file chỉ có CAN) thì tool tự tạo cluster, kênh
+  (VLAN), controller, connector và địa chỉ IP của ECU, xem mục 3.1. **Không có file network** thì bỏ trống, xem
+  mục 2.1.
 - File DBC của các bus CAN cần gateway, và tên node của ECU gateway trong DBC. Encoding được tự nhận dạng:
   UTF-8 có/không BOM, UTF-16, cp1252 (mặc định của tool Vector).
 - Thông tin Ethernet: VLAN, port UDP/TCP của ECU, IP và port của node bên kia (hoặc dùng socket đã có
@@ -51,6 +60,35 @@ Thanh công cụ: **New**, **Open…**, **Save**, **Save As…** (cấu hình `.
    | include NM / include diagnostic | mặc định bỏ message NM (`NmAsrMessage`) và diagnostic (`DiagRequest/Response/State`) |
 
    Sửa: double-click dòng hoặc **Edit…**; xoá: **Remove**.
+
+### 2.1 Chỉ có file DBC (không có file network)
+
+1. Để **trống** ô *Base system description*.
+2. **Add DBC…** như trên. Tool tự đề xuất *Output file* là `<DBName>_network.arxml` cạnh file DBC.
+3. **Gateway ECU**: tên ECU-INSTANCE của file mới. Mặc định là node gateway trong DBC; gõ tên khác nếu project
+   DaVinci dùng tên ECU khác.
+4. **Schema (new file)**: `AUTOSAR_00052` (mặc định, DaVinci 5.31). Với DaVinci 5.24 chọn `AUTOSAR_00049` hoặc
+   cũ hơn.
+5. Tab **Ethernet**: kênh tự chọn `<create new channel (VLAN)>`. Nhập **VLAN id**, **ECU IP**, rồi port/IP cho hai
+   chiều như mục 3.
+
+File mới gồm:
+
+- ECU-INSTANCE `/Topology/HardwareComponents/<ECU>`;
+- SYSTEM `/System/System` (CATEGORY ECU_EXTRACT);
+- CAN cluster của bus (từ DBC);
+- Ethernet cluster / kênh / controller / connector / IP;
+- socket, header ID, GATEWAY;
+- base type, PDU, signal.
+
+Các package theo bố cục của PREEvision.
+
+> **Lưu ý khi import vào DaVinci.** Bus CAN trong file mới **chỉ chứa các message được route**. Message bị tắt
+> (NM, diagnostic, message bỏ chọn) và các message node không gửi/nhận đều không có trong file.
+> - Nếu ECU chỉ làm gateway cho bus này: import file mới **thay cho** DBC. Đừng import thêm cùng DBC đó, vì bus
+>   sẽ xuất hiện hai lần.
+> - Nếu ECU còn cần các message khác của bus (NM, diagnostic, signal cho SWC): chế độ dùng chung với DBC đang
+>   import chưa được hỗ trợ. Hãy báo để bổ sung.
 
 ## 3. Tab **Ethernet**
 
@@ -197,7 +235,10 @@ rồi Generate lại **từ file base gốc**. Nếu lỡ chạy trên chính fi
 
 ## 7. Import vào DaVinci Configurator
 
-1. Trong **Input Files** của project, thay file network cũ bằng file output (hoặc ghi đè file cũ như ở mục 6).
+1. Trong **Input Files** của project:
+   - có file network cũ: thay file đó bằng file output (hoặc ghi đè file cũ như ở mục 6);
+   - file mới tạo từ DBC (mục 2.1): thêm file vào danh sách system description và gán ECU instance là tên ECU
+     đã chọn. Không import lại DBC của bus đó.
 2. Chạy **Update** project. DaVinci tạo:
    - **PduR**: `PduRRoutingPath` tên `Gateway_<ECU>_…`, nối CanIf ↔ SoAd;
    - **SoAd**: `SoAdPduRoute` (`SoAdTxPduHeaderId`), `SoAdSocketRoute` (`SoAdRxPduHeaderId`),
@@ -222,6 +263,8 @@ python -m ecucstudio gateway inspect --base network.arxml --dbc Body.dbc
 
 :: 2. tạo file cấu hình mẫu
 python -m ecucstudio gateway template --base network.arxml --dbc Body.dbc --node GwEcu --channel VLAN60 -o gateway.json
+:: chỉ có DBC, không có file network (thêm --ecu <tên> nếu ECU instance khác tên node, --schema AUTOSAR_00049 cho DaVinci 5.24)
+python -m ecucstudio gateway template --dbc Body.dbc --node GwEcu --vlan 20 --ecu-ip 10.0.20.1 -o gateway.json
 :: file base chưa có Ethernet (hoặc thêm VLAN mới với --new-channel): cho VLAN và IP của ECU
 python -m ecucstudio gateway template --base can_only.arxml --dbc Body.dbc --node GwEcu --vlan 20 --ecu-ip 10.0.20.1 -o gateway.json
 
@@ -239,6 +282,7 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
   "base": "network.arxml",
   "output": "network_gateway.arxml",
   "ecu": "",
+  "schema": "AUTOSAR_00052",
   "buses": [
     {
       "dbc": "Body.dbc",
@@ -281,6 +325,8 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
 ```
 
 - Đường dẫn tương đối tính từ thư mục chứa file `.json`.
+- `base` để trống = chỉ có DBC: tạo file mới. Khi đó `ecu` là tên ECU-INSTANCE mới (trống = node của DBC đầu
+  tiên), `schema` là schema của file mới.
 - ECU, kênh, connector, socket có thể ghi bằng **đường dẫn AUTOSAR** hoặc **tên ngắn**. Kênh Ethernet còn ghi
   được dạng `VLAN60`. Trường bỏ trống là tự dò.
 - Mỗi chiều trong `ethernet`:
@@ -298,6 +344,7 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
 
 | Thông báo | Cách xử lý |
 |---|---|
+| `Select the output file (there is no base file)` | chưa chọn *Output file* khi không có file base |
 | `Enter the IP address of <ECU> on <channel>` | tool cần tạo kênh / connector mới: nhập **ECU IP** ở khung New channel / ECU connection |
 | `… already has VLAN <n> (…)` | VLAN đó đã có: chọn kênh có sẵn thay vì `<create new channel (VLAN)>` |
 | `the remote IP … is the IP address of <ECU>` | IP remote trùng IP của ECU: nhập IP của node bên kia |
