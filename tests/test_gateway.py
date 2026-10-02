@@ -21,6 +21,7 @@ from ecucstudio.gateway.writer import generate
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.join(HERE, "fixtures", "gateway_base.arxml")
 DBC = os.path.join(HERE, "fixtures", "gateway_demo.dbc")
+CAN_ONLY = os.path.join(HERE, "fixtures", "gateway_base_can_only.arxml")
 
 try:
     import cantools  # noqa: F401
@@ -249,6 +250,91 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(local_sock.connections[0].remotes, ["/Topology/Clusters/EthCluster/Eth_VLAN10/SA_Tester_Rx"])
         self.assertEqual(b.package_for("I-SIGNAL"), "/Communication/Signals")
         self.assertIsNotNone(b.frame_triggering("/Topology/Clusters/Body_Cluster/Body", 0x200, False))
+
+    # ------------------------------------------------------------------ base file without Ethernet
+    def _can_only(self, **eth):
+        cfg = GatewayConfig(base=CAN_ONLY, output=self.out)
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+        cfg.ethernet.can_to_eth = SocketSide(local_port=42000, remote_ip="10.0.20.2", remote_port=42000)
+        cfg.ethernet.eth_to_can = SocketSide(local_port=42001, remote_ip="10.0.20.2", remote_port=42001)
+        for k, v in eth.items():
+            setattr(cfg.ethernet, k, v)
+        return cfg
+
+    def test_base_without_ethernet_needs_ecu_ip(self):
+        plan = make_plan(self._can_only())
+        self.assertTrue(any("IP address of GwEcu" in e for e in plan.errors), plan.errors)
+
+    def test_base_without_ethernet_creates_cluster(self):
+        plan = make_plan(self._can_only(vlan_id=20, ecu_ip="10.0.20.1", mac="02:00:00:00:00:20"))
+        self.assertEqual(plan.errors, [])
+        self.assertTrue(plan.eth_cluster_new and plan.eth_channel_new and plan.eth_connector_new)
+        self.assertTrue(plan.eth_controller_new and plan.local_endpoint_new)
+        res = generate(plan)
+        root, idx = index(res.output)
+        ch = idx["/Topology/Clusters/EthernetCluster/Channel_VLAN20"]
+        self.assertEqual(ch.findtext(".//" + q("VLAN-IDENTIFIER")), "20")
+        self.assertEqual([x.text for x in ch.iter(q("COMMUNICATION-CONNECTOR-REF"))],
+                         ["/Topology/Ecus/GwEcu/CN_GwEcu_VLAN20"])
+        nep = idx["/Topology/Clusters/EthernetCluster/Channel_VLAN20/NEP_GwEcu_VLAN20"]
+        self.assertEqual(nep.findtext(".//" + q("IPV-4-ADDRESS")), "10.0.20.1")
+        conn = idx["/Topology/Ecus/GwEcu/CN_GwEcu_VLAN20"]
+        self.assertEqual(conn.findtext(q("COMM-CONTROLLER-REF")), "/Topology/Ecus/GwEcu/CT_GwEcu_Eth")
+        self.assertEqual(conn.findtext(".//" + q("NETWORK-ENDPOINT-REF")),
+                         "/Topology/Clusters/EthernetCluster/Channel_VLAN20/NEP_GwEcu_VLAN20")
+        ctrl = idx["/Topology/Ecus/GwEcu/CT_GwEcu_Eth"]
+        self.assertEqual(ctrl.findtext(".//" + q("MAC-UNICAST-ADDRESS")), "02:00:00:00:00:20")
+        self.assertEqual(ctrl.findtext(".//" + q("SEND-ACTIVITY")), "SENT-TAGGED")
+        self.assertEqual(ctrl.findtext(".//" + q("VLAN-REF")), "/Topology/Clusters/EthernetCluster/Channel_VLAN20")
+        self.assertIsNotNone(idx["/Topology/Clusters/EthernetCluster"].get("UUID"))   # base file uses UUIDs
+        fibex = {x.text for x in root.iter(q("FIBEX-ELEMENT-REF"))}
+        self.assertIn("/Topology/Clusters/EthernetCluster", fibex)
+        sock = idx["/Topology/Clusters/EthernetCluster/Channel_VLAN20/SA_GwEcu_CanGw_Tx"]
+        self.assertEqual(sock.findtext(q("CONNECTOR-REF")), "/Topology/Ecus/GwEcu/CN_GwEcu_VLAN20")
+        self.assertEqual(len(list(idx["/Topology/Ecus/Gateway_GwEcu"].iter(q("I-PDU-MAPPING")))), 5)
+        for r in root.iter():
+            if isinstance(r.tag, str) and r.get("DEST"):
+                self.assertIn(r.text.strip(), idx, r.text)
+        self._xsd(res.output)
+
+    def test_untagged_channel(self):
+        plan = make_plan(self._can_only(ecu_ip="10.0.20.1"))
+        self.assertEqual(plan.errors, [])
+        res = generate(plan)
+        root, idx = index(res.output)
+        ch = idx["/Topology/Clusters/EthernetCluster/Channel_Untagged"]
+        self.assertIsNone(ch.find(q("VLAN")))
+        self.assertEqual(idx["/Topology/Ecus/GwEcu/CT_GwEcu_Eth"].findtext(".//" + q("SEND-ACTIVITY")),
+                         "SENT-UNTAGGED")
+        self._xsd(res.output)
+
+    def test_remote_ip_must_differ_from_ecu_ip(self):
+        cfg = self._can_only(vlan_id=20, ecu_ip="10.0.20.1")
+        cfg.ethernet.eth_to_can.remote_ip = "10.0.20.1"
+        plan = make_plan(cfg)
+        self.assertTrue(any("remote IP 10.0.20.1" in e for e in plan.errors), plan.errors)
+
+    def test_new_vlan_in_existing_cluster(self):
+        cfg = config(self.out, new_channel=True, vlan_id=30, ecu_ip="10.0.30.1")
+        cfg.ethernet.can_to_eth = SocketSide(local_port=43000, remote_ip="10.0.30.2", remote_port=43000)
+        cfg.ethernet.eth_to_can = SocketSide(local_port=43001, remote_ip="10.0.30.2", remote_port=43001)
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertFalse(plan.eth_cluster_new)
+        self.assertFalse(plan.eth_controller_new)          # the ECU's controller is reused
+        res = generate(plan)
+        root, idx = index(res.output)
+        self.assertIn("/Topology/Clusters/EthCluster/Channel_VLAN30", idx)
+        port = idx["/Topology/Ecus/GwEcu/GwEcu_EthCtrl/GwEcu_EthPort"]
+        self.assertEqual([x.text for x in port.iter(q("VLAN-REF"))],
+                         ["/Topology/Clusters/EthCluster/Eth_VLAN10", "/Topology/Clusters/EthCluster/Channel_VLAN30"])
+        self.assertEqual(idx["/Topology/Ecus/GwEcu/CN_GwEcu_VLAN30"].findtext(q("COMM-CONTROLLER-REF")),
+                         "/Topology/Ecus/GwEcu/GwEcu_EthCtrl")
+        self._xsd(res.output)
+
+    def test_new_vlan_that_already_exists(self):
+        plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))
+        self.assertTrue(any("already has VLAN 10" in e for e in plan.errors), plan.errors)
 
     def _xsd(self, path):
         xsd = os.environ.get("ECUCSTUDIO_TEST_XSD")

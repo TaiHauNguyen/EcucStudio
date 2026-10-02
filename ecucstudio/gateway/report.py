@@ -67,6 +67,9 @@ def inventory(base: Base) -> str:
         gw = base.gateway_of(e)
         out.append(f"  {e}" + (f"   (gateway {gw.rsplit('/', 1)[-1]})" if gw else ""))
     out.append("Ethernet channels:")
+    if not base.eth_channels():
+        out.append("  (none - the generator creates an Ethernet cluster and channel: set ethernet.ecu_ip and,"
+                   " for a tagged channel, ethernet.vlan_id)")
     for ch in base.eth_channels():
         out.append(f"  {ch.label}   {ch.path}")
         for c in ch.connectors:

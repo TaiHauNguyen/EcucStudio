@@ -56,6 +56,9 @@ def cmd_template(a):
     for d in a.dbc:
         cfg.buses.append(BusInput(dbc=os.path.abspath(d), node=a.node or ""))
     cfg.ethernet.channel = a.channel or ""
+    cfg.ethernet.vlan_id = a.vlan
+    cfg.ethernet.ecu_ip = a.ecu_ip or ""
+    cfg.ethernet.new_channel = bool(a.new_channel)
     cfg.save(a.out)
     print("Written", os.path.abspath(a.out), "- fill in the Ethernet settings (ports, remote IP) and run 'plan'.")
     return 0
@@ -114,6 +117,9 @@ def main(argv=None):
     p.add_argument("--dbc", action="append", required=True)
     p.add_argument("--node")
     p.add_argument("--channel", help="Ethernet channel (path, short name or VLANnn)")
+    p.add_argument("--new-channel", action="store_true", help="create a new Ethernet channel (VLAN)")
+    p.add_argument("--vlan", type=int, help="VLAN id of a new channel (base file without Ethernet / --new-channel)")
+    p.add_argument("--ecu-ip", help="IP address of the ECU when its network endpoint is created")
     p.add_argument("--output-arxml")
     p.add_argument("-o", "--out", required=True)
     p.set_defaults(fn=cmd_template)

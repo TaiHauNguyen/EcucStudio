@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from .. import arxml
 from ..arxml import local, q
 from . import dbcread
-from .base import Base, CanChannel
+from .base import Base, CanChannel, EthChannel
 from .config import BusInput, GatewayConfig, SocketSide
 
 CAN_TO_ETH = "CAN->ETH"
@@ -143,9 +143,19 @@ class Plan:
     ecu: str = ""
     ecu_name: str = ""
     system: str | None = None
+    eth_cluster: str = ""
+    eth_cluster_new: bool = False
     eth_channel: str = ""
+    eth_channel_new: bool = False
+    eth_vlan: int | None = None
+    eth_controller: str = ""
+    eth_controller_new: bool = False
     eth_connector: str = ""
+    eth_connector_new: bool = False
     local_endpoint: str = ""
+    local_endpoint_new: bool = False
+    ecu_ip: str = ""
+    ecu_netmask: str = ""
     id_set: str = ""
     id_set_new: bool = False
     gateway: str = ""
@@ -170,6 +180,7 @@ class Plan:
 # default package of each element type when the base file has none of that type yet
 DEFAULT_PACKAGES = {
     "CAN-CLUSTER": "/Topology/Clusters",
+    "ETHERNET-CLUSTER": "/Topology/Clusters",
     "SOCKET-CONNECTION-IPDU-IDENTIFIER-SET": "/Topology/Clusters",
     "GATEWAY": "/Topology/HardwareComponents",
     "CAN-FRAME": "/Communication/Frames",
@@ -181,6 +192,7 @@ DEFAULT_PACKAGES = {
 # where to look first when the type itself is missing
 _RELATED = {
     "CAN-CLUSTER": ("ETHERNET-CLUSTER", "LIN-CLUSTER", "FLEXRAY-CLUSTER"),
+    "ETHERNET-CLUSTER": ("CAN-CLUSTER", "LIN-CLUSTER", "FLEXRAY-CLUSTER"),
     "SOCKET-CONNECTION-IPDU-IDENTIFIER-SET": ("CAN-CLUSTER", "ETHERNET-CLUSTER"),
     "GATEWAY": ("ECU-INSTANCE",),
     "CAN-FRAME": ("LIN-UNCONDITIONAL-FRAME", "FLEXRAY-FRAME", "ETHERNET-FRAME"),
@@ -255,14 +267,12 @@ class Planner:
     # ------------------------------------------------------------------ main
     def run(self) -> Plan:
         b, cfg, plan = self.base, self.cfg, self.plan
-        if not self.base.of_type("ETHERNET-CLUSTER"):
-            self.err("The base file has no ETHERNET-CLUSTER. The gateway is merged into an existing "
-                     "Ethernet cluster, so the base file must contain one.")
-            return plan
         self._resolve_ecu()
         if plan.errors:
             return plan
         self._resolve_ethernet()
+        if plan.errors:
+            return plan
         for bus_cfg in cfg.buses:
             try:
                 self._plan_bus(bus_cfg)
@@ -307,26 +317,39 @@ class Planner:
         plan.ecu_name = plan.ecu.rsplit("/", 1)[-1]
 
     def _resolve_ethernet(self):
+        """Ethernet channel, ECU connector and local endpoint. Missing ones are planned as new elements:
+        no Ethernet cluster in the base file, a new VLAN, or an ECU that is not connected to the channel yet."""
         b, eth, plan = self.base, self.cfg.ethernet, self.plan
         channels = b.eth_channels()
         mine = [c for c in channels if any(b.connector_ecu(x) == plan.ecu for x in c.connectors)]
         ch = None
-        if eth.channel:
-            hits = [c for c in channels if c.path == eth.channel or c.name == eth.channel or
-                    (c.vlan is not None and eth.channel.strip().upper() in (f"VLAN{c.vlan}", str(c.vlan)))]
-            if len(hits) != 1:
-                self.err(f"Ethernet channel '{eth.channel}' not found (or ambiguous) in the base file.")
+        if not eth.new_channel and channels:
+            if eth.channel:
+                hits = [c for c in channels if c.path == eth.channel or c.name == eth.channel or
+                        (c.vlan is not None and eth.channel.strip().upper() in (f"VLAN{c.vlan}", str(c.vlan)))]
+                if len(hits) != 1:
+                    self.err(f"Ethernet channel '{eth.channel}' not found (or ambiguous) in the base file.")
+                    return
+                ch = hits[0]
+            elif len(mine) == 1:
+                ch = mine[0]
+            elif not mine and len(channels) == 1:
+                ch = channels[0]
+            else:
+                self.err(f"Select the Ethernet channel (VLAN): {plan.ecu_name} is connected to {len(mine)} of "
+                         f"{len(channels)} channels (or create a new channel).")
                 return
-            ch = hits[0]
-        elif len(mine) == 1:
-            ch = mine[0]
+        if ch is None:
+            if not channels:
+                self.info("The base file has no Ethernet channel: a new Ethernet cluster / channel is created.")
+            ch = self._new_channel()
+            if ch is None:
+                return
         else:
-            self.err(f"Select the Ethernet channel (VLAN): {plan.ecu_name} is connected to {len(mine)} channels.")
-            return
-        plan.eth_channel = ch.path
+            plan.eth_channel, plan.eth_cluster, plan.eth_vlan = ch.path, ch.cluster, ch.vlan
         self._eth = ch
         conns = [c for c in ch.connectors if b.connector_ecu(c) == plan.ecu]
-        if eth.connector:
+        if eth.connector and conns:
             plan.eth_connector = self._find(eth.connector, "ETHERNET-COMMUNICATION-CONNECTOR", conns) or ""
             if not plan.eth_connector:
                 self.err(f"Connector '{eth.connector}' of {plan.ecu_name} is not connected to {ch.name}.")
@@ -336,19 +359,104 @@ class Planner:
             if len(conns) > 1:
                 self.warn(f"{plan.ecu_name} has {len(conns)} connectors on {ch.name}; using "
                           f"{conns[0].rsplit('/', 1)[-1]} (choose another in the Ethernet settings).")
-        else:
-            self.err(f"{plan.ecu_name} has no Ethernet connector on {ch.name}.")
+        elif not self._new_connector(ch):
             return
-        if eth.local_endpoint:
+        # local endpoint = IP address of the ECU on the channel
+        if eth.local_endpoint and not plan.eth_channel_new:
             plan.local_endpoint = self._find(eth.local_endpoint, "NETWORK-ENDPOINT",
                                              [e.path for e in ch.endpoints]) or ""
             if not plan.local_endpoint:
                 self.err(f"Network endpoint '{eth.local_endpoint}' is not in {ch.name}.")
-        else:
+                return
+        elif not plan.eth_connector_new:
             conn_el = b.el(plan.eth_connector)
             neps = [p for p in b.refs(conn_el.find(q("NETWORK-ENDPOINT-REFS")), "NETWORK-ENDPOINT-REF")
                     if p.startswith(ch.path + "/")]
             plan.local_endpoint = neps[0] if neps else ""
+        if not plan.local_endpoint:
+            ip = (eth.ecu_ip or "").strip()
+            if not ip:
+                if plan.eth_connector_new:
+                    self.err(f"Enter the IP address of {plan.ecu_name} on {ch.name} (its network endpoint is "
+                             f"created).")
+                return              # existing connector without endpoint: only needed for new sockets
+            if not _valid_ip(ip):
+                self.err(f"'{ip}' is not an IPv4 address (IP address of {plan.ecu_name}).")
+                return
+            hits = [e for e in ch.endpoints if (e.ip or "").strip() == ip]
+            if hits:
+                plan.local_endpoint = hits[0].path
+            else:
+                name = self._unique(ch.path, fmt(self.cfg.naming.eth_endpoint, **self._eth_fields()),
+                                    "Network endpoint")
+                plan.local_endpoint, plan.local_endpoint_new = f"{ch.path}/{name}", True
+                plan.ecu_ip, plan.ecu_netmask = ip, eth.ecu_netmask or "255.255.255.0"
+
+    def _eth_fields(self) -> dict:
+        v = self.plan.eth_vlan
+        return dict(ecu=self.plan.ecu_name, vlan=f"VLAN{v}" if v is not None else "Untagged",
+                    vlan_id="" if v is None else v)
+
+    def _new_channel(self) -> EthChannel | None:
+        """Plan a new ETHERNET-PHYSICAL-CHANNEL (and an ETHERNET-CLUSTER when the file has none)."""
+        b, eth, plan, naming = self.base, self.cfg.ethernet, self.plan, self.cfg.naming
+        clusters = b.of_type("ETHERNET-CLUSTER")
+        vlan = eth.vlan_id
+        if vlan is not None and not 0 < int(vlan) < 4095:
+            self.err(f"VLAN id {vlan} is out of range (1..4094).")
+            return None
+        plan.eth_vlan = None if vlan is None else int(vlan)
+        if eth.cluster:
+            cluster = self._find(eth.cluster, "ETHERNET-CLUSTER", clusters)
+            if not cluster:
+                self.err(f"Ethernet cluster '{eth.cluster}' is not in the base file.")
+                return None
+        elif len(clusters) == 1:
+            cluster = clusters[0]
+        elif not clusters:
+            pkg = self._package("ETHERNET-CLUSTER")
+            cname = self._unique(pkg, fmt(naming.eth_cluster, **self._eth_fields()), "Ethernet cluster")
+            cluster, plan.eth_cluster_new = f"{pkg}/{cname}", True
+        else:
+            self.err("The base file has several Ethernet clusters: select the cluster of the new channel.")
+            return None
+        if not plan.eth_cluster_new:
+            for c in b.eth_channels():
+                if c.cluster == cluster and c.vlan == plan.eth_vlan:
+                    what = f"VLAN {c.vlan}" if c.vlan is not None else "an untagged channel"
+                    self.err(f"{cluster.rsplit('/', 1)[-1]} already has {what} ({c.name}): select that channel "
+                             f"instead of creating a new one.")
+                    return None
+        name = sanitize(eth.channel_name) if eth.channel_name else fmt(naming.eth_channel, **self._eth_fields())
+        name = self._unique(cluster, name, "Ethernet channel")
+        plan.eth_cluster, plan.eth_channel, plan.eth_channel_new = cluster, f"{cluster}/{name}", True
+        vlan_text = f"VLAN {plan.eth_vlan}" if plan.eth_vlan is not None else "untagged"
+        where = ("the new cluster " if plan.eth_cluster_new else "") + cluster.rsplit("/", 1)[-1]
+        self.info(f"New Ethernet channel {name} ({vlan_text}) in {where}.")
+        return EthChannel(path=plan.eth_channel, name=name, cluster=cluster, vlan=plan.eth_vlan)
+
+    def _new_connector(self, ch: EthChannel) -> bool:
+        """Plan an ETHERNET-COMMUNICATION-CONNECTOR of the ECU on *ch* (and a controller if the ECU has none)."""
+        b, eth, plan, naming = self.base, self.cfg.ethernet, self.plan, self.cfg.naming
+        ctrls = b.ecu_controllers(plan.ecu, "ETHERNET-COMMUNICATION-CONTROLLER")
+        if eth.controller:
+            plan.eth_controller = self._find(eth.controller, "ETHERNET-COMMUNICATION-CONTROLLER", ctrls) or ""
+            if not plan.eth_controller:
+                self.err(f"Ethernet controller '{eth.controller}' is not a controller of {plan.ecu_name}.")
+                return False
+        elif ctrls:
+            plan.eth_controller = ctrls[0]
+            if len(ctrls) > 1:
+                self.warn(f"{plan.ecu_name} has {len(ctrls)} Ethernet controllers; the new connector uses "
+                          f"{ctrls[0].rsplit('/', 1)[-1]} (choose another in the Ethernet settings).")
+        else:
+            name = self._unique(plan.ecu, fmt(naming.eth_controller, **self._eth_fields()), "Ethernet controller")
+            plan.eth_controller, plan.eth_controller_new = f"{plan.ecu}/{name}", True
+        name = self._unique(plan.ecu, fmt(naming.eth_connector, **self._eth_fields()), "Ethernet connector")
+        plan.eth_connector, plan.eth_connector_new = f"{plan.ecu}/{name}", True
+        ctrl = plan.eth_controller.rsplit("/", 1)[-1] + (", new" if plan.eth_controller_new else "")
+        self.info(f"{plan.ecu_name} is connected to {ch.name} by the new connector {name} (controller {ctrl}).")
+        return True
 
     # ------------------------------------------------------------------ buses
     def _plan_bus(self, bc: BusInput):
@@ -598,7 +706,7 @@ class Planner:
                     return None
                 if not plan.local_endpoint:
                     self.err(f"{what}: the connector has no network endpoint on {ch.name}; select the local "
-                             f"endpoint (IP address of {plan.ecu_name}).")
+                             f"endpoint or enter the IP address of {plan.ecu_name}.")
                     return None
                 key = ("socket", name)
                 if key in self._planned:
@@ -624,6 +732,10 @@ class Planner:
                     return None
             elif ip:
                 hits = [e for e in ch.endpoints if (e.ip or "").strip() == ip]
+                if plan.local_endpoint_new and ip == plan.ecu_ip:
+                    self.err(f"{what}: the remote IP {ip} is the IP address of {plan.ecu_name}; enter the IP "
+                             f"address of the other node.")
+                    return None
                 if hits:
                     nep_path = hits[0].path
                 elif ("endpoint", ip) in self._planned:
@@ -645,6 +757,7 @@ class Planner:
                 return None
             own = {p for c in b.ecu_connectors(plan.ecu)
                    for p in b.refs(b.el(c).find(q("NETWORK-ENDPOINT-REFS")), "NETWORK-ENDPOINT-REF")}
+            own.add(plan.local_endpoint)
             if nep_path in own:
                 self.warn(f"{what}: the remote endpoint {nep_path.rsplit('/', 1)[-1]} is an address of "
                           f"{plan.ecu_name} itself; enter the IP address of the other node.")

@@ -133,10 +133,10 @@ Mở: menu **Tools → CAN-Ethernet Gateway Generator…**, `run.bat gateway`, h
 
 | Mục | Nội dung |
 |---|---|
-| Base system description | file network ARXML hiện có của project (ví dụ export từ PREEvision), phải có Ethernet cluster. Tool tự dò ECU, kênh Ethernet/VLAN, connector, endpoint (IP), socket, header ID đang dùng, kênh CAN và cách chia package — không có tên cố định của project nào |
+| Base system description | file network ARXML hiện có của project (ví dụ export từ PREEvision). Có Ethernet cluster thì gộp vào đó; chưa có (file chỉ có CAN) thì tool tạo cluster, kênh/VLAN, controller, connector và IP của ECU. Tool tự dò ECU, kênh Ethernet/VLAN, connector, endpoint (IP), socket, header ID đang dùng, kênh CAN và cách chia package — không có tên cố định của project nào |
 | DBC + node | node = ECU gateway trong DBC. Message node **nhận** → CAN→ETH, message node **gửi** → ETH→CAN, map 1:1. NM và diagnostic mặc định bỏ (bật được) |
 | Kênh CAN | dùng kênh có sẵn trong base (frame tìm theo CAN ID, chỉ thêm port nếu thiếu) hoặc tạo CAN cluster mới từ DBC (baud rate từ DBC hoặc nhập) |
-| Ethernet (nhập tay) | VLAN, connector của ECU, IP local; mỗi chiều chọn socket có sẵn hoặc nhập port local + IP/port remote để tạo socket mới; header ID set |
+| Ethernet (nhập tay) | VLAN (có sẵn hoặc tạo mới), connector của ECU, IP local; mỗi chiều chọn socket có sẵn hoặc nhập port local + IP/port remote để tạo socket mới; header ID set |
 
 **Header ID**: = CAN ID đệm 0 thành 32 bit (`0x123` → `0x00000123`). Nếu trùng với PDU khác được nhận trên
 cùng socket (tính cả PDU có sẵn trong base) tool tự đặt cờ ở bit 29..31 (`k << 29`, k = 1..7 — CAN ID 29 bit

@@ -193,6 +193,15 @@ class Base:
                 out.append(self.path_of[c])
         return out
 
+    def ecu_controllers(self, ecu: str, tag: str | None = None) -> list[str]:
+        el = self.el(ecu)
+        ctrls = el.find(q("COMM-CONTROLLERS")) if el is not None else None
+        return [self.path_of[c] for c in (ctrls if ctrls is not None else [])
+                if isinstance(c.tag, str) and (tag is None or local(c) == tag) and c in self.path_of]
+
+    def eth_clusters(self) -> list[str]:
+        return self.of_type("ETHERNET-CLUSTER")
+
     def channel_of(self, el):
         while el is not None and local(el) not in PHYSICAL_CHANNELS:
             el = el.getparent()

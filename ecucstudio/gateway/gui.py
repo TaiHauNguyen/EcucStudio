@@ -19,6 +19,8 @@ from .writer import generate
 NEW = "<create new>"
 AUTO = "<auto>"
 NEW_CLUSTER = "<new CAN cluster from DBC>"
+NEW_CHANNEL = "<create new channel (VLAN)>"
+NEW_VALUE = "*new*"
 TITLE = "CAN-Ethernet Gateway Generator"
 
 
@@ -367,6 +369,8 @@ class GatewayWindow:
         self._tab_options(nb)
         bottom = ttk.Frame(pw)
         pw.add(bottom, weight=1)
+        # give the settings notebook its full height (the Ethernet tab is the tallest)
+        self.win.after(150, lambda: pw.sashpos(0, max(nb.winfo_reqheight(), 360)))
         self._routes(bottom)
 
     def _tab_input(self, nb):
@@ -407,15 +411,18 @@ class GatewayWindow:
     def _tab_eth(self, nb):
         f = ttk.Frame(nb, padding=10)
         nb.add(f, text="  Ethernet  ")
-        top = ttk.Frame(f)
-        top.pack(fill="x")
+        row = ttk.Frame(f)
+        row.pack(fill="x")
+        top = ttk.Frame(row)
+        top.pack(side="left", fill="x", expand=True, anchor="n")
         top.columnconfigure(1, weight=1)
+        self._new_eth_frame(row)
         ttk.Label(top, text="Ethernet channel (VLAN):").grid(row=0, column=0, sticky="w", pady=2)
-        self.c_chan = Choice(top, width=70, on_change=self.channel_changed).grid(row=0, column=1, sticky="w")
+        self.c_chan = Choice(top, width=62, on_change=self.channel_changed).grid(row=0, column=1, sticky="w")
         ttk.Label(top, text="ECU connector:").grid(row=1, column=0, sticky="w", pady=2)
-        self.c_conn = Choice(top, width=70, on_change=self.connector_changed).grid(row=1, column=1, sticky="w")
+        self.c_conn = Choice(top, width=62, on_change=self.connector_changed).grid(row=1, column=1, sticky="w")
         ttk.Label(top, text="Local endpoint (ECU IP):").grid(row=2, column=0, sticky="w", pady=2)
-        self.c_nep = Choice(top, width=70).grid(row=2, column=1, sticky="w")
+        self.c_nep = Choice(top, width=62).grid(row=2, column=1, sticky="w")
         pf = ttk.Frame(top)
         pf.grid(row=3, column=1, sticky="w", pady=2)
         ttk.Label(top, text="Protocol:").grid(row=3, column=0, sticky="w")
@@ -427,13 +434,37 @@ class GatewayWindow:
         ttk.Combobox(pf, textvariable=self.v_role, values=("CONNECT", "LISTEN"), width=10,
                      state="readonly").pack(side="left", padx=4)
         ttk.Label(top, text="Header id set:").grid(row=4, column=0, sticky="w", pady=2)
-        self.c_idset = Choice(top, width=70, editable=True).grid(row=4, column=1, sticky="w")
+        self.c_idset = Choice(top, width=62, editable=True).grid(row=4, column=1, sticky="w")
         sides = ttk.Frame(f)
         sides.pack(fill="x", pady=(8, 0))
         self.side_tx = SideFrame(sides, "CAN -> ETH  (gateway ECU sends on Ethernet)", self)
         self.side_rx = SideFrame(sides, "ETH -> CAN  (gateway ECU receives from Ethernet)", self)
         self.side_tx.pack(side="left", fill="both", expand=True, padx=(0, 4))
         self.side_rx.pack(side="left", fill="both", expand=True, padx=(4, 0))
+
+    def _new_eth_frame(self, parent):
+        """Fields for a new Ethernet channel / ECU connection (base file without Ethernet, new VLAN, or an
+        ECU that is not connected to the channel yet)."""
+        nf = ttk.LabelFrame(parent, text="New channel / ECU connection", padding=6)
+        nf.pack(side="left", fill="y", padx=(10, 0))
+        self.c_cluster = Choice(nf, width=30)
+        self.c_ctrl = Choice(nf, width=30)
+        self.v_chname, self.v_vlan = tk.StringVar(), tk.StringVar()
+        self.v_ecuip, self.v_mask, self.v_mac = tk.StringVar(), tk.StringVar(value="255.255.255.0"), tk.StringVar()
+        rows = (("Cluster:", self.c_cluster.cb), ("Channel name:", ttk.Entry(nf, textvariable=self.v_chname, width=33)),
+                ("VLAN id:", ttk.Entry(nf, textvariable=self.v_vlan, width=8)),
+                ("ECU IP / netmask:", None), ("Controller:", self.c_ctrl.cb),
+                ("MAC (new controller):", ttk.Entry(nf, textvariable=self.v_mac, width=20)))
+        for i, (label, w) in enumerate(rows):
+            ttk.Label(nf, text=label).grid(row=i, column=0, sticky="w", pady=1)
+            if w is not None:
+                w.grid(row=i, column=1, sticky="w", pady=1)
+        ipf = ttk.Frame(nf)
+        ipf.grid(row=3, column=1, sticky="w")
+        ttk.Entry(ipf, textvariable=self.v_ecuip, width=16).pack(side="left")
+        ttk.Entry(ipf, textvariable=self.v_mask, width=16).pack(side="left", padx=(4, 0))
+        self.new_eth_hint = ttk.Label(nf, text="", foreground="#666666", wraplength=360, justify="left")
+        self.new_eth_hint.grid(row=6, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
     def _tab_options(self, nb):
         f = ttk.Frame(nb, padding=10)
@@ -482,7 +513,7 @@ class GatewayWindow:
         top = ttk.Frame(parent)
         top.pack(fill="both", expand=True)
         cols = report.COLUMNS
-        self.t_routes = ttk.Treeview(top, columns=cols, show="headings", selectmode="extended")
+        self.t_routes = ttk.Treeview(top, columns=cols, show="headings", selectmode="extended", height=8)
         widths = (60, 75, 80, 200, 90, 70, 55, 65, 200, 220, 95, 220, 380)
         for c, wd in zip(cols, widths):
             self.t_routes.heading(c, text=c, anchor="w")
@@ -498,7 +529,7 @@ class GatewayWindow:
         self.t_routes.bind("<Button-3>", self.route_menu)
         msg = ttk.Frame(parent)
         msg.pack(fill="x")
-        self.t_msg = tk.Text(msg, height=7, wrap="word", font=("Segoe UI", 9), background="#ffffff",
+        self.t_msg = tk.Text(msg, height=6, wrap="word", font=("Segoe UI", 9), background="#ffffff",
                              relief="flat", borderwidth=1)
         self.t_msg.pack(fill="x", padx=2, pady=2)
         self.t_msg.tag_configure("error", foreground=COLORS["error"])
@@ -578,6 +609,8 @@ class GatewayWindow:
         self.c_ecu.set(self.cfg.ecu)
         self.c_idset.set_items([(AUTO, "")] + [(p.rsplit("/", 1)[-1] + f"   ({p})", p) for p in b.id_sets()])
         self.c_idset.set(self.cfg.ethernet.id_set)
+        self.c_cluster.set_items([(AUTO, "")] + [(p.rsplit("/", 1)[-1], p) for p in b.eth_clusters()])
+        self.c_cluster.set(self.cfg.ethernet.cluster)
         self.ecu_changed()
 
     def ecu(self):
@@ -601,17 +634,28 @@ class GatewayWindow:
         b, ecu = self.base, self.ecu()
         if b is None:
             return
-        chans = [c for c in b.eth_channels() if not ecu or any(b.connector_ecu(x) == ecu for x in c.connectors)]
-        self._channels = {c.path: c for c in b.eth_channels()}
-        self.c_chan.set_items([(AUTO, "")] + [(f"{c.label}   ({c.path})", c.path) for c in chans])
-        want = self.cfg.ethernet.channel
+        chans = b.eth_channels()
+        self._channels = {c.path: c for c in chans}
+        connected = [c for c in chans if ecu and any(b.connector_ecu(x) == ecu for x in c.connectors)]
+        items = [(AUTO, "")] if chans else []
+        items += [(NEW_CHANNEL, NEW_VALUE)]
+        items += [(f"{c.label}   ({c.path})" + ("" if c in connected else "   - ECU not connected"), c.path)
+                  for c in connected + [c for c in chans if c not in connected]]
+        self.c_chan.set_items(items)
+        e = self.cfg.ethernet
+        want = e.channel
         hit = [c.path for c in chans if want in (c.path, c.name) or
                (c.vlan is not None and want.upper() in (f"VLAN{c.vlan}", str(c.vlan)))] if want else []
-        self.c_chan.set(hit[0] if hit else "")
+        self.c_chan.set(NEW_VALUE if (e.new_channel or not chans) else (hit[0] if hit else ""))
+        ctrls = b.ecu_controllers(ecu, "ETHERNET-COMMUNICATION-CONTROLLER") if ecu else []
+        self.c_ctrl.set_items([(AUTO if ctrls else NEW, "")] + [(p.rsplit("/", 1)[-1], p) for p in ctrls])
+        self.c_ctrl.set(e.controller)
         self.channel_changed()
 
     def channel(self):
         p = self.c_chan.get()
+        if p == NEW_VALUE:
+            return None
         if p:
             return self._channels.get(p)
         ecu = self.ecu()
@@ -622,8 +666,19 @@ class GatewayWindow:
     def channel_changed(self):
         ch, ecu = self.channel(), self.ecu()
         conns = [c for c in (ch.connectors if ch else []) if self.base.connector_ecu(c) == ecu]
-        self.c_conn.set_items([(AUTO, "")] + [(c.rsplit("/", 1)[-1], c) for c in conns])
+        self.c_conn.set_items([(AUTO if conns else NEW, "")] + [(c.rsplit("/", 1)[-1], c) for c in conns])
         self.c_conn.set(next((c for c in conns if self.cfg.ethernet.connector in (c, c.rsplit('/', 1)[-1])), ""))
+        new_channel = self.c_chan.get() == NEW_VALUE or not self._channels
+        if new_channel:
+            hint = ("A new Ethernet channel is created" +
+                    ("" if self._channels else " in a new Ethernet cluster (the base file has none)") +
+                    ", with a connector and the IP address of the ECU. Empty VLAN id = untagged.")
+        elif ch is not None and not conns:
+            hint = ("The ECU is not connected to this channel: a connector is created. Enter the ECU IP "
+                    "address unless the channel already has it.")
+        else:
+            hint = "Not used: the ECU is already connected to the selected channel."
+        self.new_eth_hint.config(text=hint)
         self.connector_changed()
 
     def connector(self):
@@ -683,8 +738,17 @@ class GatewayWindow:
         c.output = self.v_out.get().strip()
         c.ecu = self.c_ecu.get()
         e = c.ethernet
-        e.channel = self.c_chan.get()
+        chan = self.c_chan.get()
+        e.new_channel = chan == NEW_VALUE
+        e.channel = "" if e.new_channel else chan
         e.connector = self.c_conn.get()
+        e.cluster = self.c_cluster.get()
+        e.channel_name = self.v_chname.get().strip()
+        e.vlan_id = _int_or_none(self.v_vlan.get())
+        e.ecu_ip = self.v_ecuip.get().strip()
+        e.ecu_netmask = self.v_mask.get().strip() or "255.255.255.0"
+        e.controller = self.c_ctrl.get()
+        e.mac = self.v_mac.get().strip()
         e.local_endpoint = self.c_nep.get()
         e.protocol = self.v_proto.get()
         e.tcp_role = self.v_role.get()
@@ -704,6 +768,11 @@ class GatewayWindow:
         self.v_base.set(c.base)
         self.v_out.set(c.output)
         self.v_proto.set(c.ethernet.protocol or "UDP")
+        self.v_chname.set(c.ethernet.channel_name)
+        self.v_vlan.set("" if c.ethernet.vlan_id is None else c.ethernet.vlan_id)
+        self.v_ecuip.set(c.ethernet.ecu_ip)
+        self.v_mask.set(c.ethernet.ecu_netmask or "255.255.255.0")
+        self.v_mac.set(c.ethernet.mac)
         self.v_role.set(c.ethernet.tcp_role or "CONNECT")
         self.v_extflag.set(c.header.extended_flag)
         self.v_sigs.set(c.options.eth_signals)

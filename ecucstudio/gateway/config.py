@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 @dataclass
 class Naming:
     """Short-name patterns. Fields: {bus} {msg} {sig} {ecu} {node} {canid} {frame} {pdu} {signal}
-    {triggering} {connector} {eth_pdu}."""
+    {triggering} {connector} {eth_pdu}; Ethernet patterns: {ecu} {vlan} {vlan_id}."""
     can_cluster: str = "{bus}_Cluster"
     can_channel: str = "{bus}"
     can_controller: str = "CT_{bus}"
@@ -28,6 +28,12 @@ class Naming:
     pdu_port: str = "{pdu}_{connector}"
     header_id: str = "{eth_pdu}_ID"
     gateway: str = "Gateway_{ecu}"
+    # new Ethernet elements (base file without Ethernet / new VLAN); {vlan} = VLAN<id> or Untagged
+    eth_cluster: str = "EthernetCluster"
+    eth_channel: str = "Channel_{vlan}"
+    eth_controller: str = "CT_{ecu}_Eth"
+    eth_connector: str = "CN_{ecu}_{vlan}"
+    eth_endpoint: str = "NEP_{ecu}_{vlan}"
 
 
 @dataclass
@@ -48,9 +54,19 @@ class SocketSide:
 
 @dataclass
 class EthernetSettings:
-    channel: str = ""               # ETHERNET-PHYSICAL-CHANNEL (path or short name; empty = the only one)
-    connector: str = ""             # ECU's ETHERNET-COMMUNICATION-CONNECTOR on that channel (empty = auto)
+    channel: str = ""               # ETHERNET-PHYSICAL-CHANNEL (path, short name or VLANnn; empty = the only one)
+    connector: str = ""             # ECU's ETHERNET-COMMUNICATION-CONNECTOR on that channel (empty = auto / new)
     local_endpoint: str = ""        # NETWORK-ENDPOINT for new local sockets (empty = the connector's)
+    # used when the base file has no Ethernet channel, when new_channel is set, or when the ECU is not
+    # connected to the channel yet
+    new_channel: bool = False       # create a new channel (VLAN) instead of using an existing one
+    cluster: str = ""               # ETHERNET-CLUSTER of the new channel (empty = the only one, or a new cluster)
+    vlan_id: int | None = None      # VLAN of the new channel (None = untagged)
+    channel_name: str = ""          # short name of the new channel (empty = naming pattern)
+    ecu_ip: str = ""                # IP address of the ECU (creates its NETWORK-ENDPOINT when there is none)
+    ecu_netmask: str = "255.255.255.0"
+    controller: str = ""            # ECU's ETHERNET-COMMUNICATION-CONTROLLER for a new connector (empty = auto/new)
+    mac: str = ""                   # MAC-UNICAST-ADDRESS of a new controller (optional)
     protocol: str = "UDP"           # UDP | TCP (TCP: the socket connection gets TCP-ROLE)
     tcp_role: str = "CONNECT"
     can_to_eth: SocketSide = field(default_factory=SocketSide)

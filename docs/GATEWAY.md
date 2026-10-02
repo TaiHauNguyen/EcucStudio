@@ -12,11 +12,12 @@ Có hai cách dùng: **giao diện** (mục 1–7) hoặc **command line** (mụ
 
 - Python 3.10+ cùng các gói `lxml` và `cantools` (`py -m pip install -r requirements.txt`).
   `run.bat` tự kiểm tra và tự cài nếu thiếu.
-- File network ARXML mà project đang dùng (ví dụ export từ PREEvision). File này phải có **Ethernet cluster**,
-  vì gateway được gộp vào cluster đó.
+- File network ARXML mà project đang dùng (ví dụ export từ PREEvision). Có Ethernet cluster thì gateway được gộp
+  vào cluster đó. **Chưa có** Ethernet cluster (file chỉ có CAN) thì tool tự tạo cluster, kênh (VLAN), controller,
+  connector và địa chỉ IP của ECU, xem mục 3.1.
 - File DBC của các bus CAN cần gateway, và tên node của ECU gateway trong DBC.
 - Thông tin Ethernet: VLAN, port UDP/TCP của ECU, IP và port của node bên kia (hoặc dùng socket đã có
-  trong file network).
+  trong file network). Nếu tool phải tạo kênh mới: thêm IP của ECU (và MAC nếu muốn).
 
 ## 1. Mở tool
 
@@ -54,11 +55,41 @@ Thanh công cụ: **New**, **Open…**, **Save**, **Save As…** (cấu hình `.
 
 | Trường | Ý nghĩa |
 |---|---|
-| Ethernet channel (VLAN) | kênh / VLAN để gửi và nhận PDU gateway |
-| ECU connector | connector Ethernet của ECU trên VLAN đó (`<auto>` = connector đầu tiên; tool cảnh báo nếu có nhiều) |
+| Ethernet channel (VLAN) | kênh / VLAN để gửi và nhận PDU gateway, hoặc `<create new channel (VLAN)>` (mục 3.1). Kênh mà ECU chưa nối vào có ghi chú `ECU not connected` |
+| ECU connector | connector Ethernet của ECU trên VLAN đó (`<auto>` = connector đầu tiên; tool cảnh báo nếu có nhiều). `<create new>` khi ECU chưa nối vào kênh |
 | Local endpoint (ECU IP) | địa chỉ IP của ECU cho socket mới (`<auto>` = endpoint của connector) |
 | Protocol | UDP (mặc định) hoặc TCP (chọn TCP role CONNECT / LISTEN) |
 | Header id set | nơi lưu các SO-CON-I-PDU-IDENTIFIER: `<auto>` = set đang dùng cho socket đã chọn (hoặc tạo `CanEthGateway_Ids`), chọn set có sẵn, hoặc gõ tên set mới |
+
+### 3.1 Khung **New channel / ECU connection**
+
+Chỉ dùng trong ba trường hợp (dòng chữ xám ở cuối khung cho biết trường hợp nào đang áp dụng):
+
+1. File base **chưa có Ethernet cluster**: kênh tự chọn là `<create new channel (VLAN)>`, tool tạo cluster mới.
+2. Chọn `<create new channel (VLAN)>` để thêm một **VLAN mới** vào cluster đã có.
+3. Chọn một kênh có sẵn mà **ECU chưa nối vào**: tool tạo connector cho ECU trên kênh đó.
+
+| Trường | Ý nghĩa |
+|---|---|
+| Cluster | cluster chứa kênh mới: `<auto>` = cluster duy nhất có sẵn, hoặc tạo cluster mới `EthernetCluster` nếu file chưa có |
+| Channel name | tên kênh mới (bỏ trống = `Channel_VLAN<id>` hoặc `Channel_Untagged`) |
+| VLAN id | 1..4094; **bỏ trống = kênh untagged**. Trùng VLAN đã có trong cluster thì báo lỗi (hãy chọn kênh đó) |
+| ECU IP / netmask | **bắt buộc** khi tạo kênh hoặc connector mới: tạo NETWORK-ENDPOINT của ECU (IP tĩnh). Nếu IP đã có trong kênh thì dùng lại |
+| Controller | controller Ethernet của ECU cho connector mới: `<auto>` = controller có sẵn của ECU (coupling port được thêm VLAN membership), hoặc tạo `CT_<ECU>_Eth` nếu ECU chưa có |
+| MAC (new controller) | MAC-UNICAST-ADDRESS của controller mới (không bắt buộc) |
+
+Tool tạo ra:
+
+- ETHERNET-CLUSTER (khi chưa có);
+- ETHERNET-PHYSICAL-CHANNEL (CATEGORY WIRED, VLAN với VLAN-IDENTIFIER nếu có);
+- NETWORK-ENDPOINT của ECU;
+- ETHERNET-COMMUNICATION-CONTROLLER (COUPLING-PORT có VLAN-MEMBERSHIP SENT-TAGGED hoặc SENT-UNTAGGED);
+- ETHERNET-COMMUNICATION-CONNECTOR, có NETWORK-ENDPOINT-REFS, và được nối vào COMM-CONNECTORS của kênh.
+
+Từ các phần tử này, DaVinci suy ra Eth controller (MAC), EthIf controller (`EthIfVlanId`), TcpIp controller,
+local address (IP tĩnh, netmask) và nhóm socket SoAd.
+
+### 3.2 Socket hai chiều
 
 Hai khung cho hai chiều:
 
@@ -90,10 +121,13 @@ Hai chiều có thể dùng chung một socket.
   - hoặc lấy cycle time từ DBC.
 - **Add new elements to the SYSTEM**: thêm phần tử mới vào FIBEX-ELEMENTS (mặc định bật).
 - **Short-name patterns**: mẫu đặt tên. Dùng được các trường `{bus} {msg} {sig} {ecu} {node} {canid}
-  {frame} {pdu} {signal} {triggering} {connector} {eth_pdu}`. Mặc định giống converter DBC của Vector, ví dụ:
+  {frame} {pdu} {signal} {triggering} {connector} {eth_pdu}`; mẫu cho phần Ethernet mới (cluster, channel,
+  controller, connector, endpoint) dùng `{ecu} {vlan} {vlan_id}` với `{vlan}` = `VLAN<id>` hoặc `Untagged`.
+  Mặc định giống converter DBC của Vector, ví dụ:
   - frame / PDU CAN: `{msg}_o{bus}`
   - PDU Ethernet: `{msg}_o{bus}_Eth`
   - triggering: `{pdu}_PT`
+  - kênh / connector Ethernet mới: `Channel_{vlan}` / `CN_{ecu}_{vlan}`
 
 ## 5. **Analyze**: xem và chỉnh route
 
@@ -156,6 +190,7 @@ rồi Generate lại **từ file base gốc**. Nếu lỡ chạy trên chính fi
 | CAN (bus mới) | thêm CAN-CLUSTER + kênh, CAN controller và connector trong ECU |
 | CAN (frame có sẵn) | chỉ thêm FRAME-PORT / I-PDU-PORT nếu ECU chưa có |
 | Ethernet | I-SIGNAL-I-PDU cùng độ dài, PDU-TRIGGERING + I-PDU-PORT trên connector Ethernet, SO-CON-I-PDU-IDENTIFIER (HEADER-ID), tham chiếu trong STATIC-SOCKET-CONNECTION, và SOCKET-ADDRESS / NETWORK-ENDPOINT / STATIC-SOCKET-CONNECTION khi tạo mới |
+| Ethernet (kênh mới, mục 3.1) | ETHERNET-CLUSTER, ETHERNET-PHYSICAL-CHANNEL + VLAN, NETWORK-ENDPOINT của ECU, ETHERNET-COMMUNICATION-CONTROLLER + COUPLING-PORT, ETHERNET-COMMUNICATION-CONNECTOR |
 | Gateway | I-PDU-MAPPING trong GATEWAY của ECU (tạo `Gateway_<ECU>` nếu chưa có) |
 | System | tham chiếu phần tử mới trong FIBEX-ELEMENTS |
 
@@ -186,6 +221,8 @@ python -m ecucstudio gateway inspect --base network.arxml --dbc Body.dbc
 
 :: 2. tạo file cấu hình mẫu
 python -m ecucstudio gateway template --base network.arxml --dbc Body.dbc --node GwEcu --channel VLAN60 -o gateway.json
+:: file base chưa có Ethernet (hoặc thêm VLAN mới với --new-channel): cho VLAN và IP của ECU
+python -m ecucstudio gateway template --base can_only.arxml --dbc Body.dbc --node GwEcu --vlan 20 --ecu-ip 10.0.20.1 -o gateway.json
 
 :: 3. điền phần Ethernet trong gateway.json (xem mục 9), rồi xem trước kết quả (không ghi file)
 python -m ecucstudio gateway plan gateway.json
@@ -226,6 +263,14 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
     "local_endpoint": "",
     "protocol": "UDP",
     "id_set": "",
+    "new_channel": false,
+    "cluster": "",
+    "vlan_id": null,
+    "channel_name": "",
+    "ecu_ip": "",
+    "ecu_netmask": "255.255.255.0",
+    "controller": "",
+    "mac": "",
     "can_to_eth": {"local_port": 50100, "remote_ip": "10.0.10.2", "remote_port": 50100},
     "eth_to_can": {"local_socket": "SA_GwEcu_Rx", "remote_socket": "SA_Tester_Tx"}
   },
@@ -241,6 +286,9 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
   - dùng socket có sẵn: `local_socket` + `remote_socket`;
   - tạo mới: `local_port` + `remote_ip` + `remote_port` (thêm `local_name`, `remote_name`,
     `remote_endpoint`, `remote_netmask`, `connection_name` nếu muốn).
+- Kênh mới / ECU chưa nối (mục 3.1): `new_channel`, `cluster`, `vlan_id` (`null` = untagged), `channel_name`,
+  `ecu_ip`, `ecu_netmask`, `controller`, `mac`. Base không có Ethernet thì tự tạo kênh, chỉ cần `ecu_ip`
+  (và `vlan_id` nếu là VLAN).
 - `messages`: chỉnh từng message theo tên trong DBC. `enabled` tắt/bật route, `header_id` đặt header ID tay,
   `eth_pdu` đổi tên PDU Ethernet.
 - `naming` (không ghi thì dùng mặc định): các mẫu tên như ở tab Options & Naming.
@@ -249,7 +297,10 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
 
 | Thông báo | Cách xử lý |
 |---|---|
-| `The base file has no ETHERNET-CLUSTER` | chọn đúng file network của project (file chỉ có CAN không dùng được) |
+| `Enter the IP address of <ECU> on <channel>` | tool cần tạo kênh / connector mới: nhập **ECU IP** ở khung New channel / ECU connection |
+| `… already has VLAN <n> (…)` | VLAN đó đã có: chọn kênh có sẵn thay vì `<create new channel (VLAN)>` |
+| `the remote IP … is the IP address of <ECU>` | IP remote trùng IP của ECU: nhập IP của node bên kia |
+| `several Ethernet clusters` | chọn **Cluster** cho kênh mới |
 | `Select the gateway ECU` | file có nhiều ECU: chọn **Gateway ECU** |
 | `Select the Ethernet channel (VLAN)` | ECU nối với nhiều VLAN: chọn kênh ở tab Ethernet |
 | `enter the local UDP port` / `enter the remote UDP port` / `enter the remote IP address` | nhập đủ port, IP cho socket mới, hoặc chọn socket có sẵn |

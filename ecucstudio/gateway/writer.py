@@ -18,7 +18,7 @@ from .planner import CAN_TO_ETH, Plan, Route, SignalSpec, choose_package, fmt
 from .xmlorder import E, R, T
 
 # FIBEX-ELEMENTS of the SYSTEM get these new element types (others only if the base file lists the type)
-FIBEX_TYPES = {"CAN-CLUSTER", "CAN-FRAME", "I-SIGNAL-I-PDU", "I-SIGNAL", "GATEWAY",
+FIBEX_TYPES = {"CAN-CLUSTER", "ETHERNET-CLUSTER", "CAN-FRAME", "I-SIGNAL-I-PDU", "I-SIGNAL", "GATEWAY",
                "SOCKET-CONNECTION-IPDU-IDENTIFIER-SET"}
 
 _BASE_TYPES = {  # name: (size, encoding, native declaration)
@@ -54,8 +54,15 @@ def _num(v) -> str:
 class Writer:
     def __init__(self, plan: Plan, base: Base):
         self.p, self.b, self.cfg = plan, base, plan.cfg
-        # copy the base file's style: UUIDs only on the element types that carry one there
-        self.uuid_tags = {local(e) for e in base.root.iter() if isinstance(e.tag, str) and e.get("UUID")}
+        # copy the base file's style: UUIDs on the element types that carry one there; types the base file
+        # does not contain get one too when the file uses UUIDs at all
+        with_uuid, present = set(), set()
+        for e in base.root.iter():
+            if isinstance(e.tag, str) and e.find(q("SHORT-NAME")) is not None:
+                present.add(local(e))
+                if e.get("UUID"):
+                    with_uuid.add(local(e))
+        self.uuid_tags = with_uuid | ({t for t in xmlorder.IDENTIFIABLE if t not in present} if with_uuid else set())
         self.created = collections.Counter()
         self.fibex: list[tuple[str, str]] = []
         self.warnings: list[str] = []
@@ -112,6 +119,8 @@ class Writer:
         p = self.p
         for bp in p.buses:
             self.bus(bp)
+        if p.enabled_routes:
+            self.ethernet()
         for sp in p.sides.values():
             self.side(sp)
         if p.enabled_routes:
@@ -150,6 +159,64 @@ class Writer:
         el = self.ident(tag, path, T("COMMUNICATION-DIRECTION", direction))
         self.attach(self.lst(connector, "ECU-COMM-PORT-INSTANCES"), el, connector)
         return path
+
+    # ------------------------------------------------------------------ Ethernet topology
+    def ethernet(self):
+        """New Ethernet cluster / channel (VLAN) / ECU endpoint, controller and connector, when planned."""
+        p, b = self.p, self.b
+        ch = p.eth_channel
+        vlan = p.eth_vlan
+        if p.eth_channel_new:
+            vlan_el = self.ident("VLAN", f"{ch}/VLAN{vlan}", T("VLAN-IDENTIFIER", vlan)) if vlan is not None else None
+            channel = self.ident("ETHERNET-PHYSICAL-CHANNEL", ch, T("CATEGORY", "WIRED"), vlan_el)
+            if p.eth_cluster_new:
+                pkg = p.eth_cluster.rsplit("/", 1)[0]
+                cluster = self.ident("ETHERNET-CLUSTER", p.eth_cluster, E(
+                    "ETHERNET-CLUSTER-VARIANTS", E("ETHERNET-CLUSTER-CONDITIONAL", E("PHYSICAL-CHANNELS", channel))))
+                self.element(pkg, cluster)
+                self.add_fibex("ETHERNET-CLUSTER", p.eth_cluster)
+            else:
+                self.attach(self.lst(p.eth_cluster, "ETHERNET-CLUSTER-VARIANTS", "ETHERNET-CLUSTER-CONDITIONAL",
+                                     "PHYSICAL-CHANNELS"), channel, p.eth_cluster)
+        if p.local_endpoint_new and p.local_endpoint not in b.by_path:
+            nep = self.ident("NETWORK-ENDPOINT", p.local_endpoint, E(
+                "NETWORK-ENDPOINT-ADDRESSES", E("IPV-4-CONFIGURATION", T("IPV-4-ADDRESS", p.ecu_ip),
+                                                T("IPV-4-ADDRESS-SOURCE", "FIXED"),
+                                                T("NETWORK-MASK", p.ecu_netmask))))
+            self.attach(self.lst(ch, "NETWORK-ENDPOINTS"), nep, ch)
+        if p.eth_controller_new:
+            name = p.eth_controller.rsplit("/", 1)[-1]
+            port = self.ident("COUPLING-PORT", f"{p.eth_controller}/{name}_Port",
+                              E("VLAN-MEMBERSHIPS", self.vlan_membership()))
+            ctrl = self.ident("ETHERNET-COMMUNICATION-CONTROLLER", p.eth_controller, T("CATEGORY", "WIRED"), E(
+                "ETHERNET-COMMUNICATION-CONTROLLER-VARIANTS", E(
+                    "ETHERNET-COMMUNICATION-CONTROLLER-CONDITIONAL", E("COUPLING-PORTS", port),
+                    T("MAC-UNICAST-ADDRESS", self.cfg.ethernet.mac or None))))
+            self.attach(self.lst(p.ecu, "COMM-CONTROLLERS"), ctrl, p.ecu)
+        elif p.eth_connector_new:
+            # existing controller: make its (first) coupling port a member of the channel
+            cport = b.el(p.eth_controller).find(".//" + q("COUPLING-PORT"))
+            if cport is not None and ch not in b.refs(cport, "VLAN-REF"):
+                self.attach_ref(xmlorder.ensure(cport, "VLAN-MEMBERSHIPS"), self.vlan_membership())
+        if p.eth_connector_new:
+            conn = self.ident("ETHERNET-COMMUNICATION-CONNECTOR", p.eth_connector, T("CATEGORY", "WIRED"),
+                              R("COMM-CONTROLLER-REF", "ETHERNET-COMMUNICATION-CONTROLLER", p.eth_controller),
+                              E("NETWORK-ENDPOINT-REFS", R("NETWORK-ENDPOINT-REF", "NETWORK-ENDPOINT",
+                                                           p.local_endpoint)) if p.local_endpoint else None)
+            self.attach(self.lst(p.ecu, "CONNECTORS"), conn, p.ecu)
+            self.attach_ref(self.lst(ch, "COMM-CONNECTORS"), E(
+                "COMMUNICATION-CONNECTOR-REF-CONDITIONAL",
+                R("COMMUNICATION-CONNECTOR-REF", "ETHERNET-COMMUNICATION-CONNECTOR", p.eth_connector)))
+        elif p.local_endpoint_new:
+            # existing connector without an endpoint on this channel
+            self.attach_ref(self.lst(p.eth_connector, "NETWORK-ENDPOINT-REFS"),
+                            R("NETWORK-ENDPOINT-REF", "NETWORK-ENDPOINT", p.local_endpoint))
+
+    def vlan_membership(self):
+        tagged = self.p.eth_vlan is not None
+        return E("VLAN-MEMBERSHIP", T("DEFAULT-PRIORITY", 0) if tagged else None,
+                 T("SEND-ACTIVITY", "SENT-TAGGED" if tagged else "SENT-UNTAGGED"),
+                 R("VLAN-REF", "ETHERNET-PHYSICAL-CHANNEL", self.p.eth_channel))
 
     # ------------------------------------------------------------------ sockets
     def side(self, sp):
