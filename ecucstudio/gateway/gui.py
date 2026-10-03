@@ -1082,15 +1082,17 @@ class GatewayWindow:
 
 def open_window(master: tk.Misc | None = None, config_path: str | None = None):
     """Open the generator in a Toplevel of *master* (EcucStudio) or in its own root window."""
+    from ..gui.startup import bring_to_front, show_main_window
     if master is None:
         root = tk.Tk()
         init_style(root)
-        root.geometry("1400x900")
         root.gateway = GatewayWindow(root, config_path)
+        show_main_window(root, TITLE, None, "1400x900")
         return root
     top = tk.Toplevel(master)
     top.geometry("1400x900")
     top.gateway = GatewayWindow(top, config_path)
+    bring_to_front(top)
     return top
 
 

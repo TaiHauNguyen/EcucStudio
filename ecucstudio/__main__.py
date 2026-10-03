@@ -62,15 +62,15 @@ def check_environment() -> int:
     return rc
 
 
-def _run_gui(dpa):
+def run_window(label, start):
+    """Run a GUI entry point; errors go to the log and, without a console (pythonw), to a dialog."""
     import traceback
-    write_log(f"start GUI (python {sys.version.split()[0]}, {sys.executable}) project={dpa or '-'}")
+    write_log(f"start {label} (python {sys.version.split()[0]}, {sys.executable})")
     try:
-        from .gui.app import main as gui_main
-        gui_main(dpa)
+        start()
     except Exception:
         tb = traceback.format_exc()
-        write_log("GUI crashed:\n" + tb)
+        write_log(f"{label} crashed:\n" + tb)
         sys.stderr.write(tb)
         try:  # pythonw has no console: show the error in a dialog
             import tkinter
@@ -83,6 +83,13 @@ def _run_gui(dpa):
             pass
         return 1
     return 0
+
+
+def _run_gui(dpa):
+    def start():
+        from .gui.app import main as gui_main
+        gui_main(dpa)
+    return run_window(f"GUI project={dpa or '-'}", start)
 
 
 def _dvcfgcmd_candidates(a):

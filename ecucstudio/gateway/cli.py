@@ -241,15 +241,21 @@ def cmd_edit(a):
 
 
 def cmd_editor(a):
-    from .editor_gui import main as editor_main
-    editor_main(a.file)
-    return 0
+    from ..__main__ import run_window
+
+    def start():
+        from .editor_gui import main as editor_main
+        editor_main(a.file)
+    return run_window(f"gateway editor file={a.file or '-'}", start)
 
 
 def cmd_gui(a):
-    from .gui import main as gui_main
-    gui_main(a.config)
-    return 0
+    from ..__main__ import run_window
+
+    def start():
+        from .gui import main as gui_main
+        gui_main(a.config)
+    return run_window(f"gateway generator config={a.config or '-'}", start)
 
 
 def main(argv=None):

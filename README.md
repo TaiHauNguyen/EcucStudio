@@ -15,9 +15,24 @@ và gói `lxml` (gateway CAN-Ethernet cần thêm `cantools`):
 ```bat
 py -m pip install -r requirements.txt
 ```
-`run.bat` tự kiểm tra Python/tkinter/lxml, tự cài `lxml` nếu thiếu và in lỗi ra cửa sổ nếu không chạy được.
-Kiểm tra thủ công: `py -m ecucstudio --check`. Lỗi khi khởi động/trong lúc chạy được ghi vào
-`%LOCALAPPDATA%\EcucStudio\ecucstudio.log`. Muốn xem lỗi trực tiếp thì chạy `py -m ecucstudio gui` trong cmd.
+`run.bat` tự kiểm tra Python/tkinter/lxml, tự cài gói còn thiếu và in lỗi ra cửa sổ nếu không chạy được. Sau đó
+nó khởi động GUI bằng đúng bản Python vừa kiểm tra (`pythonw.exe` cạnh `python.exe` của bản đó, không dùng alias
+`pyw`/`pythonw`) và **chờ đến khi cửa sổ hiện trên màn hình** rồi in `[OK] … window shown at x,y`.
+
+| Lệnh | Mở |
+|---|---|
+| `run.bat [project.dpa]` | EcucStudio |
+| `run.bat gateway [gateway.json]` | CAN-Ethernet Gateway Generator |
+| `run.bat editor [network.arxml]` | CAN-Ethernet Gateway Editor |
+| `run.bat debug …` | như trên nhưng chạy ngay trong cửa sổ console: mọi thông báo / lỗi hiện tại đó |
+
+**Không thấy cửa sổ?**
+- Sau 90 giây không có cửa sổ, `run.bat` in 20 dòng cuối của log `%LOCALAPPDATA%\EcucStudio\ecucstudio.log`
+  và dừng lại để bạn đọc.
+- Khi đó đóng `pythonw.exe` trong Task Manager (nếu còn chạy), rồi chạy `run.bat debug` để thấy lỗi trực tiếp.
+- Cửa sổ luôn được đặt lên trên cùng. Vị trí đã lưu nằm ngoài màn hình (đóng lúc đang thu nhỏ, hoặc màn hình phụ
+  đã rút ra) sẽ tự được đưa về giữa màn hình chính.
+- Kiểm tra môi trường thủ công: `py -m ecucstudio --check`.
 
 ## Giao diện
 

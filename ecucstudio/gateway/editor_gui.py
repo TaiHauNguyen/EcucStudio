@@ -495,15 +495,17 @@ class EditorWindow:
 
 def open_editor(master: tk.Misc | None = None, path: str | None = None):
     """Open the editor in a Toplevel of *master* or in its own root window."""
+    from ..gui.startup import bring_to_front, show_main_window
     if master is None:
         root = tk.Tk()
         init_style(root)
-        root.geometry("1450x880")
         root.editor = EditorWindow(root, path)
+        show_main_window(root, TITLE, None, "1450x880")
         return root
     top = tk.Toplevel(master)
     top.geometry("1450x880")
     top.editor = EditorWindow(top, path)
+    bring_to_front(top)
     return top
 
 

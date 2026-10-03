@@ -22,6 +22,7 @@ from .dialogs import AddContainerDialog, GenerateDialog, ModulesDialog, OpenFile
 from .editor import BasicEditor
 from .navigator import NavigatorView
 from .properties import PropertiesPanel
+from .startup import safe_geometry, show_main_window
 from .theme import COLORS, Icons, init_style
 from .validation_view import ValidationView
 from .widgets import ToolButton, ToolSeparator, ViewStack
@@ -43,13 +44,14 @@ class App(tk.Tk):
         init_style(self)
         self.icons = Icons()
         self.title(APP_NAME)
-        self.geometry(self.cfg.get("geometry", "1500x900"))
+        self.geometry(safe_geometry(self, self.cfg.get("geometry"), "1500x900"))
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build_menu()
         self._build_toolbar()
         self._build_status()
         self._build_body()
         self._bind_keys()
+        show_main_window(self, APP_NAME, self.cfg.get("geometry"), "1500x900", bool(self.cfg.get("zoomed")))
         self.after(100, self._poll)
         if dpa:
             self.after(200, lambda: self.open_project(dpa))
@@ -551,7 +553,10 @@ class App(tk.Tk):
             if not messagebox.askyesno(APP_NAME, "DaVinci is still running. Cancel it and exit?"):
                 return
             self.dv_run.cancel()
-        self.cfg["geometry"] = self.geometry()
+        state = self.state()
+        self.cfg["zoomed"] = state == "zoomed"
+        if state == "normal":           # a minimized window reports -32000,-32000
+            self.cfg["geometry"] = self.geometry()
         self.cfg.save()
         self.destroy()
 
