@@ -378,6 +378,11 @@ class GatewayWindow:
         self.b_plan.pack(side="left", padx=(0, 4))
         self.b_gen = ttk.Button(tb, text="Generate network ARXML", command=self.generate)
         self.b_gen.pack(side="left")
+        ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
+        b_edit = ttk.Button(tb, text="Edit Existing Gateway…", command=self.open_editor)
+        b_edit.pack(side="left")
+        Tooltip(b_edit, "Open a network file that already contains a gateway (e.g. the generated output) to change "
+                        "header ids, sockets, ports, IP addresses or to delete routes")
         self.status = ttk.Label(tb, text="Add the DBC files (and the base system description if the project has "
                                          "one).")
         self.status.pack(side="left", padx=12)
@@ -789,6 +794,18 @@ class GatewayWindow:
         self.side_rx.fill(ch, conn)
         self.side_tx.load(self.cfg.ethernet.can_to_eth)
         self.side_rx.load(self.cfg.ethernet.eth_to_can)
+
+    def open_editor(self):
+        """Gateway Editor for the output file (if it exists), else the base network file, else a chosen file."""
+        from .editor_gui import open_editor
+        cands = [self.v_out.get().strip(), self.v_base.get().strip()]
+        path = next((p for p in cands if p and p.lower().endswith(".arxml") and os.path.isfile(p)), None)
+        if path is None:
+            path = filedialog.askopenfilename(parent=self.win, title="Network file with a gateway",
+                                              filetypes=[("AUTOSAR XML", "*.arxml"), ("All files", "*.*")])
+            if not path:
+                return
+        open_editor(self.win, path)
 
     # ------------------------------------------------------------------ suggestions
     def suggest_eth(self):

@@ -5,6 +5,7 @@ vào DaVinci Configurator thì DaVinci tự tạo PduR routing path, SoAd PduRou
 CanIf PDU, không phải cấu hình ECUC bằng tay.
 
 Có hai cách dùng: **giao diện** (mục 1–7) hoặc **command line** (mục 8). Cả hai ra cùng một kết quả.
+File network đã có gateway thì mở bằng **Gateway Editor** để xem và sửa lại (mục 11).
 
 Tool dùng được cho bốn tình huống:
 
@@ -399,6 +400,7 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
 | Thông báo | Cách xử lý |
 |---|---|
 | `… Communication.arxml does not exist` | project chưa import DBC / chưa Update: import DBC trong DaVinci, Update, lưu project |
+| Editor: `Header id 0x… is already used on the same socket by …` | chọn giá trị khác, hoặc đổi header ID của PDU kia trước |
 | `select the CAN channel of the project` | chọn kênh CAN trong hộp thoại bus (chế độ project) |
 | DaVinci: `UUID is not unique in these two files` hoặc `Duplicate shortname 'System'` | file bổ sung tạo bằng phiên bản cũ của tool: cập nhật (`git pull`) và Generate lại |
 | `Select the output file (there is no base file)` | chưa chọn *Output file* khi không có file base |
@@ -415,6 +417,75 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
 | `… is not a valid DBC file: …` | file không phải DBC hoặc bị hỏng; xem dòng/cột trong thông báo. (Bản cũ báo `Invalid syntax at line 1, column 1: ">>!<<ï»¿VERSION"` với DBC lưu kèm BOM UTF-8 — đã sửa, cập nhật tool bằng `git pull`) |
 | Warning `remote endpoint … is an address of <ECU> itself` | IP remote đang là IP của chính ECU: nhập IP của node bên kia |
 | Warning `… N:1 route` | PDU CAN đó đã là đích của một route khác; N:1 chỉ có trong MICROSAR dạng extension, tắt route nếu không cần |
+
+## 11. Sửa gateway trong file network đã có (Gateway Editor)
+
+Mở một file network ARXML **đã có gateway** để xem và sửa lại bằng tool. File có thể do tool sinh ra, do PREEvision
+xuất, hoặc là file bổ sung của chế độ project.
+
+Mở bằng một trong các cách sau:
+
+- Generator: nút **Edit Existing Gateway…**. Tool mở file output nếu file đã tồn tại, nếu không thì mở file base,
+  nếu không có cả hai thì hỏi chọn file.
+- EcucStudio: menu **Tools → CAN-Ethernet Gateway Editor…**.
+- Command line: `python -m ecucstudio gateway editor network.arxml`.
+
+### 11.1 Tab **Routes**
+
+Liệt kê mọi route của các GATEWAY trong file (CAN→ETH, ETH→CAN, CAN→CAN, ETH→ETH), gồm các cột:
+
+- bus CAN, frame, CAN ID;
+- kênh Ethernet, PDU Ethernet, độ dài;
+- header ID, socket connection;
+- Remark: 1:N / N:1, SecOC, PDU không có header, phía route nằm ngoài file.
+
+Lọc theo chiều (Direction), theo gateway, hoặc theo tên (Filter: tìm trong tên PDU, frame, triggering, header ID).
+Bấm tiêu đề cột để sắp xếp.
+
+- **Double-click / Edit…**: sửa **header ID** và **socket connection** của route.
+  - Header ID nhập dạng `0x1A2B` hoặc số thập phân.
+  - Tool kiểm tra trùng như khi generate: duy nhất trên socket nhận (chiều ETH→CAN), và trên socket gửi lẫn socket
+    nhận phía bên kia (chiều CAN→ETH). Trùng thì báo lỗi và không đổi gì.
+  - Socket connection chỉ được chọn trong các connection của connector đang gửi/nhận PDU đó.
+- **Delete Routes… / phím Delete** (chọn được nhiều dòng):
+  - Xoá I-PDU-MAPPING của route.
+  - Mặc định xoá luôn phần tử phía Ethernet **chỉ** route đó dùng: PDU-TRIGGERING, I-SIGNAL-I-PDU (cả
+    SECURED-I-PDU), I-SIGNAL, I-SIGNAL-TRIGGERING, I-PDU-PORT / I-SIGNAL-PORT, SO-CON-I-PDU-IDENTIFIER cùng tham
+    chiếu của nó trong socket connection, FIBEX-ELEMENT-REF và mục trong I-SIGNAL-I-PDU-GROUP.
+  - Phần tử còn route khác dùng thì giữ lại. Ví dụ: PDU Ethernet 10:1 chỉ mất một nguồn.
+  - **Phía CAN giữ nguyên** (frame, PDU, signal thuộc database của bus).
+  - Bỏ tick ô tuỳ chọn trong hộp thoại xoá để chỉ xoá mapping.
+- **Add Routes…**: mở generator với **chính file này làm base và output** để thêm route từ DBC hoặc project
+  (route đã có được bỏ qua). Generate xong, quay lại editor: file được tự nạp lại.
+
+### 11.2 Tab **Sockets** và **Endpoints**
+
+- **Sockets**: kênh, socket, chủ sở hữu (ECU / remote), IP, port, giao thức, các socket connection, số header ID.
+  Double-click để sửa **port**; không cho trùng port cùng giao thức trên cùng địa chỉ.
+- **Endpoints**: kênh, endpoint, chủ sở hữu, IP, netmask. Double-click để sửa **IP / netmask**; không cho trùng IP trên
+  cùng kênh.
+
+### 11.3 Lưu
+
+- **Save** ghi đè file và giữ bản cũ là `.bak`; **Save As…** ghi ra file khác.
+- Tiêu đề cửa sổ có `*` khi còn thay đổi chưa lưu. Đóng cửa sổ hoặc mở file khác khi chưa lưu thì tool hỏi lại.
+- Phần không sửa của file giữ nguyên từng byte. **Reload** bỏ các thay đổi chưa lưu.
+- Khi mở file, tool kiểm tra và báo trong khung log:
+  - header ID trùng trên cùng socket;
+  - header ID không gắn socket connection nào;
+  - header ID trỏ tới PDU-TRIGGERING không có trong file.
+
+### 11.4 Command line
+
+```bat
+:: bảng route (hoặc --csv routes.csv); lọc --direction CAN->ETH
+python -m ecucstudio gateway routes network.arxml
+:: sửa và lưu (mặc định ghi đè file, giữ .bak; -o để ghi file khác). ROUTE = tên PDU Ethernet, frame CAN,
+:: triggering hoặc header ID; SOCKET / ENDPOINT = tên ngắn hoặc đường dẫn
+python -m ecucstudio gateway edit network.arxml --header EngineData_oBody_Eth=0x1100 ^
+    --delete GwCommand_oBody_Eth --port SA_GwEcu_CanGw_Rx=42010 --ip NEP_Tester=10.0.10.9/255.255.255.0
+```
+`edit` dừng và không ghi gì nếu có lỗi (ví dụ header ID trùng). `--keep-pdus` chỉ xoá mapping.
 
 ## Giới hạn hiện tại
 

@@ -126,6 +126,12 @@ SocketRoute (header ID) và CanIf PDU — không phải sửa ECUC bằng tay.
 
 Hướng dẫn sử dụng đầy đủ: [docs/GATEWAY.md](docs/GATEWAY.md).
 
+File network **đã có gateway** (do tool sinh ra hoặc từ PREEvision): mở bằng **Gateway Editor** (nút *Edit
+Existing Gateway…* của generator, menu *Tools → CAN-Ethernet Gateway Editor…*, hoặc `gateway editor <file>`) để
+xem tất cả route, sửa header ID / socket connection / port / IP, xoá route (dọn luôn phần tử Ethernet chỉ route đó
+dùng) và thêm route mới. Command line: `gateway routes` và `gateway edit`. Chi tiết ở mục 11 của
+[docs/GATEWAY.md](docs/GATEWAY.md).
+
 Mở: menu **Tools → CAN-Ethernet Gateway Generator…**, `run.bat gateway`, hoặc
 `python -m ecucstudio gateway gui [gateway.json]`. Cần thêm gói `cantools` (có trong requirements.txt).
 
@@ -188,7 +194,8 @@ ecucstudio/
   session.py    gom project/definition/model/validation, trạng thái tham số
   gui/          tkinter: app, tree, editor, properties, validation_view, console, dialogs
   gateway/      gateway CAN <-> Ethernet: dbcread, base (dò file network), planner (route, header ID),
-                writer (ghi ARXML theo thứ tự schema), xmlorder, report, cli, gui
+                writer (ghi ARXML theo thứ tự schema), xmlorder, report, suggest, dvproject (.dpa),
+                existing (đọc / sửa gateway có sẵn), cli, gui, editor_gui
 rules/          rule plugin (*.py)
 tests/          unittest trên bản sao project thật; tests/fixtures: dữ liệu tổng hợp cho gateway
 ```

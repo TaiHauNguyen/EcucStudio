@@ -411,6 +411,41 @@ class Base:
                         return d
         return None
 
+    def header_id_keys(self, socket: "Socket", connection: "SoConnection", pdu_triggering: str | None,
+                       ecu: str) -> list[tuple[str, str]]:
+        """Scopes in which a header id sent / received over *connection* of the ECU's *socket* must be unique:
+        ("rx", socket) for PDUs the ECU receives, ("tx", socket) plus ("rx", remote socket) for PDUs it sends
+        (unknown direction: both)."""
+        d = self.pdu_direction(pdu_triggering, ecu) if pdu_triggering else None
+        keys = []
+        if d in ("IN", None):
+            keys.append(("rx", socket.path))
+        if d in ("OUT", None):
+            keys.append(("tx", socket.path))
+            keys += [("rx", r) for r in connection.remotes]
+        return keys
+
+    def header_id_scopes(self, sockets: list | None = None) -> dict:
+        """{scope key: {header id: [SO-CON-I-PDU-IDENTIFIER paths]}} of the sockets owned by an ECU connector
+        (all Ethernet channels when *sockets* is None)."""
+        ids = self.header_ids()
+        if sockets is None:
+            sockets = [s for ch in self.eth_channels() for s in ch.sockets]
+        used = collections.defaultdict(lambda: collections.defaultdict(list))
+        for s in sockets:
+            if not s.connector:
+                continue
+            ecu = self.connector_ecu(s.connector)
+            for c in s.connections:
+                for idp in c.ids:
+                    h = ids.get(idp)
+                    if h is None or h.header_id is None:
+                        continue
+                    for key in self.header_id_keys(s, c, h.pdu_triggering, ecu):
+                        if idp not in used[key][h.header_id]:
+                            used[key][h.header_id].append(idp)
+        return used
+
     def pdu_direction(self, pt_path: str, ecu: str) -> str | None:
         """IN / OUT of a PDU triggering seen from *ecu* (via its I-PDU-PORTs)."""
         pt = self.el(pt_path)

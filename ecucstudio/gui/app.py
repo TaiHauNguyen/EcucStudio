@@ -108,6 +108,7 @@ class App(tk.Tk):
         mb.add_cascade(label="Project", menu=p)
         t = tk.Menu(mb, tearoff=False)
         t.add_command(label="CAN-Ethernet Gateway Generator…", command=self.gateway_generator)
+        t.add_command(label="CAN-Ethernet Gateway Editor…", command=self.gateway_editor)
         mb.add_cascade(label="Tools", menu=t)
         h = tk.Menu(mb, tearoff=False)
         h.add_command(label="About", command=lambda: messagebox.showinfo(
@@ -127,6 +128,14 @@ class App(tk.Tk):
         """CAN <-> Ethernet PduR gateway generator (writes a system description for DaVinci)."""
         from ..gateway.gui import open_window
         open_window(self)
+
+    def gateway_editor(self):
+        """Edit the gateway of an existing network file (routes, header ids, sockets, endpoints)."""
+        from ..gateway.editor_gui import open_editor
+        path = filedialog.askopenfilename(parent=self, title="Network file with a gateway",
+                                          filetypes=[("AUTOSAR XML", "*.arxml"), ("All files", "*.*")])
+        if path:
+            open_editor(self, path)
 
     def _build_toolbar(self):
         tb = tk.Frame(self, background=COLORS["bg"])

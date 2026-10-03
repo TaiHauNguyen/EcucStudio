@@ -522,6 +522,138 @@ class GatewayTest(unittest.TestCase):
         self.assertNotIn("ethernet.can_to_eth.local_port", {x.field for x in applied})
         self.assertEqual(make_plan(cfg).errors, [])
 
+    # ------------------------------------------------------------------ editing an existing gateway
+    def _generated(self):
+        cfg = config(self.out)
+        generate(make_plan(cfg))
+        return self.out
+
+    def test_existing_routes(self):
+        from ecucstudio.gateway.existing import GatewayModel
+        m = GatewayModel(self._generated())
+        self.assertEqual(collections.Counter(r.direction for r in m.routes), {"CAN->ETH": 4, "ETH->CAN": 1})
+        r = m.find_routes("BrakeStatus_oBody_Eth")[0]
+        self.assertEqual((r.can.can_id, r.can.extended, r.can.fd, r.can.channel_name), (0x300, True, True, "Body"))
+        self.assertEqual([h.header_id for h in r.eth.ids], [0x300])
+        self.assertEqual([h.connections for h in r.eth.ids],
+                         [["/Topology/Clusters/EthCluster/Eth_VLAN10/SA_GwEcu_Tx/GwEcu_to_Tester"]])
+        self.assertEqual(m.find_routes("DoorStatus")[0].can.frame, "DoorStatus")      # frame from the base file
+        self.assertEqual(m.check(), [])
+        self.assertEqual(len(m.sockets()), 4)
+        self.assertEqual({e.owner for e in m.endpoints()}, {"GwEcu", ""})
+
+    def test_existing_header_id(self):
+        from ecucstudio.gateway.existing import EditError, GatewayModel
+        m = GatewayModel(self._generated())
+        engine = m.find_routes("EngineData_oBody_Eth")[0].eth.ids[0].path
+        with self.assertRaises(EditError):                 # used by LampCmd on the same socket
+            m.set_header_id(engine, "0x100")
+        with self.assertRaises(EditError):
+            m.set_header_id(engine, "0x1FFFFFFFF")
+        self.assertFalse(m.dirty)
+        m.set_header_id(engine, "00004660")                # leading zeros: decimal
+        m.set_header_id(engine, "0x1100")
+        self.assertTrue(m.dirty)
+        m.save()
+        m2 = GatewayModel(self.out)
+        self.assertEqual(m2.find_routes("EngineData_oBody_Eth")[0].eth.ids[0].header_id, 0x1100)
+        self.assertTrue(os.path.exists(self.out + ".bak"))
+
+    def test_existing_move_connection(self):
+        from ecucstudio.gateway.existing import GatewayModel
+        m = GatewayModel(self._generated())
+        h = m.find_routes("DoorStatus_oBody_Eth")[0].eth.ids[0]
+        rx_conn = "/Topology/Clusters/EthCluster/Eth_VLAN10/SA_GwEcu_CanGw_Rx/SA_GwEcu_CanGw_Rx_to_SA_Remote_CanGw_Tx"
+        self.assertIn(rx_conn, m.connection_choices(h.path))
+        m.move_header_id(h.path, h.connections[0], rx_conn)
+        self.assertEqual(m.find_routes("DoorStatus_oBody_Eth")[0].eth.ids[0].connections, [rx_conn])
+        m.save()
+        root, idx = index(self.out)
+        tx = idx["/Topology/Clusters/EthCluster/Eth_VLAN10/SA_GwEcu_Tx/GwEcu_to_Tester"]
+        self.assertNotIn(h.path, [x.text for x in tx.iter(q("SO-CON-I-PDU-IDENTIFIER-REF"))])
+        self._xsd(self.out)
+
+    def test_existing_delete_route(self):
+        from ecucstudio.gateway.existing import GatewayModel
+        m = GatewayModel(self._generated())
+        removed = m.delete_routes(m.find_routes("GwCommand_oBody_Eth"))
+        self.assertEqual(removed["I-PDU-MAPPING"], 1)
+        self.assertEqual(len(m.routes), 4)
+        m.save()
+        root, idx = index(self.out)
+        for gone in ("/Communication/PDUs/GwCommand_oBody_Eth",
+                     "/Topology/Clusters/EthCluster/Eth_VLAN10/GwCommand_oBody_Eth_PT",
+                     "/Topology/Ecus/GwEcu/GwEcu_Eth_VLAN10/GwCommand_oBody_Eth_GwEcu_Eth_VLAN10",
+                     "/Topology/Clusters/VLAN10_Ids/GwCommand_oBody_Eth_ID",
+                     "/Communication/Signals/Cmd_oGwCommand_oBody_Eth"):
+            self.assertNotIn(gone, idx)
+        for kept in ("/Communication/PDUs/GwCommand_oBody", "/Communication/Frames/GwCommand_oBody",
+                     "/Topology/Clusters/Body_Cluster/Body/GwCommand_oBody_PT",
+                     "/Communication/SystemSignals/Cmd_oGwCommand_oBody"):
+            self.assertIn(kept, idx)
+        fibex = {x.text for x in root.iter(q("FIBEX-ELEMENT-REF"))}
+        self.assertNotIn("/Communication/PDUs/GwCommand_oBody_Eth", fibex)
+        for r in root.iter():
+            if isinstance(r.tag, str) and r.get("DEST"):
+                self.assertIn(r.text.strip(), idx, r.text)
+        self._xsd(self.out)
+        # mapping only: the Ethernet PDU stays
+        m = GatewayModel(self.out)
+        m.delete_routes(m.find_routes("DoorStatus_oBody_Eth"), cleanup=False)
+        self.assertIn("/Communication/PDUs/DoorStatus_oBody_Eth", m.base.by_path)
+
+    def test_existing_sockets_and_endpoints(self):
+        from ecucstudio.gateway.existing import EditError, GatewayModel
+        m = GatewayModel(self._generated())
+        rx = next(s for s in m.sockets() if s.name == "SA_GwEcu_CanGw_Rx")
+        with self.assertRaises(EditError):                 # same address and protocol as SA_GwEcu_Tx
+            m.set_port(rx.path, 42000)
+        m.set_port(rx.path, 42100)
+        tester = next(e for e in m.endpoints() if e.name == "NEP_Tester")
+        with self.assertRaises(EditError):
+            m.set_endpoint(tester.path, ip="10.0.10.1")    # the ECU's address
+        with self.assertRaises(EditError):
+            m.set_endpoint(tester.path, ip="10.0.10.300")
+        m.set_endpoint(tester.path, ip="10.0.10.20", mask="255.255.0.0")
+        m.save()
+        m2 = GatewayModel(self.out)
+        self.assertEqual(next(s for s in m2.sockets() if s.name == "SA_GwEcu_CanGw_Rx").port, 42100)
+        self.assertEqual({(e.ip, e.mask) for e in m2.endpoints() if e.name == "NEP_Tester"},
+                         {("10.0.10.20", "255.255.0.0")})
+
+    def test_existing_cli(self):
+        import contextlib
+        import io
+        from ecucstudio.gateway import cli
+        path = self._generated()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["routes", path]), 0)
+            self.assertEqual(cli.main(["edit", path, "--header", "DoorStatus_oBody_Eth=0x2200",
+                                       "--delete", "GwCommand_oBody_Eth"]), 0)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(["edit", path, "--header", "EngineData_oBody_Eth=0x2200"]), 1)
+        self.assertIn("5 route(s)", buf.getvalue())
+        from ecucstudio.gateway.existing import GatewayModel
+        m = GatewayModel(path)
+        self.assertEqual(len(m.routes), 4)
+        self.assertEqual(m.find_routes("DoorStatus_oBody_Eth")[0].eth.ids[0].header_id, 0x2200)
+
+    def test_existing_project_file(self):
+        """The additional input file of a DaVinci project: the CAN side is outside the file."""
+        from ecucstudio.gateway.existing import GatewayModel
+        cfg = GatewayConfig(base=self._project(), output=self.out)
+        cfg.buses.append(BusInput(channel="Body"))
+        cfg.ethernet.can_to_eth = SocketSide(local_socket="SA_GwEcu_Tx", remote_socket="SA_Tester_Rx")
+        generate(make_plan(cfg))
+        m = GatewayModel(self.out)
+        self.assertEqual([r.direction for r in m.routes], ["?->ETH"])
+        self.assertIn("not in this file", m.routes[0].notes[0])
+        m.set_header_id(m.routes[0].eth.ids[0].path, "0x7777")
+        m.delete_routes(m.routes)
+        self.assertEqual(m.routes, [])
+        m.save()
+
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))
         self.assertTrue(any("already has VLAN 10" in e for e in plan.errors), plan.errors)

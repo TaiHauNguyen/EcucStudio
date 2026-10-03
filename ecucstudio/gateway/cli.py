@@ -6,6 +6,9 @@
     python -m ecucstudio gateway plan     gateway.json
     python -m ecucstudio gateway generate gateway.json [-o out.arxml]
     python -m ecucstudio gateway gui      [gateway.json]
+    python -m ecucstudio gateway routes   network.arxml [--csv routes.csv]
+    python -m ecucstudio gateway edit     network.arxml --header PDU=0x123 --delete PDU --port SOCKET=50000
+    python -m ecucstudio gateway editor   [network.arxml]
 """
 from __future__ import annotations
 
@@ -152,6 +155,97 @@ def cmd_generate(a):
     return 0
 
 
+def _route_table(rows, cols):
+    widths = [max(len(c), *(len(str(r[i])) for r in rows)) if rows else len(c) for i, c in enumerate(cols)]
+    widths = [min(w, 60) for w in widths]
+    line = lambda vals: "  ".join(str(v)[:w].ljust(w) for v, w in zip(vals, widths)).rstrip()
+    return "\n".join([line(cols), line(["-" * w for w in widths])] + [line(r) for r in rows])
+
+
+def cmd_routes(a):
+    import csv
+    from .existing import ROUTE_COLUMNS, GatewayModel, route_rows
+    m = GatewayModel(a.file)
+    routes = [r for r in m.routes if not a.direction or r.direction == a.direction]
+    rows = route_rows(m, routes)
+    if a.csv:
+        with open(a.csv, "w", newline="", encoding="utf-8-sig") as fh:
+            w = csv.writer(fh, delimiter=";")
+            w.writerow(ROUTE_COLUMNS)
+            w.writerows(rows)
+        print("Written", os.path.abspath(a.csv))
+    else:
+        print(_route_table(rows, ROUTE_COLUMNS))
+    import collections
+    print(f"\n{len(routes)} route(s): " + ", ".join(f"{k} {v}" for k, v in
+                                                     sorted(collections.Counter(r.direction for r in routes).items())))
+    for c in m.check():
+        print("[WARNING]", c)
+    return 0
+
+
+def cmd_edit(a):
+    from .existing import EditError, GatewayModel
+    m = GatewayModel(a.file)
+
+    def one_route(name):
+        hits = m.find_routes(name)
+        if len(hits) != 1:
+            raise EditError(f"'{name}' matches {len(hits)} routes (use the Ethernet PDU or header id name)")
+        return hits[0]
+
+    try:
+        for item in a.header:
+            name, _, value = item.partition("=")
+            if name in {h for h in m.ids} or name in {p.rsplit("/", 1)[-1] for p in m.ids}:
+                id_path = next(p for p in m.ids if name in (p, p.rsplit("/", 1)[-1]))
+            else:
+                ids = (one_route(name).eth.ids if one_route(name).eth else [])
+                if len(ids) != 1:
+                    raise EditError(f"route '{name}' has {len(ids)} header ids: give the header id name instead")
+                id_path = ids[0].path
+            m.set_header_id(id_path, value)
+        for item in a.port:
+            name, _, value = item.partition("=")
+            hits = [s for s in m.sockets() if name in (s.path, s.name)]
+            if len(hits) != 1:
+                raise EditError(f"socket '{name}' not found (or ambiguous)")
+            m.set_port(hits[0].path, value)
+        for item in a.ip:
+            name, _, value = item.partition("=")
+            ip, _, mask = value.partition("/")
+            hits = [e for e in m.endpoints() if name in (e.path, e.name)]
+            if len(hits) != 1:
+                raise EditError(f"endpoint '{name}' not found (or ambiguous)")
+            m.set_endpoint(hits[0].path, ip or None, mask or None)
+        if a.delete:
+            routes = []
+            for name in a.delete:
+                hits = m.find_routes(name)
+                if not hits:
+                    raise EditError(f"no route matches '{name}'")
+                routes += [r for r in hits if r not in routes]
+            m.delete_routes(routes, cleanup=not a.keep_pdus)
+    except EditError as exc:
+        print("[ERROR]", exc, file=sys.stderr)
+        print("Nothing written.")
+        return 1
+    for c in m.changes:
+        print("[CHANGED]" if not c.startswith("warning") else "[WARNING]", c)
+    if not m.changes:
+        print("Nothing to change.")
+        return 0
+    out = m.save(a.output or None)
+    print("Written", out + ("" if a.output else " (previous version kept as .bak)"))
+    return 0
+
+
+def cmd_editor(a):
+    from .editor_gui import main as editor_main
+    editor_main(a.file)
+    return 0
+
+
 def cmd_gui(a):
     from .gui import main as gui_main
     gui_main(a.config)
@@ -198,6 +292,24 @@ def main(argv=None):
     p = sub.add_parser("gui")
     p.add_argument("config", nargs="?")
     p.set_defaults(fn=cmd_gui)
+    p = sub.add_parser("routes", help="list the gateway routes of a network file")
+    p.add_argument("file")
+    p.add_argument("--direction", help="e.g. CAN->ETH")
+    p.add_argument("--csv", help="write the table to a CSV file")
+    p.set_defaults(fn=cmd_routes)
+    p = sub.add_parser("edit", help="change the gateway of a network file")
+    p.add_argument("file")
+    p.add_argument("--header", action="append", default=[], metavar="ROUTE=VALUE",
+                   help="header id of a route (Ethernet PDU, CAN frame or header id name)")
+    p.add_argument("--port", action="append", default=[], metavar="SOCKET=PORT")
+    p.add_argument("--ip", action="append", default=[], metavar="ENDPOINT=IP[/NETMASK]")
+    p.add_argument("--delete", action="append", default=[], metavar="ROUTE", help="delete matching routes")
+    p.add_argument("--keep-pdus", action="store_true", help="delete only the gateway mapping, keep the Ethernet PDUs")
+    p.add_argument("-o", "--output", help="write to another file (default: the file itself, with .bak)")
+    p.set_defaults(fn=cmd_edit)
+    p = sub.add_parser("editor", help="open the gateway editor window")
+    p.add_argument("file", nargs="?")
+    p.set_defaults(fn=cmd_editor)
     a = ap.parse_args(argv)
     if not getattr(a, "fn", None):
         return cmd_gui(argparse.Namespace(config=None))

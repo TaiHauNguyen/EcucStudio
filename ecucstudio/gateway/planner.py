@@ -881,27 +881,14 @@ class Planner:
 
     # ------------------------------------------------------------------ header ids
     def _scopes(self) -> dict:
-        """Header ids already received per socket: key -> {header id: owner}."""
-        b, plan = self.base, self.plan
-        used = collections.defaultdict(dict)
+        """Header ids already used per socket: key -> {header id: owner (PDU triggering name)}."""
+        b = self.base
         ids = b.header_ids()
-        for s in self._eth.sockets:
-            if not s.connector:
-                continue
-            ecu = b.connector_ecu(s.connector)
-            for c in s.connections:
-                for idp in c.ids:
-                    h = ids.get(idp)
-                    if h is None or h.header_id is None:
-                        continue
-                    d = b.pdu_direction(h.pdu_triggering, ecu) if h.pdu_triggering else None
-                    owner = (h.pdu_triggering or idp).rsplit("/", 1)[-1]
-                    if d in ("IN", None):
-                        used[("rx", s.path)].setdefault(h.header_id, owner)
-                    if d in ("OUT", None):
-                        used[("tx", s.path)].setdefault(h.header_id, owner)
-                        for rem in c.remotes:
-                            used[("rx", rem)].setdefault(h.header_id, owner)
+        used = collections.defaultdict(dict)
+        for key, by_id in b.header_id_scopes(self._eth.sockets).items():
+            for hid, id_paths in by_id.items():
+                h = ids[id_paths[0]]
+                used[key][hid] = (h.pdu_triggering or id_paths[0]).rsplit("/", 1)[-1]
         return used
 
     def _assign_header_ids(self):
