@@ -32,10 +32,20 @@ trường hợp của bạn, tool hỏi lần lượt 2–3 trang và tự đi�
 
 | Bạn đang có | Chọn | Các trang | Kết quả |
 |---|---|---|---|
-| **Chỉ có file DBC**, chưa có project DaVinci | *I only have DBC files* | 1. thêm các file DBC (chọn nhiều file một lần); tool tự gợi ý node gateway của từng DBC (node có trong mọi DBC, hoặc tên giống gateway) 2. tên ECU, phiên bản DaVinci (5.24 → AUTOSAR_00049, 5.31+ → AUTOSAR_00052), file ra 3. route gì (CAN↔ETH, CAN→CAN) và thông số Ethernet đã gợi ý sẵn | một file network mới hoàn toàn; import vào project mới **thay cho** các file DBC |
+| **Chỉ có file DBC**, chưa có project DaVinci (một hoặc **nhiều** ECU) | *I only have DBC files* | 1. thêm các file DBC (chọn nhiều file một lần); tool gợi ý node gateway của từng DBC và cột **ECU**; DBC cùng ECU được gộp (xem dưới) 2. một ECU: tên ECU, phiên bản DaVinci (5.24 → AUTOSAR_00049, 5.31+ → AUTOSAR_00052), file ra, rồi route gì và thông số Ethernet; nhiều ECU: bảng ECU (IP, file ra), VLAN, port, node trung tâm (tuỳ chọn), file topology | một ECU: một file network mới; nhiều ECU: một topology (mục 13) và một file network cho mỗi ECU. Import vào project của từng ECU **thay cho** các file DBC |
 | **Project DaVinci đã import DBC**, chưa có file gateway | *I have a DaVinci project with the DBC files imported* | 1. chọn `.dpa`; tool liệt kê các kênh CAN của ECU (số message nhận / gửi), tick kênh tham gia gateway 2. route gì và thông số Ethernet (gợi ý từ project: kênh, IP, port có sẵn) | file bổ sung (Ethernet + gateway); thêm vào Input Files **cạnh** các file DBC, rồi Update |
 | **Project đã có file gateway** làm trước đó, cần sửa | *I want to change a gateway file that is already in the project* | 1. chọn file gateway (hoặc chọn `.dpa`, tool tự tìm file gateway của nó) 2. bỏ tick bus để bỏ route của nó, tick kênh mới của project để thêm; chọn giữ đúng các message cũ hay route lại mọi message | ghi đè **chính file đó**; trong DaVinci chỉ chạy Update, không import lại; phần không đổi giữ nguyên cấu hình |
 
+- **ECU được xác định từ tên node trong DBC**. Node gateway của mỗi DBC được gợi ý theo: node có trong mọi DBC (chỉ
+  một ECU) → node có tên trong tên file DBC → tên kiểu gateway / zone (`GW`, `XGW_…`, `ZONE`, `Z1`, `ZC2` …) → node
+  nhiều message nhất. Các DBC cùng node là **một ECU**. Ví dụ DBC Power có node Z1, Body có Z2, Chassis và Sensor
+  có Z3 → 3 ECU: message từ Chassis sang Sensor đi **nội bộ** Z3 (CAN → CAN); message từ Body sang Power đi
+  **Z2 → Z1 bằng Ethernet** (CAN → ETH trên Z2, ETH → CAN trên Z1). Node đặt theo tên bus của cùng một ECU (`XGW_Body` trên bus
+  Body, `XGW_Chassis` trên bus Chassis) được gộp thành ECU `XGW`; cột ECU sửa được (gõ cùng tên để gộp, tên khác để
+  tách).
+- Nhiều ECU: mặc định **không** có node trung tâm, tức chỉ route giữa các ECU; tick *Also a central Ethernet node*
+  (tên, IP) nếu các message còn lại phải đi tới một node trung tâm. Finish lưu `topology.json` và mở cửa sổ topology;
+  tab **Message paths** cho thấy mọi đường đi (From / Via / To), **Generate** ghi file của từng ECU.
 - Chọn trường hợp 2 với một project **đã có** file gateway của tool: tool báo và đề nghị **Update it instead**
   (chuyển sang trường hợp 3), tránh tạo file gateway thứ hai.
 - Nhấn **Finish**: cửa sổ chính hiện cấu hình và tự **Analyze**. Mọi giá trị vẫn sửa được ở các tab.
@@ -655,7 +665,9 @@ và một số message phải đi **thẳng từ ECU này sang ECU kia** qua Eth
 ZoneB nhận `WheelSpeed` trên bus Chassis, ZoneC gửi `WheelSpeed` trên bus Body → ZoneB gửi PDU tới ZoneC.
 
 Mở: menu **Tools → CAN Gateway Topology (several ECUs)…**, `run.bat topology [topology.json]`, hoặc
-`python -m ecucstudio gateway topology gui [topology.json]`.
+`python -m ecucstudio gateway topology gui [topology.json]`. Cách nhanh nhất khi chỉ có file DBC: nút **From DBC
+files…** (hoặc cửa sổ Start → *I only have DBC files*): tool tìm các ECU từ tên node trong DBC và dựng topology
+(xem mục *Bắt đầu nhanh*). Tab **Message paths** của cửa sổ topology hiện đường đi của mọi message (mục 14).
 
 ### 13.1 Khai báo mạng
 

@@ -9,6 +9,7 @@ Three situations:
 """
 from __future__ import annotations
 
+import collections
 import os
 import re
 from dataclasses import dataclass, field
@@ -19,6 +20,7 @@ from .regen import META_GID, config_from_file
 
 DAVINCI_SCHEMAS = {"5.24 or older": "AUTOSAR_00049", "5.31 or newer": "AUTOSAR_00052"}
 _GW_NAME = re.compile(r"(^|_)(X?GW|GTW|GWY|GATEWAY|ZONE|ZCU|ZC|CGW)\d*(_|$)", re.IGNORECASE)
+_ZONE_NAME = re.compile(r"^Z[A-Z]?\d+$", re.IGNORECASE)      # zone controllers named like Z1, ZC2, ZB3
 
 
 @dataclass
@@ -37,9 +39,15 @@ def node_counts(db: dbcread.Database) -> dict[str, tuple[int, int]]:
     return out
 
 
+def _in_file_name(node: str, path: str) -> bool:
+    tokens = re.split(r"[^A-Za-z0-9]+", os.path.splitext(os.path.basename(path or ""))[0].upper())
+    return node.upper() in tokens
+
+
 def guess_nodes(dbs: list[dbcread.Database]) -> list[NodeGuess]:
-    """The gateway node of every DBC: a node that is in every DBC, else a node with a gateway-like name, else the
-    node with the most messages."""
+    """The gateway ECU node of every DBC: a node that is in every DBC (one ECU on all buses), else a node named in
+    the DBC file name, else a node with a gateway / zone-like name, else the node with the most messages. Different
+    nodes in different DBCs mean different ECUs (see ecu_for_node)."""
     counts = [node_counts(db) for db in dbs]
     used = [{n for n, (rx, tx) in c.items() if rx + tx} for c in counts]
     if len(dbs) > 1:
@@ -47,18 +55,65 @@ def guess_nodes(dbs: list[dbcread.Database]) -> list[NodeGuess]:
         if common:
             best = max(sorted(common), key=lambda n: sum(sum(c[n]) for c in counts))
             return [NodeGuess(best, "the node that is in every DBC", True) for _ in dbs]
+    shared = collections.Counter(n for names in used for n in names)
     out = []
-    for c, names in zip(counts, used):
-        gw = [n for n in sorted(names) if _GW_NAME.search(n)]
-        if gw:
-            best = max(gw, key=lambda n: sum(c[n]))
-            out.append(NodeGuess(best, "its name looks like a gateway", len(gw) == 1))
+    for db, c, names in zip(dbs, counts, used):
+        in_name = [n for n in sorted(names) if _in_file_name(n, db.path)]
+        gw = [n for n in sorted(names) if _GW_NAME.search(n) or _ZONE_NAME.match(n)]
+        if len(in_name) == 1:
+            out.append(NodeGuess(in_name[0], "the node named in the DBC file name", True))
+        elif gw:
+            # prefer the one that is also in other DBCs (an ECU on several buses), then the busiest
+            best = max(gw, key=lambda n: (shared[n], sum(c[n])))
+            out.append(NodeGuess(best, "its name looks like a gateway / zone ECU", len(gw) == 1))
         elif names:
             best = max(sorted(names), key=lambda n: sum(c[n]))
             out.append(NodeGuess(best, "it receives / sends the most messages - check it", False))
         else:
             out.append(NodeGuess("", "the DBC has no node with messages", False))
     return out
+
+
+def ecu_for_node(node: str, bus: str) -> str:
+    """ECU of a gateway node: the node itself (ZC1, ZC2 ...), or without the bus name when the node is named after
+    the bus (XGW_Body on bus Body and XGW_Chassis on bus Chassis are one ECU XGW)."""
+    n, b = node or "", (bus or "").strip("_")
+    if b and len(n) > len(b) + 1:
+        if n.lower().endswith("_" + b.lower()):
+            return n[: -len(b) - 1]
+        if n.lower().startswith(b.lower() + "_"):
+            return n[len(b) + 1:]
+    return n
+
+
+def group_ecus(rows: list[tuple[str, str, str]]) -> dict[str, list[tuple[str, str]]]:
+    """[(dbc path, gateway node, ECU)] -> {ECU: [(dbc path, node)]} in the order of the rows."""
+    out: dict = {}
+    for path, node, ecu in rows:
+        out.setdefault(ecu or node, []).append((path, node))
+    return out
+
+
+def suggest_ips(n: int, vlan: int | None = None) -> list[str]:
+    net = vlan if vlan is not None and 0 < int(vlan) < 255 else 1
+    return [f"192.168.{net}.{11 + i}" for i in range(n)]
+
+
+def topology_for_dbcs(groups: dict, folder: str, schema: str, ips: dict, generate: dict | None = None,
+                      outputs: dict | None = None, vlan: int | None = None, peer: tuple[str, str] | None = None,
+                      tx_port: int = 50000, rx_port: int = 50001, name: str = ""):
+    """Several gateway ECUs found in the DBC files -> topology: one ECU per group (a new network file each),
+    optionally a central Ethernet node (*peer* = (name, ip)) for the messages no ECU needs."""
+    from .topology import EcuNode, PeerNode, TopoEthernet, TopologyConfig
+    t = TopologyConfig(name=name, ethernet=TopoEthernet(vlan_id=vlan), tx_port=tx_port, rx_port=rx_port)
+    for ecu, dbcs in groups.items():
+        g = GatewayConfig(base="", output=(outputs or {}).get(ecu) or default_output(folder, ecu), ecu=ecu,
+                          schema=schema, buses=[BusInput(dbc=os.path.abspath(p), node=n) for p, n in dbcs])
+        t.ecus.append(EcuNode(name=ecu, ip=ips.get(ecu, ""), generate=(generate or {}).get(ecu, True), gateway=g))
+    if peer and peer[0]:
+        t.peers.append(PeerNode(name=peer[0], ip=peer[1]))
+        t.default_peer = peer[0]
+    return t
 
 
 def ecu_name_for(nodes: list[str]) -> str:

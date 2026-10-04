@@ -143,6 +143,10 @@ class TopologyWindow:
         w = self.win
         tb = ttk.Frame(w, padding=(6, 4))
         tb.pack(fill="x")
+        b_dbc = ttk.Button(tb, text="From DBC files…", command=self.from_dbcs)
+        b_dbc.pack(side="left", padx=(0, 4))
+        Tooltip(b_dbc, "New topology from the DBC files of the network: the gateway ECUs are found from the node "
+                       "names (DBC files with the same gateway node belong to one ECU)")
         for text, cmd in (("New", self.new), ("Open…", self.open_dialog), ("Save", self.save),
                           ("Save As…", self.save_as)):
             ttk.Button(tb, text=text, command=cmd).pack(side="left", padx=(0, 4))
@@ -188,6 +192,9 @@ class TopologyWindow:
                                     (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 110, 95, 220, 380))
         self.t_contract = self._table(self.tabs, "  Contract (Ethernet PDUs)  ", CONTRACT_COLUMNS,
                                       (80, 80, 160, 90, 55, 230, 95, 130, 80, 130, 160, 300))
+        from ..paths import COLUMNS as PATH_COLUMNS
+        self.t_paths = self._table(self.tabs, "  Message paths  ", PATH_COLUMNS,
+                                   (95, 200, 200, 330, 220, 150, 55, 65))
         self.t_cross.bind("<Double-1>", lambda _e: self.edit_cross())
         self.t_cross.bind("<space>", lambda _e: self.toggle_cross())
         self.t_cross.bind("<Button-3>", self.cross_menu)
@@ -219,6 +226,7 @@ class TopologyWindow:
         t.tag_configure("flag", foreground=COLORS["warning"])
         t.tag_configure("new", foreground=COLORS["info"])
         t.tag_configure("removed", foreground=COLORS["error"])
+        t.tag_configure("band", background="#f3f6f9")
         return t
 
     # ------------------------------------------------------------------ background work
@@ -267,6 +275,15 @@ class TopologyWindow:
         self.refresh_nodes("net")
         self.fill_tables()
         self.show_messages()
+
+    def from_dbcs(self):
+        from ..wizard import StartWizard
+
+        def one_ecu(cfg, case, notes):
+            from ..gui import open_window
+            win = open_window(self.win, wizard=False)
+            win.gateway.apply_start(cfg, case, notes)
+        StartWizard(self.win, one_ecu, dbc_cache=self.dbc_cache, on_topology_file=self.open, initial_case="dbc")
 
     def open_dialog(self):
         p = filedialog.askopenfilename(parent=self.win, title="Topology file",
@@ -688,11 +705,21 @@ class TopologyWindow:
 
     # ------------------------------------------------------------------ tables
     def fill_tables(self):
-        for t in (self.t_cross, self.t_routes, self.t_contract):
+        for t in (self.t_cross, self.t_routes, self.t_contract, self.t_paths):
             t.delete(*t.get_children())
         tp = self.tplan
         if tp is None:
             return
+        from ..paths import report_of_topology
+        try:
+            rep = report_of_topology(tp)
+        except Exception:  # noqa: BLE001 - the tab is informative only
+            rep = None
+        last, band = None, 0
+        for i, p in enumerate(rep.paths if rep else []):
+            if (p.can_id, p.names) != last:
+                band, last = 1 - band, (p.can_id, p.names)
+            self.t_paths.insert("", "end", iid=str(i), values=p.row, tags=("band",) if band else ())
         self._cross_by_iid = {}
         for i, (c, row) in enumerate(zip(tp.cross, treport.cross_rows(tp))):
             tags = ("off",) if not c.enabled else (("new",) if c.change == "new" else ())

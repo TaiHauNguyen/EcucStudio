@@ -142,5 +142,62 @@ class StartTest(unittest.TestCase):
         self.assertEqual(os.path.normcase(info.cfg.base), os.path.normcase(dpa))
 
 
+    # ------------------------------------------------------------------ several ECUs found by their node names
+    def network_dbcs(self):
+        """PowerBus has ZC1, BodyBus has ZC2, ChassisBus and SensorBus have ZC3 (synthetic)."""
+        def dbc(name, nodes, msgs):
+            text = 'VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: ' + " ".join(nodes) + "\n\n"
+            for mname, cid, length, sender, receiver in msgs:
+                text += f'BO_ {cid} {mname}: {length} {sender}\n SG_ {mname}Sig : 0|8@1+ (1,0) [0|255] "" {receiver}\n\n'
+            text += f'BA_DEF_ "DBName" STRING ;\nBA_DEF_DEF_ "DBName" "";\nBA_ "DBName" "{name}";\n'
+            path = os.path.join(self.tmp, f"{name}.dbc")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return path
+        return [dbc("PowerBus", ["ZC1", "Engine"], [("LockCmd", 0x201, 2, "ZC1", "Engine"),
+                                                    ("Torque", 0x300, 8, "Engine", "ZC1")]),
+                dbc("BodyBus", ["ZC2", "Key"], [("LockCmd", 0x201, 2, "Key", "ZC2")]),
+                dbc("ChassisBus", ["ZC3", "Abs"], [("WheelInfo", 0x120, 8, "Abs", "ZC3")]),
+                dbc("SensorBus", ["ZC3", "Radar"], [("WheelInfo", 0x120, 8, "ZC3", "Radar")])]
+
+    def test_ecus_from_node_names(self):
+        from ecucstudio.gateway import paths
+        from ecucstudio.gateway.topology import generate_topology, make_topology_plan
+        files = self.network_dbcs()
+        dbs = [dbcread.load(f) for f in files]
+        guesses = start.guess_nodes(dbs)
+        self.assertEqual([g.node for g in guesses], ["ZC1", "ZC2", "ZC3", "ZC3"])
+        groups = start.group_ecus([(f, g.node, start.ecu_for_node(g.node, db.name))
+                                   for f, g, db in zip(files, guesses, dbs)])
+        self.assertEqual({e: [os.path.basename(p) for p, _n in v] for e, v in groups.items()},
+                         {"ZC1": ["PowerBus.dbc"], "ZC2": ["BodyBus.dbc"], "ZC3": ["ChassisBus.dbc", "SensorBus.dbc"]})
+        ips = dict(zip(groups, start.suggest_ips(len(groups), 20)))
+        t = start.topology_for_dbcs(groups, self.tmp, "AUTOSAR_00049", ips, vlan=20)
+        t.save(os.path.join(self.tmp, "topology.json"))
+        tp = make_topology_plan(t)
+        self.assertEqual(tp.errors, [])
+        # BodyBus -> PowerBus: CAN -> ETH on ZC2, ETH -> CAN on ZC1
+        self.assertEqual([c.key for c in tp.enabled_cross], ["ZC2/BodyBus/LockCmd -> ZC1/PowerBus/LockCmd"])
+        r2 = {r.message.name: r for r in tp.plans["ZC2"].enabled_routes}
+        r1 = {r.message.name: r for r in tp.plans["ZC1"].enabled_routes}
+        self.assertEqual((r2["LockCmd"].direction, r2["LockCmd"].peers), ("CAN->ETH", ["ZC1"]))
+        self.assertEqual((r1["LockCmd"].direction, r1["LockCmd"].peers), ("ETH->CAN", ["ZC2"]))
+        # ChassisBus -> SensorBus: inside ZC3, no Ethernet
+        self.assertEqual([(c.src.bus.name, c.dst.bus.name) for c in tp.plans["ZC3"].enabled_can_routes],
+                         [("ChassisBus", "SensorBus")])
+        self.assertEqual(tp.plans["ZC3"].enabled_routes, [])
+        # no central node: a message no ECU needs is not routed
+        self.assertNotIn("Torque", r1)
+        res = dict(generate_topology(tp))
+        self.assertEqual(set(res), {"ZC1", "ZC2", "ZC3"})
+        rep = paths.report_of_topology(tp)
+        p = {(x.names, x.origin): x for x in rep.paths}
+        self.assertEqual(p[("LockCmd", "Key @ BodyBus")].gateways, ["ZC2", "ZC1"])
+        self.assertEqual(p[("LockCmd", "Key @ BodyBus")].destination, "PowerBus → Engine")
+        self.assertEqual(p[("WheelInfo", "Abs @ ChassisBus")].via, ["ZC3"])
+        # one ECU named after its buses stays one ECU
+        self.assertEqual(start.ecu_for_node("XGW_Body", "Body"), "XGW")
+        self.assertEqual(start.ecu_for_node("ZC1", "PowerBus"), "ZC1")
+
 if __name__ == "__main__":
     unittest.main()

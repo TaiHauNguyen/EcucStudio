@@ -1409,8 +1409,11 @@ class GatewayWindow:
         def topology():
             from .topology.gui import open_topology
             open_topology(self.win)
+        def topology_file(path):
+            from .topology.gui import open_topology
+            open_topology(self.win, path)
         StartWizard(self.win, self.apply_start, on_topology=topology, on_open=self.open_config_dialog,
-                    dbc_cache=self.dbc_cache)
+                    dbc_cache=self.dbc_cache, on_topology_file=topology_file)
 
     def apply_start(self, cfg: GatewayConfig, case: str, notes=()):
         self.cfg, self.cfg_path, self.plan, self._done_text = cfg, None, None, ""
