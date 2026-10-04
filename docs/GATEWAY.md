@@ -27,42 +27,63 @@ Tool dùng được cho bốn tình huống:
 
 ## Bắt đầu nhanh: cửa sổ **Start**
 
-Mở tool (`run.bat gateway` hoặc menu **Tools**) là cửa sổ **Start** hiện ra (mở lại bằng nút **Start…**). Chọn đúng
-trường hợp của bạn, tool hỏi lần lượt 2–3 trang và tự điền phần còn lại:
+Mở tool (`run.bat gateway` hoặc menu **Tools**) là cửa sổ **Start** hiện ra (mở lại bằng nút **Start…**).
 
-| Bạn đang có | Chọn | Các trang | Kết quả |
-|---|---|---|---|
-| **Chỉ có file DBC**, chưa có project DaVinci (một hoặc **nhiều** ECU) | *I only have DBC files* | 1. thêm các file DBC (chọn nhiều file một lần); tool gợi ý node gateway của từng DBC và cột **ECU**; DBC cùng ECU được gộp (xem dưới) 2. một ECU: tên ECU, phiên bản DaVinci (5.24 → AUTOSAR_00049, 5.31+ → AUTOSAR_00052), file ra, rồi route gì và thông số Ethernet; nhiều ECU: bảng ECU (IP, file ra), VLAN, port, node trung tâm (tuỳ chọn), file topology | một ECU: một file network mới; nhiều ECU: một topology (mục 13) và một file network cho mỗi ECU. Import vào project của từng ECU **thay cho** các file DBC |
-| **Project DaVinci đã import DBC** của ECU, chưa có file gateway | *I have a DaVinci project with the DBC files imported* | 1. chọn `.dpa`; tool liệt kê các kênh CAN của ECU (số message nhận / gửi), tick kênh tham gia gateway 2. (tuỳ chọn) DBC của **ECU khác** khi có route ECU → ECU qua Ethernet 3. route gì và thông số Ethernet (gợi ý từ project), hoặc bảng ECU nếu có ECU khác | file bổ sung **chỉ có Ethernet + gateway**; thêm vào Input Files **cạnh** các file DBC, rồi Update |
-| **Project đã có file gateway** làm trước đó, cần sửa | *I want to change a gateway file that is already in the project* | 1. chọn file gateway (hoặc chọn `.dpa`, tool tự tìm file gateway của nó) 2. bỏ tick bus để bỏ route của nó, tick kênh mới của project để thêm; chọn giữ đúng các message cũ hay route lại mọi message | ghi đè **chính file đó**; trong DaVinci chỉ chạy Update, không import lại; phần không đổi giữ nguyên cấu hình |
+**Input và output**
 
-- **ECU được xác định từ tên node trong DBC**. Node gateway của mỗi DBC được gợi ý theo: node có trong mọi DBC (chỉ
-  một ECU) → node có tên trong tên file DBC → tên kiểu gateway / zone (`GW`, `XGW_…`, `ZONE`, `Z1`, `ZC2` …) → node
-  nhiều message nhất. Các DBC cùng node là **một ECU**. Ví dụ DBC Power có node Z1, Body có Z2, Chassis và Sensor
-  có Z3 → 3 ECU: message từ Chassis sang Sensor đi **nội bộ** Z3 (CAN → CAN); message từ Body sang Power đi
-  **Z2 → Z1 bằng Ethernet** (CAN → ETH trên Z2, ETH → CAN trên Z1). Node đặt theo tên bus của cùng một ECU (`XGW_Body` trên bus
-  Body, `XGW_Chassis` trên bus Chassis) được gộp thành ECU `XGW`; cột ECU sửa được (gõ cùng tên để gộp, tên khác để
-  tách).
-- **Project DaVinci = chỉ sinh phần gateway, không trùng.** Tool lấy ECU từ project (ECU-INSTANCE của `.dpa`) và
-  đọc trong `Config/System/Communication.arxml` các kênh CAN ECU đó nối vào, message nó nhận / gửi; DBC không import
-  vào project thì tool không biết. File ra chỉ có phần Ethernet (kênh, endpoint, socket, PDU Ethernet, header ID) và
-  các I-PDU-MAPPING; frame / PDU CAN chỉ được **tham chiếu** tới cái DaVinci đã tạo từ DBC, nên Update không bị trùng.
-- Route **ECU → ECU** khi dùng project: project của một ECU không có bus của ECU kia, nên ở bước 2 thêm DBC của các
-  ECU khác (chỉ để biết chúng nhận / gửi gì; DBC thuộc chính project được nhận ra và bỏ qua). Tool dựng topology:
-  ECU của project sinh file chỉ có gateway, ECU khác chỉ được tham chiếu (Generate tắt). Nếu có project của ECU khác,
-  bấm **Project…** ở dòng của nó: ECU đó cũng sinh file chỉ có gateway (IP lấy từ project của nó).
-- Nhiều ECU: mặc định **không** có node trung tâm, tức chỉ route giữa các ECU; tick *Also a central Ethernet node*
-  (tên, IP) nếu các message còn lại phải đi tới một node trung tâm. Finish lưu `topology.json` và mở cửa sổ topology;
-  tab **Message paths** cho thấy mọi đường đi (From / Via / To), **Generate** ghi file của từng ECU.
-- Chọn trường hợp 2 với một project **đã có** file gateway của tool: tool báo và đề nghị **Update it instead**
-  (chuyển sang trường hợp 3), tránh tạo file gateway thứ hai.
-- Nhấn **Finish**: cửa sổ chính hiện cấu hình và tự **Analyze**. Mọi giá trị vẫn sửa được ở các tab.
-- Nhiều ECU trên một mạng Ethernet: nút *Several ECUs on one Ethernet network* mở cửa sổ topology (mục 13).
+| Input | Bắt buộc? | Ý nghĩa |
+|---|---|---|
+| File DBC của **cả mạng** (mọi bus CAN) | bắt buộc | tool tìm các ECU gateway từ tên node trong DBC; các ECU khác cho biết message đi đâu |
+| Project DaVinci của ECU đích | tuỳ chọn | DBC của ECU đó đã import thành công trong project; tool đọc phần CAN từ project |
+| File gateway làm trước đó của ECU đích | tuỳ chọn | để cập nhật / sửa file đó (gồm cả trường hợp có project) |
 
-**Thanh "Next step"** (dải xanh dưới thanh công cụ) luôn ghi việc cần làm tiếp và có nút làm luôn việc đó, ví dụ:
-*Ethernet settings missing: the IP address / port of the other node* → **Suggest values** / **Ethernet tab**;
-*Ready: 12 route(s): 10 kept, 2 new, 1 removed* → **Generate**; sau khi ghi file: việc cần làm trong DaVinci
-(import file, hay chỉ Update).
+**Output**: luôn là **một file gateway ARXML** cho ECU đích, chỉ có phần Ethernet + gateway. Phần CAN chỉ được
+tham chiếu tới cái DaVinci tạo khi import DBC, nên không bị trùng:
+
+- có project: tool đọc tên phần tử thật trong `Config/System/Communication.arxml` của project;
+- không có project: tool dùng tên mà DaVinci đặt khi import DBC (`/Cluster/<Bus>/CHNL/PT_<msg>`,
+  `/Topology/HardwareComponents/<ECU instance>` …; đã kiểm chứng với DaVinci 5.24: file sinh chỉ từ DBC, thêm vào
+  project đã import các DBC đó, Update tạo đủ routing path PduR, không trùng). Cần đúng **tên ECU instance** trong
+  DaVinci (ô *ECU instance in DaVinci*).
+
+**Ba điểm bắt đầu** (trang đầu), sau đó đi cùng các trang:
+
+| Điểm bắt đầu | Dùng khi |
+|---|---|
+| *Start from the DBC files of the network* | lần đầu: thêm DBC của cả mạng |
+| *Open the network file saved before* | DBC, ECU, IP đã lưu: chọn ECU (ví dụ ECU tiếp theo) và sinh file của nó |
+| *Update a gateway file generated before* | sửa file gateway của một ECU: tool tự tìm file mạng và ECU của file đó |
+
+Các trang:
+
+1. **DBC files of the network**: mỗi DBC có cột *Gateway node* (tool gợi ý) và *ECU*. Các DBC cùng ECU được gộp,
+   dòng tóm tắt ghi kết quả, ví dụ *→ 3 ECU(s): Z1 (Power), Z2 (Body), Z3 (Chassis, Sensor)*. Node gateway được gợi ý
+   theo: node có trong mọi DBC → node có tên trong tên file DBC → tên kiểu gateway / zone (`GW`, `XGW_…`, `ZONE`,
+   `Z1`, `ZC2` …) → node nhiều message nhất. Node đặt theo tên bus của cùng một ECU (`XGW_Body` trên bus Body,
+   `XGW_Chassis` trên bus Chassis) được gộp thành ECU `XGW`; cột ECU sửa được (gõ cùng tên để gộp).
+2. **ECUs, IP addresses and network file**: IP của từng ECU (gợi ý sẵn, theo VLAN hoặc theo IP có trong project),
+   VLAN, port gửi / nhận chung, node trung tâm (tuỳ chọn, mặc định không có). Tất cả lưu trong **file mạng**
+   (`gateway_network.json`) dùng chung cho mọi ECU, kèm file lock giữ header ID, nên file gateway của các ECU sinh ở
+   các lúc khác nhau vẫn khớp nhau.
+3. **ECU to generate the gateway file for**: chọn ECU đích; project DaVinci (tuỳ chọn; nếu project đã có file gateway
+   của tool, tool hỏi có cập nhật file đó không); file gateway cũ (tuỳ chọn); file ra; *ECU instance in DaVinci* (khi
+   không có project); phiên bản DaVinci (5.24 → AUTOSAR_00049, 5.31+ → AUTOSAR_00052).
+
+**Finish** lưu file mạng và mở cửa sổ topology với ECU đích đã chọn (tab *Routes of the selected ECU*, *Message
+paths*). **Generate** ghi file gateway của ECU đích (các ECU khác chỉ tham chiếu). Trong DaVinci: thêm file đó vào
+Input Files của project ECU đích, cạnh các file DBC, rồi Update (file đã có trong Input Files thì chỉ Update).
+
+Routing được suy ra từ DBC của cả mạng, ví dụ DBC Power có node Z1, Body có Z2, Chassis và Sensor có Z3:
+
+- message từ Chassis sang Sensor: **nội bộ Z3** (CAN → CAN), không qua Ethernet;
+- message từ Body sang Power: **Z2 → Z1 bằng Ethernet** (CAN → ETH trong file của Z2, ETH → CAN trong file của Z1,
+  cùng header ID, IP, port);
+- message ECU đích nhận mà không ECU nào cần: không route (liệt kê trong report *Not routed*), trừ khi bật node trung
+  tâm.
+
+**Thanh "Next step"** (dải xanh dưới thanh công cụ của generator) luôn ghi việc cần làm tiếp và có nút làm luôn việc
+đó. Nút *Manual settings (generator window)* ở trang đầu: cấu hình một ECU với thông số Ethernet nhập tay (các mục
+2–11 bên dưới).
 
 ## 0. Chuẩn bị
 

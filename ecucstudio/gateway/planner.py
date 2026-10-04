@@ -254,6 +254,10 @@ def load_base(cfg: GatewayConfig) -> Base:
         base = dvproject.load_communication(dvproject.read(cfg.base))
     elif cfg.base:
         base = Base(cfg.base)
+    elif cfg.options.dbc_imported:
+        from .imported import imported_view
+        return imported_view([(b.dbc, b.node) for b in cfg.buses if b.dbc], new_ecu_name(cfg),
+                             cfg.schema or "AUTOSAR_00052", cfg.output or "network_gateway.arxml")
     else:
         return new_document(cfg.output or "network_gateway.arxml", new_ecu_name(cfg), cfg.schema or "AUTOSAR_00052")
     base, base.prev_removed, base.prev_problem = base_without_previous(cfg, base)
@@ -290,6 +294,8 @@ class Planner:
     def __init__(self, cfg: GatewayConfig, base: Base | None = None, dbc_cache: dict | None = None):
         self.cfg = cfg
         self.project = dvproject.read(cfg.base) if dvproject.is_project(cfg.base) else None
+        # DBC files imported in the ECU's DaVinci project (no project given): reference the converter's elements
+        self.imported = not cfg.base and cfg.options.dbc_imported
         self.base = base or load_base(cfg)
         self.previous = None
         if cfg.previous and os.path.isfile(cfg.previous):
@@ -368,7 +374,12 @@ class Planner:
             self.info(f"DaVinci project {self.project.name}: CAN messages are read from "
                       f"{os.path.basename(self.project.communication)}; the output is an additional input file "
                       f"(Ethernet + gateway) for ECU instance {self.project.ecu_name}, the DBC files stay imported.")
-        if not cfg.base:
+        if self.imported:
+            plan.delta = True
+            self.info(f"The DBC files are imported in the DaVinci project of ECU instance "
+                      f"{self.base.ecus()[0].rsplit('/', 1)[-1] if self.base.ecus() else '?'}: the output holds only "
+                      f"Ethernet + gateway and references the CAN part DaVinci created from them.")
+        elif not cfg.base:
             self.info(f"No base file: a new system description ({self.base.schema}) is created with the ECU "
                       f"{self.base.ecus()[0].rsplit('/', 1)[-1] if self.base.ecus() else '?'}.")
             if not cfg.output:
@@ -613,12 +624,17 @@ class Planner:
             if node not in db.nodes and not any(node in m.senders or node in m.receivers for m in db.messages):
                 raise ValueError(f"node '{node}' is not in {db.name} (nodes: {', '.join(db.nodes)})")
         ch: CanChannel | None = None
-        if bc.channel and not bc.new_channel:
+        if self.imported and bc.dbc and not bc.channel:
+            from .imported import channel_path
+            ch = next((c for c in can_channels if c.path == channel_path(db.name)), None)
+        if ch is None and bc.channel and not bc.new_channel:
             hits = [c for c in can_channels if bc.channel in (c.path, c.name, c.cluster_name)]
             if len(hits) != 1:
                 raise ValueError(f"CAN channel '{bc.channel}' not found (or ambiguous) in the base file")
             ch = hits[0]
-        busname = sanitize(bc.bus or (db.name if not bc.dbc else (ch.name if ch else db.name)))
+        # the channel of a converted DBC is called CHNL on every bus: then the cluster names the bus
+        chname = (ch.cluster_name if ch.name.upper() in ("CHNL", "CHANNEL", "CH") else ch.name) if ch else db.name
+        busname = sanitize(bc.bus or (db.name if not bc.dbc else chname))
         if ch is None and not bc.new_channel and not bc.channel:
             hits = [c for c in can_channels if busname.lower() in (c.name.lower(), c.cluster_name.lower())]
             if len(hits) == 1:

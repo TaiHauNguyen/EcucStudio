@@ -121,7 +121,7 @@ class LinkDialog(tk.Toplevel):
 
 
 class TopologyWindow:
-    def __init__(self, master: tk.Misc, path: str | None = None):
+    def __init__(self, master: tk.Misc, path: str | None = None, select: str | None = None):
         self.win = master
         self.cfg = TopologyConfig()
         self.tplan = None
@@ -134,7 +134,7 @@ class TopologyWindow:
         self._build()
         self.win.after(100, self._poll)
         if path:
-            self.open(path)
+            self.open(path, select=select)
         else:
             self.new()
 
@@ -278,12 +278,8 @@ class TopologyWindow:
 
     def from_dbcs(self):
         from ..wizard import StartWizard
-
-        def one_ecu(cfg, case, notes):
-            from ..gui import open_window
-            win = open_window(self.win, wizard=False)
-            win.gateway.apply_start(cfg, case, notes)
-        StartWizard(self.win, one_ecu, dbc_cache=self.dbc_cache, on_topology_file=self.open, initial_case="dbc")
+        StartWizard(self.win, dbc_cache=self.dbc_cache, initial_case="new",
+                    on_topology_file=lambda path, target=None: self.open(path, select=target))
 
     def open_dialog(self):
         p = filedialog.askopenfilename(parent=self.win, title="Topology file",
@@ -291,13 +287,17 @@ class TopologyWindow:
         if p:
             self.open(p)
 
-    def open(self, path):
+    def open(self, path, select: str | None = None):
         try:
             self.cfg = TopologyConfig.load(path)
         except (OSError, ValueError) as exc:
             messagebox.showerror(TITLE, f"Cannot read {path}:\n{exc}", parent=self.win)
             return
         self._reset()
+        i = next((k for k, e in enumerate(self.cfg.ecus) if e.name == select), None)
+        if i is not None:
+            self.refresh_nodes(f"ecu:{i}")
+            self.tabs.select(1)                      # routes of the ECU the gateway file is made for
         self.analyze()
 
     def save(self):
@@ -526,7 +526,8 @@ class TopologyWindow:
         f.columnconfigure(1, weight=1)
         v = {k: tk.StringVar(value=x) for k, x in (("name", e.name), ("ip", e.ip), ("base", g.base),
                                                    ("out", g.output), ("schema", g.schema or DEFAULT_SCHEMA),
-                                                   ("ecu", g.ecu))}
+                                                   ("ecu", g.ecu), ("prev", g.previous))}
+        v_only = tk.BooleanVar(value=g.options.dbc_imported)
         v_gen = tk.BooleanVar(value=e.generate)
         pf, v_tx, v_rx = self._ports_row(f, e)
         bf = ttk.Frame(f)
@@ -535,6 +536,9 @@ class TopologyWindow:
         of = ttk.Frame(f)
         ttk.Entry(of, textvariable=v["out"], width=70).pack(side="left", fill="x", expand=True)
         ttk.Button(of, text="Browse…", command=lambda: self._browse_out(v["out"], e)).pack(side="left", padx=4)
+        pf2 = ttk.Frame(f)
+        ttk.Entry(pf2, textvariable=v["prev"], width=70).pack(side="left", fill="x", expand=True)
+        ttk.Button(pf2, text="Browse…", command=lambda: self._browse_prev(v["prev"], e)).pack(side="left", padx=4)
         sf = ttk.Frame(f)
         ttk.Combobox(sf, textvariable=v["schema"], values=SCHEMAS, width=16, state="readonly").pack(side="left")
         ttk.Label(sf, text="  ECU instance:").pack(side="left")
@@ -544,16 +548,20 @@ class TopologyWindow:
         self._grid(f, [("Name:", ttk.Entry(f, textvariable=v["name"], width=30)),
                        ("IP address:", ttk.Entry(f, textvariable=v["ip"], width=16)),
                        ("Ports (sends / receives):", pf),
-                       ("Network file / project:", bf),
-                       ("Output file:", of),
-                       ("Schema (new file):", sf),
+                       ("DaVinci project (optional):", bf),
+                       ("Gateway file made before:", pf2),
+                       ("Gateway file to write:", of),
+                       ("Schema:", sf),
                        ("", ttk.Checkbutton(f, text="Generate the gateway file of this ECU (otherwise it is only "
                                                     "referenced: its DBC / project tells what it needs and sends)",
-                                            variable=v_gen))])
-        for w in (bf, of, sf):
+                                            variable=v_gen)),
+                       ("", ttk.Checkbutton(f, text="Gateway only: the DBC files are imported in the ECU's DaVinci "
+                                                    "project (without project: the CAN part is referenced by the names "
+                                                    "DaVinci gives)", variable=v_only))])
+        for w in (bf, pf2, of, sf):
             w.grid_configure(sticky="we")
         lf = ttk.LabelFrame(f, text="CAN buses (one DBC or project channel per bus)", padding=4)
-        lf.grid(row=7, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
+        lf.grid(row=9, column=0, columnspan=2, sticky="nsew", pady=(6, 0))
         cols = ("DBC file / channel", "Node", "Bus name")
         tb = ttk.Treeview(lf, columns=cols, show="headings", height=3)
         for c, wd in zip(cols, (420, 140, 140)):
@@ -597,6 +605,7 @@ class TopologyWindow:
             e.tx_port, e.rx_port = _int_or_none(v_tx.get()), _int_or_none(v_rx.get())
             g.base, g.output = v["base"].get().strip(), v["out"].get().strip()
             g.schema, g.ecu = v["schema"].get() or DEFAULT_SCHEMA, v["ecu"].get().strip()
+            g.previous, g.options.dbc_imported = v["prev"].get().strip(), v_only.get()
             self._rename(old, e.name)
             self._refresh_row()
         self._store = store
@@ -610,6 +619,12 @@ class TopologyWindow:
         p = filedialog.askopenfilename(parent=self.win, title="Network file or DaVinci project",
                                        filetypes=[("Network file / DaVinci project", "*.arxml *.dpa"),
                                                   ("All files", "*.*")])
+        if p:
+            var.set(os.path.normpath(p))
+
+    def _browse_prev(self, var, e):
+        p = filedialog.askopenfilename(parent=self.win, title=f"Gateway file of {e.name} made before",
+                                       filetypes=[("AUTOSAR XML", "*.arxml"), ("All files", "*.*")])
         if p:
             var.set(os.path.normpath(p))
 
@@ -847,18 +862,18 @@ class TopologyWindow:
         m.tk_popup(ev.x_root, ev.y_root)
 
 
-def open_topology(master: tk.Misc | None = None, path: str | None = None):
+def open_topology(master: tk.Misc | None = None, path: str | None = None, select: str | None = None):
     """Open the topology window in a Toplevel of *master* (EcucStudio) or in its own root window."""
     from ...gui.startup import bring_to_front, show_main_window
     if master is None:
         root = tk.Tk()
         init_style(root)
-        root.topology = TopologyWindow(root, path)
+        root.topology = TopologyWindow(root, path, select)
         show_main_window(root, TITLE, None, "1450x920")
         return root
     top = tk.Toplevel(master)
     top.geometry("1450x920")
-    top.topology = TopologyWindow(top, path)
+    top.topology = TopologyWindow(top, path, select)
     bring_to_front(top)
     return top
 

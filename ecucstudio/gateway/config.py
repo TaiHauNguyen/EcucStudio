@@ -118,6 +118,8 @@ class Options:
     eth_routes: bool = True         # CAN <-> Ethernet routes (node RX -> Ethernet, node TX <- Ethernet)
     can_routes: bool = True         # CAN <-> CAN routes: a message the node receives on one bus and sends on another
     can_match_id: bool = True       # CAN <-> CAN: also pair renamed messages (same CAN id, length and layout)
+    dbc_imported: bool = False      # no base file: the DBC files are imported in the DaVinci project of the ECU, the
+                                    # output holds only Ethernet + gateway (the CAN part is referenced, see imported)
 
 
 @dataclass

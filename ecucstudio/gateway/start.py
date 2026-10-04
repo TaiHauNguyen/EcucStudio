@@ -111,7 +111,8 @@ def suggest_ips(n: int, vlan: int | None = None, like: str = "", used=()) -> lis
 
 def topology_for_dbcs(groups: dict, folder: str, schema: str, ips: dict, generate: dict | None = None,
                       outputs: dict | None = None, vlan: int | None = None, peer: tuple[str, str] | None = None,
-                      tx_port: int = 50000, rx_port: int = 50001, name: str = "", projects: dict | None = None):
+                      tx_port: int = 50000, rx_port: int = 50001, name: str = "", projects: dict | None = None,
+                      gateway_only: bool = False):
     """Several gateway ECUs -> topology: one ECU per group, optionally a central Ethernet node (*peer* = (name, ip))
     for the messages no ECU needs.
 
@@ -129,8 +130,10 @@ def topology_for_dbcs(groups: dict, folder: str, schema: str, ips: dict, generat
                               output=out or default_output(os.path.dirname(os.path.abspath(dpa)), ecu, project=True),
                               buses=[BusInput(channel=c) for c in channels])
         else:
-            g = GatewayConfig(base="", output=out or default_output(folder, ecu), ecu=ecu, schema=schema,
-                              buses=[BusInput(dbc=os.path.abspath(p), node=n) for p, n in dbcs])
+            g = GatewayConfig(base="", output=out or default_output(folder, ecu, project=gateway_only), ecu=ecu,
+                              schema=schema, buses=[BusInput(dbc=os.path.abspath(p), node=n) for p, n in dbcs])
+            # the DBC files are imported in the ECU's DaVinci project: only Ethernet + gateway (gateway/imported.py)
+            g.options.dbc_imported = gateway_only
         t.ecus.append(EcuNode(name=ecu, ip=ips.get(ecu, ""), generate=(generate or {}).get(ecu, True), gateway=g))
     if peer and peer[0]:
         t.peers.append(PeerNode(name=peer[0], ip=peer[1]))
