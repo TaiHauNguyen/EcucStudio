@@ -24,6 +24,7 @@ nó khởi động GUI bằng đúng bản Python vừa kiểm tra (`pythonw.exe
 | `run.bat [project.dpa]` | EcucStudio |
 | `run.bat gateway [gateway.json]` | CAN Gateway Generator (CAN-Ethernet, CAN-CAN) |
 | `run.bat editor [network.arxml]` | CAN-Ethernet Gateway Editor |
+| `run.bat topology [topology.json]` | CAN Gateway Topology (nhiều ECU) |
 | `run.bat debug …` | như trên nhưng chạy ngay trong cửa sổ console: mọi thông báo / lỗi hiện tại đó |
 
 **Không thấy cửa sổ?**
@@ -152,6 +153,12 @@ tắt *CAN <-> Ethernet routes* ở tab Options, không cần thông số Ethern
 của tab Ethernet (ví dụ một zone ECU khác, đi thẳng qua switch), rồi chọn node cho từng message: CAN->ETH gửi được
 tới nhiều node cùng lúc (một PDU, một header ID), ETH->CAN nhận từ một node. Chi tiết: mục 3.3 của
 [docs/GATEWAY.md](docs/GATEWAY.md).
+
+**Nhiều ECU (topology)**: các zone ECU của một mạng Ethernet khai báo chung trong một `topology.json` (mỗi ECU: project
+`.dpa`, file network hoặc DBC). Message một ECU nhận trên CAN và ECU khác gửi trên CAN được route thẳng giữa hai ECU;
+hai file sinh ra khớp nhau về PDU Ethernet, header ID, IP và port. Header ID lưu trong `topology.lock.json` để các
+team sinh ECU của mình vào lúc khác vẫn khớp. Mở: menu *Tools → CAN Gateway Topology…*, `run.bat topology`, hoặc
+`gateway topology plan|generate|contract topology.json`. Chi tiết: mục 13 của [docs/GATEWAY.md](docs/GATEWAY.md).
 
 **Đã import file gateway vào DaVinci, giờ cần thêm/bớt DBC hoặc message?** Generator → **Open…** chính file
 gateway `.arxml` (cấu hình được nhúng trong file; file của bản cũ được dựng lại từ nội dung), thay đổi, Generate

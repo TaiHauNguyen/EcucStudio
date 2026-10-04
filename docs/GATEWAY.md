@@ -8,6 +8,8 @@ SocketRoute (header ID) và CanIf PDU, không phải cấu hình ECUC bằng tay
   trên CAN được lấy từ Ethernet.
 - **CAN → CAN** (mục 12): có nhiều DBC, mỗi DBC một bus. Message ECU gateway **nhận trên bus A** và **gửi trên
   bus B** được route thẳng từ bus A sang bus B.
+- **Nhiều ECU trên một mạng Ethernet** (mục 13): các zone ECU khai báo chung trong một topology; message một ECU nhận
+  trên CAN và ECU khác gửi trên CAN đi thẳng giữa hai ECU, hai đầu khớp header ID / IP / port.
 
 Có hai cách dùng: **giao diện** (mục 1–7) hoặc **command line** (mục 8). Cả hai ra cùng một kết quả.
 File network đã có gateway thì mở bằng **Gateway Editor** để xem và sửa lại (mục 11).
@@ -622,6 +624,114 @@ link có thêm mục **Remove CAN -> CAN link**.
 Phần tử được tạo cho mỗi cặp: một `I-PDU-MAPPING` trong GATEWAY của ECU, từ PDU-TRIGGERING của bus nguồn tới
 PDU-TRIGGERING của bus đích. DaVinci tạo PduR routing path CanIf → CanIf. Sinh lại (mục 7.1) giữ các cặp không
 đổi; cặp bị tắt hiện dòng `removed` như route Ethernet.
+
+## 13. Nhiều ECU trên một mạng Ethernet (topology)
+
+Dùng khi có nhiều ECU gateway (ví dụ các zone ECU) cùng nối vào một mạng Ethernet, mỗi ECU có các bus CAN riêng,
+và một số message phải đi **thẳng từ ECU này sang ECU kia** qua Ethernet (máy tính trung tâm chỉ làm switch). Ví dụ:
+ZoneB nhận `WheelSpeed` trên bus Chassis, ZoneC gửi `WheelSpeed` trên bus Body → ZoneB gửi PDU tới ZoneC.
+
+Mở: menu **Tools → CAN Gateway Topology (several ECUs)…**, `run.bat topology [topology.json]`, hoặc
+`python -m ecucstudio gateway topology gui [topology.json]`.
+
+### 13.1 Khai báo mạng
+
+Danh sách **Network** bên trái:
+
+- **(network settings)**:
+  - VLAN id của kênh mới (ECU chưa có Ethernet trong base), hoặc **Existing channel** (tên / `VLANnn`) khi base
+    của các ECU đã có kênh;
+  - netmask, protocol;
+  - **port mọi node gửi** và **port mọi node nhận** (mặc định 50000 / 50001). Mỗi node có một socket gửi và một
+    socket nhận, mỗi đối tác là một socket connection;
+  - **Default peer**: node nhận các message không ECU nào cần, và gửi các message không ECU nào cấp (ví dụ máy tính
+    trung tâm).
+- **Add ECU**: mỗi ECU gateway một mục:
+  - tên (dùng trong tên socket `SA_<ECU>_CanGw_Tx` / `_Rx`), IP, port riêng nếu khác;
+  - **Network file / project**: project DaVinci `.dpa` (bus = kênh CAN của project), file network, hoặc để trống
+    (chỉ có DBC: file mới, như mục 2.1). Các ECU trộn được nhiều kiểu;
+  - **Output file** và **Generate**. ECU bỏ **Generate** chỉ để tham chiếu: tool vẫn đọc DBC / project của nó để biết
+    nó cần và gửi message nào, nhưng không ghi file cho nó (zone do team khác làm). Không cần output file;
+  - **CAN buses**: mỗi DBC (chọn node của ECU trong DBC đó) hoặc kênh của project một dòng.
+- **Add peer**: node chỉ có Ethernet (tên, IP). Không sinh file cho peer.
+- **Up / Down**: thứ tự ECU quyết định thứ tự cấp header ID tự động.
+
+### 13.2 Analyze: tool ghép message giữa các ECU
+
+Với mỗi message một ECU **gửi** trên bus của nó, tool tìm nguồn:
+
+1. bus khác của chính ECU đó → CAN → CAN nội bộ (mục 12, ưu tiên);
+2. bus của ECU khác mà ECU kia **nhận** message đó → đường **ECU → ECU** qua Ethernet;
+3. không có → nhận từ default peer (bỏ chọn *comes from the default peer* thì không route).
+
+Quy tắc ghép và kiểm tra giống CAN → CAN (cùng tên / bỏ tiền tố GW / cùng CAN ID + độ dài; khác độ dài hoặc layout
+thì không route). Message nhiều ECU cùng nhận (N:1) không được route: chọn nguồn bằng **Add link…**.
+
+- Message ECU → ECU **không** gửi default peer nữa (bật *also sent to the default peer*, hoặc từng route trong
+  Edit…). Các message còn lại ECU nhận vẫn gửi default peer như trước.
+- Hai đầu dùng chung **tên PDU Ethernet** (theo bên gửi, ví dụ `WheelSpeed_oChassis_Eth`), **header ID**, IP và
+  port: file của ZoneB có connection `SA_ZoneB_CanGw_Tx → SA_ZoneC_CanGw_Rx`, file của ZoneC có connection
+  `SA_ZoneC_CanGw_Rx ← SA_ZoneB_CanGw_Tx`, cùng identifier.
+- Header ID được cấp **một lần cho cả mạng**: duy nhất trên socket gửi và trên **mọi socket nhận** (socket nhận của
+  default peer nhận từ mọi ECU, nên CAN ID trùng giữa hai zone sẽ được thêm cờ), tính cả ID base các ECU đã dùng.
+  Thứ tự: nhập tay → file lock → file sinh lần trước → tự động.
+
+Bảng bên dưới:
+
+| Tab | Nội dung |
+|---|---|
+| ECU -> ECU | mọi cặp tìm được: bật/tắt (Space, chuột phải), **Edit…** (header ID chung, gửi thêm default peer), **Add link…** / **Remove link** |
+| Routes of the selected ECU | bảng route của ECU đang chọn (như generator một ECU, có cột Peer); chuột phải tắt/bật message |
+| Contract (Ethernet PDUs) | mọi PDU Ethernet của mạng: bên gửi, bên nhận, IP:port hai đầu, header ID |
+
+### 13.3 Generate
+
+**Generate** ghi (topology phải được Save trước):
+
+- file gateway của mọi ECU có **Generate**, đúng định dạng của mục 6 / 2.2 (project → file bổ sung cho Input Files);
+- `<topology>.lock.json`: header ID của mọi PDU Ethernet. **Không sửa tay; luôn để cùng file topology** (ví dụ cùng
+  repo). Team khác sinh ECU của họ sau, từ cùng topology + lock, sẽ được đúng giá trị file của bạn đang dùng;
+- `<topology>_contract.csv`: tài liệu giao diện (cho node không dùng tool, ví dụ máy tính trung tâm).
+
+Sinh lại: file gateway cũ của mỗi ECU tự được dùng làm file "previous" (mục 7.1), DaVinci giữ nguyên phần không đổi.
+
+### 13.4 Command line và file cấu hình
+
+```
+python -m ecucstudio gateway topology plan     topology.json
+python -m ecucstudio gateway topology generate topology.json [--ecu ZoneB --ecu ZoneC]
+python -m ecucstudio gateway topology contract topology.json [-o contract.csv]
+```
+
+```json
+{
+  "name": "Zonal",
+  "ethernet": {"channel": "", "vlan_id": 60, "netmask": "255.255.255.0", "protocol": "UDP"},
+  "tx_port": 50000, "rx_port": 50001,
+  "peers": [{"name": "Central", "ip": "10.0.60.1"}],
+  "default_peer": "Central",
+  "ecus": [
+    {"name": "ZoneA", "ip": "10.0.60.11", "generate": false,
+     "gateway": {"base": "ZoneA/ZoneA.dpa", "buses": [{"channel": "Sensor"}]}},
+    {"name": "ZoneB", "ip": "10.0.60.12", "generate": true,
+     "gateway": {"base": "ZoneB/ZoneB.dpa", "output": "ZoneB/ZoneB_Gateway.arxml",
+                 "buses": [{"channel": "Power"}, {"channel": "Chassis"}]}},
+    {"name": "ZoneC", "ip": "10.0.60.13", "generate": true,
+     "gateway": {"base": "", "output": "ZoneC/ZoneC_Gateway.arxml", "ecu": "ZoneC",
+                 "buses": [{"dbc": "DBC/Body.dbc", "node": "ZoneC"}]}}
+  ],
+  "cross": {"also_to_default_peer": false, "from_default_peer": true, "match_id": true},
+  "routes": {"ZoneB/Chassis/WheelSpeed -> ZoneC/Body/WheelSpeed": {"header_id": "0x120"}},
+  "links": [{"src": "ZoneB/Chassis/VehSpeed", "dst": "ZoneC/Body/VehSpeed"}]
+}
+```
+
+- `ecus[].gateway` là cấu hình gateway một ECU (mục 9); phần Ethernet (IP, socket, peer) do topology điền.
+- `ecus[].sockets` (không bắt buộc): dùng socket có sẵn trong base cho một đối tác:
+  `{"Central": {"can_to_eth": {"local_socket": "...", "remote_socket": "..."}, "eth_to_can": {...}}}`.
+- `routes` / `links`: khoá như cột From / To của bảng ECU -> ECU (`<ECU>/<bus>/<message>`).
+- Kiểm tra trước khi sinh: tên node trùng hoặc có ký tự lạ, IP trùng, IP của ECU khác IP trong project, port của
+  hai đầu lệch, header ID nhập tay trùng.
 
 ## Giới hạn hiện tại
 

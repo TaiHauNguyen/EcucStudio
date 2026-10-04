@@ -4,7 +4,8 @@ rem EcucStudio launcher.   Usage:
 rem   run.bat [project.dpa]               EcucStudio
 rem   run.bat gateway [gateway.json]      CAN gateway generator (CAN-Ethernet, CAN-CAN)
 rem   run.bat editor [network.arxml]      CAN-Ethernet gateway editor
-rem   run.bat debug [gateway^|editor] ... the same, but in this window: every message is shown here
+rem   run.bat topology [topology.json]    CAN gateway topology (several ECUs)
+rem   run.bat debug [gateway^|editor^|topology] ... the same, but in this window: every message is shown here
 rem Checks Python and the required packages first and shows every problem in this window, then
 rem starts the window and waits until it is really on the screen. Startup messages are also written
 rem to %LOCALAPPDATA%\EcucStudio\ecucstudio.log
@@ -19,6 +20,7 @@ if defined DEBUG shift
 set "MODE=gui"
 if /i "%~1"=="gateway" set "MODE=gateway"
 if /i "%~1"=="editor" set "MODE=editor"
+if /i "%~1"=="topology" set "MODE=topology"
 if not "%MODE%"=="gui" shift
 set "ARG=%~1"
 set "QARG="
@@ -26,6 +28,7 @@ if defined ARG set QARG="%ARG%"
 if "%MODE%"=="gui" set "CMDARGS=-m ecucstudio gui"
 if "%MODE%"=="gateway" set "CMDARGS=-m ecucstudio gateway gui"
 if "%MODE%"=="editor" set "CMDARGS=-m ecucstudio gateway editor"
+if "%MODE%"=="topology" set "CMDARGS=-m ecucstudio gateway topology gui"
 
 rem --- 1. find a real Python (the Microsoft Store alias "python" does not count)
 set "PY="

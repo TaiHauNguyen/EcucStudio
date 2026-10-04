@@ -174,7 +174,8 @@ class TopologyPlanner:
     def _endpoint_name(self, node) -> str:
         if node in self.cfg.ecus:
             v = self.cfg.ethernet.vlan_id
-            return sanitize(fmt(node.gateway.naming.eth_endpoint, ecu=node.name,
+            ecu = node.gateway.ecu.rsplit("/", 1)[-1] if node.gateway.ecu and not node.gateway.base else node.name
+            return sanitize(fmt(node.gateway.naming.eth_endpoint, ecu=ecu,
                                 vlan=f"VLAN{v}" if v is not None else "Untagged", vlan_id="" if v is None else v))
         return f"NEP_{node.name}"
 
@@ -197,7 +198,11 @@ class TopologyPlanner:
         gc.topology = cfg.path
         if not gc.base and not gc.ecu:
             gc.ecu = node.name
-        if not gc.previous and gc.output and os.path.isfile(gc.output):
+        if not node.generate and not gc.output:
+            # only referenced: nothing is written for it, the planner just needs a file name
+            gc.output = os.path.join(os.path.dirname(cfg.path) if cfg.path else os.getcwd(),
+                                     f"{node.name}_Gateway.arxml")
+        elif node.generate and not gc.previous and gc.output and os.path.isfile(gc.output):
             gc.previous = gc.output                 # regeneration: DaVinci keeps what does not change
         gc.options.eth_routes = not first or self.dp is not None
         e = gc.ethernet
@@ -219,6 +224,11 @@ class TopologyPlanner:
             to.local_port = tx
         if not frm.local_socket and frm.local_port is None:
             frm.local_port = rx
+        # the partners know these sockets by the node name (SA_<node>_CanGw_Rx): same name in every file
+        if not to.local_socket and not to.local_name:
+            to.local_name = f"SA_{node.name}_CanGw_Tx"
+        if not frm.local_socket and not frm.local_name:
+            frm.local_name = f"SA_{node.name}_CanGw_Rx"
         e.can_to_eth, e.eth_to_can = to, frm
         e.peers = [EthPeer(o.name, *self._sides_to(node, o)) for o in [*cfg.ecus, *cfg.peers]
                    if o is not node and o is not self.dp]

@@ -195,6 +195,13 @@ class TopologyTest(unittest.TestCase):
         r = next(x for x in tp.plans["ZoneB"].routes if x.message.name == "DoorState")
         self.assertEqual(r.peers, ["Central"])
 
+    def test_reference_ecu_without_output(self):
+        t = self.topology()
+        t.ecus[0].gateway.output = ""                                        # ZoneA is only referenced
+        tp = make_topology_plan(t)
+        self.assertEqual(tp.errors, [])
+        self.assertEqual(tp.header_ids["ZoneA/Sensor/RadarObj"], 0x300)
+
     def test_checks(self):
         t = self.topology()
         t.ecus[2].ip = "10.0.60.12"

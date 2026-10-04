@@ -110,6 +110,7 @@ class App(tk.Tk):
         mb.add_cascade(label="Project", menu=p)
         t = tk.Menu(mb, tearoff=False)
         t.add_command(label="CAN Gateway Generator (CAN-Ethernet, CAN-CAN)…", command=self.gateway_generator)
+        t.add_command(label="CAN Gateway Topology (several ECUs)…", command=self.gateway_topology)
         t.add_command(label="CAN-Ethernet Gateway Editor…", command=self.gateway_editor)
         mb.add_cascade(label="Tools", menu=t)
         h = tk.Menu(mb, tearoff=False)
@@ -130,6 +131,11 @@ class App(tk.Tk):
         """CAN <-> Ethernet PduR gateway generator (writes a system description for DaVinci)."""
         from ..gateway.gui import open_window
         open_window(self)
+
+    def gateway_topology(self):
+        """Several gateway ECUs (zones) on one Ethernet network, configured together."""
+        from ..gateway.topology.gui import open_topology
+        open_topology(self)
 
     def gateway_editor(self):
         """Edit the gateway of an existing network file (routes, header ids, sockets, endpoints)."""

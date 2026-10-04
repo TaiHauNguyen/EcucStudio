@@ -11,6 +11,7 @@
     python -m ecucstudio gateway edit     network.arxml --header PDU=0x123 --delete PDU --port SOCKET=50000
     python -m ecucstudio gateway editor   [network.arxml]
     python -m ecucstudio gateway topology plan|generate|contract topology.json [--ecu ZoneB]
+    python -m ecucstudio gateway topology gui [topology.json]
 """
 from __future__ import annotations
 
@@ -320,6 +321,15 @@ def cmd_topology_contract(a):
     return 0
 
 
+def cmd_topology_gui(a):
+    from ..__main__ import run_window
+
+    def start():
+        from .topology.gui import main as topology_main
+        topology_main(a.topology)
+    return run_window(f"gateway topology file={a.topology or '-'}", start)
+
+
 def cmd_gui(a):
     from ..__main__ import run_window
 
@@ -402,6 +412,9 @@ def main(argv=None):
     q.add_argument("topology")
     q.add_argument("-o", "--output")
     q.set_defaults(fn=cmd_topology_contract)
+    q = tsub.add_parser("gui", help="open the topology window")
+    q.add_argument("topology", nargs="?")
+    q.set_defaults(fn=cmd_topology_gui)
     p = sub.add_parser("editor", help="open the gateway editor window")
     p.add_argument("file", nargs="?")
     p.set_defaults(fn=cmd_editor)
