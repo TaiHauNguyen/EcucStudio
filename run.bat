@@ -2,7 +2,7 @@
 rem ---------------------------------------------------------------------------
 rem EcucStudio launcher.   Usage:
 rem   run.bat [project.dpa]               EcucStudio
-rem   run.bat gateway [gateway.json]      CAN-Ethernet gateway generator
+rem   run.bat gateway [gateway.json]      CAN gateway generator (CAN-Ethernet, CAN-CAN)
 rem   run.bat editor [network.arxml]      CAN-Ethernet gateway editor
 rem   run.bat debug [gateway^|editor] ... the same, but in this window: every message is shown here
 rem Checks Python and the required packages first and shows every problem in this window, then
@@ -51,10 +51,10 @@ if errorlevel 1 (
   if errorlevel 1 goto :fail
 )
 
-rem --- 3. cantools is only needed by the CAN-Ethernet gateway generator: try to install, never block
+rem --- 3. cantools is only needed by the CAN gateway generator: try to install, never block
 %PY% -c "import cantools" >nul 2>nul
 if errorlevel 1 (
-  echo Installing cantools for the CAN-Ethernet gateway generator ...
+  echo Installing cantools for the CAN gateway generator ...
   %PY% -m pip install "cantools>=39"
 )
 

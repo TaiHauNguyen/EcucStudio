@@ -145,7 +145,9 @@ def cmd_plan(a):
     t = time.time()
     plan = make_plan(_load(a.config))
     _print_plan(plan)
-    print(f"\n{len(plan.enabled_routes)} route(s), {len(plan.warnings)} warning(s), {len(plan.errors)} error(s) "
+    from . import report
+    print(f"\n{report.count_text(len(plan.enabled_routes), len(plan.enabled_can_routes))}, "
+          f"{len(plan.warnings)} warning(s), {len(plan.errors)} error(s) "
           f"({time.time() - t:.1f} s)")
     return 1 if plan.errors else 0
 
@@ -168,7 +170,8 @@ def cmd_generate(a):
     report.write_csv(plan, csv_path)
     for w in res.warnings[len(plan.warnings):]:
         print("[WARNING]", w)
-    print(f"\nWritten {res.output} ({len(res.routes)} route(s), {time.time() - t:.1f} s)")
+    print(f"\nWritten {res.output} ({report.count_text(len(res.routes), len(res.can_routes))}, "
+          f"{time.time() - t:.1f} s)")
     print("Created:", ", ".join(f"{k} {v}" for k, v in sorted(res.created.items())))
     print("Route table:", csv_path)
     return 0

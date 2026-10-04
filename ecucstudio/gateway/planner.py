@@ -78,6 +78,8 @@ class Route:
     reason: str = ""            # why it is disabled / special
     change: str = ""            # regeneration: "kept" / "new" compared with the previous gateway file
     locked: bool = False        # header id kept from the previous gateway file
+    can_problem: str = ""       # the CAN side cannot be used (existing frame unsuitable)
+    prev: object = None         # matching route of the previous gateway file
     length: int = 0
     # CAN side: existing elements (paths) or names of new ones
     can_ft: str = ""            # existing CAN-FRAME-TRIGGERING path
@@ -104,6 +106,21 @@ class Route:
     @property
     def header_text(self) -> str:
         return f"0x{self.header_id:08X}"
+
+
+@dataclass
+class CanRoute:
+    """PDU gateway between two CAN buses: the node receives the message on src.bus and sends it on dst.bus.
+    *src* / *dst* are the CAN <-> Ethernet routes of those messages (their CAN side is shared)."""
+    key: str
+    src: Route
+    dst: Route
+    match: str
+    enabled: bool = True
+    reason: str = ""
+    notes: list[str] = field(default_factory=list)
+    change: str = ""
+    direction: str = "CAN->CAN"
 
 
 @dataclass
@@ -173,9 +190,15 @@ class Plan:
     previous: str = ""                                 # gateway file of the previous generation
     removed: list = field(default_factory=list)        # PrevRoute of the previous file that are not generated
 
+    can_routes: list = field(default_factory=list)     # CanRoute
+
     @property
     def enabled_routes(self) -> list[Route]:
         return [r for r in self.routes if r.enabled]
+
+    @property
+    def enabled_can_routes(self) -> list:
+        return [r for r in self.can_routes if r.enabled]
 
     @property
     def ok(self) -> bool:
@@ -231,6 +254,22 @@ def load_base(cfg: GatewayConfig) -> Base:
         return new_document(cfg.output or "network_gateway.arxml", new_ecu_name(cfg), cfg.schema or "AUTOSAR_00052")
     base, base.prev_removed, base.prev_problem = base_without_previous(cfg, base)
     return base
+
+
+_GW_PREFIXES = ("XGW_", "GW_", "GTW_", "GWY_")
+
+
+def _norm_gateway_name(name: str) -> str:
+    """Message name without a gateway prefix / suffix (GW_BCM_Status -> BCM_Status)."""
+    n = name
+    for p in _GW_PREFIXES:
+        if n.upper().startswith(p):
+            n = n[len(p):]
+            break
+    for sfx in ("_GW", "_GTW"):
+        if n.upper().endswith(sfx):
+            n = n[: -len(sfx)]
+    return n
 
 
 def choose_package(base: Base, tag: str) -> str:
@@ -325,7 +364,9 @@ class Planner:
         self._resolve_ecu()
         if plan.errors:
             return plan
-        self._resolve_ethernet()
+        eth = cfg.options.eth_routes
+        if eth:
+            self._resolve_ethernet()
         if plan.errors:
             return plan
         for bus_cfg in cfg.buses:
@@ -337,20 +378,25 @@ class Planner:
             self.err("No DBC file selected.")
         if plan.errors:
             return plan
-        self._resolve_sides()
-        self._resolve_id_set()
-        self._assign_header_ids()
-        self._resolve_gateway()
+        if cfg.options.can_routes:
+            self._plan_can_routes()
+        if eth and plan.enabled_routes:
+            self._resolve_sides()
+            self._resolve_id_set()
+            self._assign_header_ids()
+        if plan.enabled_routes or plan.enabled_can_routes:
+            self._resolve_gateway()
         plan.system = self._find(cfg.system, "SYSTEM") if cfg.system else b.system_for(plan.ecu)
         if cfg.options.add_fibex and plan.system is None:
             self.warn("The base file has no SYSTEM; new elements are not added to FIBEX-ELEMENTS.")
         if self.previous is not None:
             plan.removed = [p for p in self.previous.routes if id(p) not in self._prev_used]
             self._describe_removed(plan.removed)
-            kept = sum(1 for r in plan.enabled_routes if r.change == "kept")
-            new = sum(1 for r in plan.enabled_routes if r.change == "new")
+            every = plan.enabled_routes + plan.enabled_can_routes
+            kept = sum(1 for r in every if r.change == "kept")
+            new = sum(1 for r in every if r.change == "new")
             self.info(f"Compared with the previous file: {kept} route(s) kept, {new} new, {len(plan.removed)} removed.")
-        if not plan.enabled_routes:
+        if not plan.enabled_routes and not plan.enabled_can_routes:
             self.warn("No message is selected for routing.")
         return plan
 
@@ -622,6 +668,10 @@ class Planner:
             else:
                 r.can_signals = self._signals(m, naming.can_signal, naming.system_signal, fields, bp.channel)
         # ---------------------------------------------------------- Ethernet side
+        if not opts.eth_routes:
+            r.enabled, r.reason, r.header_id = False, "CAN <-> Ethernet routing is off", -1
+            plan.routes.append(r)
+            return
         pdu_pkg = self._package("I-SIGNAL-I-PDU")
         eth_name = sanitize(over["eth_pdu"]) if over.get("eth_pdu") else fmt(naming.eth_pdu, **fields)
         prev = None
@@ -636,6 +686,7 @@ class Planner:
                     r.enabled, r.reason = False, "not in the previous gateway file"
                 elif prev is not None and not r.enabled:
                     r.enabled, r.reason = True, ""
+            r.prev = prev
             if r.enabled:
                 r.change = "kept" if prev is not None else "new"
                 if prev is not None:
@@ -684,6 +735,7 @@ class Planner:
         pts = b.refs(ft.find(q("PDU-TRIGGERINGS")), "PDU-TRIGGERING-REF")
         if not pts:
             r.enabled, r.reason = False, "existing frame has no PDU triggering"
+            r.can_problem = r.reason
             return
         if len(pts) > 1:
             r.notes.append(f"frame carries {len(pts)} PDUs; routing {pts[0].rsplit('/', 1)[-1]}")
@@ -713,7 +765,8 @@ class Planner:
             _port, have = b.port_of(ft, bp.connector, "FRAME-PORT-REF")
             if have and have != want:
                 r.enabled = False
-                r.reason = (f"base file has {plan.ecu_name} {'sending' if have == 'OUT' else 'receiving'} this "
+                r.can_problem = r.reason = (f"base file has {plan.ecu_name} "
+                                            f"{'sending' if have == 'OUT' else 'receiving'} this "
                             f"frame")
 
     def _gateway_notes(self, r: Route):
@@ -731,6 +784,121 @@ class Planner:
                     r.notes.append(f"already a gateway target of {other} (N:1)")
                     self.warn(f"{r.key}: the CAN PDU is already the target of {other}; a second source makes an "
                               f"N:1 route (only supported as a MICROSAR extension).")
+
+    # ------------------------------------------------------------------ CAN <-> CAN
+    @staticmethod
+    def _can_pt_path(r: Route) -> str:
+        return r.can_pt or (f"{r.bus.channel}/{r.can_pt_name}" if r.can_pt_name else "")
+
+    def _plan_can_routes(self):
+        """Pair every message the node sends on one bus with the message it receives on another bus: same name,
+        else same name without a gateway prefix, else (renamed) same CAN id, length and signal layout."""
+        plan, cfg, opts = self.plan, self.cfg, self.cfg.options
+        rx = [r for r in plan.routes if r.direction == CAN_TO_ETH and not r.can_problem]
+        tx = [r for r in plan.routes if r.direction == ETH_TO_CAN and not r.can_problem]
+        by_name, by_norm, by_id = (collections.defaultdict(list) for _ in range(3))
+        for r in rx:
+            m = r.message
+            by_name[m.name].append(r)
+            by_norm[_norm_gateway_name(m.name)].append(r)
+            by_id[(m.can_id, m.extended, r.length)].append(r)
+        pairs = {}
+        for t in tx:
+            m = t.message
+            if (m.nm and not t.bus.cfg.include_nm) or (m.diag and not t.bus.cfg.include_diag):
+                continue
+            tiers = [(by_name.get(m.name), "same name"),
+                     (by_norm.get(_norm_gateway_name(m.name)), "same name without gateway prefix")]
+            if opts.can_match_id:
+                tiers.append((by_id.get((m.can_id, m.extended, t.length)), "renamed: same CAN id and length"))
+            for cands, how in tiers:
+                cands = [c for c in (cands or []) if c.bus is not t.bus]
+                if cands:
+                    if len(cands) > 1:          # prefer the source with the same CAN id
+                        same = [c for c in cands if c.message.can_id == m.can_id]
+                        cands = same if len(same) == 1 else cands
+                    pairs[id(t)] = (t, cands, how)
+                    break
+        for link in cfg.can_links:
+            src = next((r for r in rx if r.bus.name == link.get("src_bus") and r.message.name == link.get("src_msg")),
+                       None)
+            dst = next((r for r in tx if r.bus.name == link.get("dst_bus") and r.message.name == link.get("dst_msg")),
+                       None)
+            if src is None or dst is None:
+                self.warn(f"CAN link {link.get('src_bus')}/{link.get('src_msg')} -> {link.get('dst_bus')}/"
+                          f"{link.get('dst_msg')}: message not received / sent by the node on that bus.")
+                continue
+            pairs[id(dst)] = (dst, [src], "link")
+        prev_can = [p for p in (self.previous.routes if self.previous else []) if p.direction == "CAN->CAN"]
+        for t, cands, how in pairs.values():
+            src = cands[0]
+            cr = CanRoute(f"{src.bus.name}/{src.message.name}->{t.bus.name}/{t.message.name}", src, t, how)
+            if len(cands) > 1:
+                cr.enabled = False
+                cr.reason = (f"received on {len(cands)} buses (" + ", ".join(c.bus.name for c in cands) +
+                             "): add a link to choose the source")
+            else:
+                self._check_can_route(cr, prev_can)
+            plan.can_routes.append(cr)
+        plan.can_routes.sort(key=lambda c: (c.src.bus.name, c.dst.bus.name, c.dst.message.can_id))
+        # a message fed from another CAN bus is not also fed from Ethernet (that would be N:1)
+        for cr in plan.enabled_can_routes:
+            t = cr.dst
+            over = t.bus.cfg.messages.get(t.message.name, {}) if isinstance(t.bus.cfg.messages, dict) else {}
+            if over.get("enabled") and t.enabled:
+                self.warn(f"{t.key}: sent from Ethernet and from {cr.src.bus.name} (CAN->CAN): two sources (N:1).")
+            elif t.enabled:
+                t.enabled, t.reason, t.change = False, f"fed from {cr.src.bus.name} (CAN->CAN)", ""
+                if t.prev is not None:
+                    self._prev_used.discard(id(t.prev))
+            if cr.src.enabled:
+                cr.notes.append("also routed to Ethernet (1:N)")
+        if plan.can_routes:
+            self.info(f"CAN -> CAN: {len(plan.enabled_can_routes)} of {len(plan.can_routes)} paired message(s) "
+                      f"routed between the buses.")
+
+    def _check_can_route(self, cr: CanRoute, prev_can: list):
+        b, cfg, opts = self.base, self.cfg, self.cfg.options
+        src, dst = cr.src, cr.dst
+        if cr.match != "same name":
+            cr.notes.append(cr.match)
+        if src.length != dst.length:
+            cr.enabled, cr.reason = False, f"length differs ({src.bus.name} {src.length}, {dst.bus.name} {dst.length})"
+        else:
+            layout = lambda m: {(s.start, s.length, s.little_endian) for s in m.signals if not s.multiplexed}
+            ls, ld = layout(src.message), layout(dst.message)
+            if ls and ld and ls != ld:
+                if ld < ls:
+                    cr.notes.append(f"{dst.bus.name} defines {len(ld)} of the {len(ls)} signals (the whole PDU is "
+                                    f"forwarded)")
+                else:
+                    cr.enabled = False
+                    cr.reason = "signal layout differs (a signal gateway would be needed)"
+            elif ls and ld and {s.name for s in src.message.signals} != {s.name for s in dst.message.signals}:
+                cr.notes.append("same layout, different signal names")
+        src_pt, dst_pt = self._can_pt_path(src), self._can_pt_path(dst)
+        if src.can_pt and dst.can_pt:
+            for g in b.gateways():
+                for m in b.el(g).iter(q("I-PDU-MAPPING")):
+                    if b.ref(m, "SOURCE-I-PDU-REF") == src_pt and dst_pt in b.refs(m, "TARGET-I-PDU-REF"):
+                        cr.enabled, cr.reason = False, "already routed in the base file"
+        prev = next((p for p in prev_can if p.can_pt == src_pt and p.dst_pt == dst_pt), None)
+        over = cfg.can_gateway.get(cr.key, {}) if isinstance(cfg.can_gateway, dict) else {}
+        if self.previous is not None:
+            known = any(p.can_pt.startswith(src.bus.channel + "/") and p.dst_pt.startswith(dst.bus.channel + "/")
+                        for p in prev_can)
+            if "enabled" not in over and opts.only_previous and known:
+                if prev is None and cr.enabled:
+                    cr.enabled, cr.reason = False, "not in the previous gateway file"
+                elif prev is not None and not cr.enabled and cr.reason != "already routed in the base file":
+                    cr.enabled, cr.reason = True, ""
+        if "enabled" in over:
+            cr.enabled = bool(over["enabled"])
+            cr.reason = "" if cr.enabled else (cr.reason or "deselected")
+        if cr.enabled and self.previous is not None:
+            cr.change = "kept" if prev is not None else "new"
+            if prev is not None:
+                self._prev_used.add(id(prev))
 
     def _describe_removed(self, removed):
         """CAN frame and id of removed routes whose CAN side is outside the previous file (project mode)."""

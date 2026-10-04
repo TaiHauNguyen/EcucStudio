@@ -109,7 +109,7 @@ class App(tk.Tk):
         p.add_command(label="Project Settings…", image=ic.settings, compound="left", command=self.settings_dialog)
         mb.add_cascade(label="Project", menu=p)
         t = tk.Menu(mb, tearoff=False)
-        t.add_command(label="CAN-Ethernet Gateway Generator…", command=self.gateway_generator)
+        t.add_command(label="CAN Gateway Generator (CAN-Ethernet, CAN-CAN)…", command=self.gateway_generator)
         t.add_command(label="CAN-Ethernet Gateway Editor…", command=self.gateway_editor)
         mb.add_cascade(label="Tools", menu=t)
         h = tk.Menu(mb, tearoff=False)

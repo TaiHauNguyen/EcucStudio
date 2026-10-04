@@ -148,6 +148,7 @@ class PrevRoute:
     can_pt: str             # CAN-side PDU triggering path (may be outside the file)
     can_frame: str = ""
     can_id: int | None = None
+    dst_pt: str = ""        # CAN->CAN: PDU triggering on the destination bus
 
     @property
     def label(self) -> str:
@@ -182,6 +183,10 @@ def load_previous(path: str) -> Previous:
     prev = Previous(path, meta, delta, owned)
     for r in m.routes:
         eth = r.eth
+        if r.src.kind == "CAN" and r.dst.kind == "CAN" or (eth is None and "?" in (r.src.kind, r.dst.kind)):
+            # CAN -> CAN (in an additional input file both ends may be outside the file)
+            prev.routes.append(PrevRoute("CAN->CAN", "", None, r.src.pt, r.src.frame, r.src.can_id, r.dst.pt))
+            continue
         if eth is None or r.src.kind == r.dst.kind:
             continue
         direction = "CAN->ETH" if eth is r.dst else "ETH->CAN"
@@ -269,6 +274,9 @@ def _reconstruct(path: str, m: GatewayModel) -> GatewayConfig:
     if delta:
         cfg.base = find_project(path)
     eth_routes = [r for r in m.routes if r.eth is not None and r.src.kind != r.dst.kind]
+    can_routes = [r for r in m.routes if r.eth is None and r.src.kind != "ETH" and r.dst.kind != "ETH"]
+    cfg.options.eth_routes = bool(eth_routes)
+    cfg.options.can_routes = bool(can_routes) or not eth_routes
     # ---- Ethernet channel / connector / endpoint
     chans = collections.Counter(r.eth.channel for r in eth_routes if r.eth.channel)
     e = cfg.ethernet
@@ -317,9 +325,9 @@ def _reconstruct(path: str, m: GatewayModel) -> GatewayConfig:
     # ---- CAN buses: one per CAN channel of the routes
     from .config import BusInput
     channels = []
-    for r in eth_routes:
-        other = r.src if r.eth is r.dst else r.dst
-        ch = other.channel or other.pt.rsplit("/", 1)[0]
+    ends = [(r.src if r.eth is r.dst else r.dst) for r in eth_routes] + [e for r in can_routes for e in (r.src, r.dst)]
+    for end in ends:
+        ch = end.channel or end.pt.rsplit("/", 1)[0]
         if ch and ch not in channels:
             channels.append(ch)
     for ch in channels:

@@ -102,12 +102,18 @@ class Options:
     can_tx_timing: str = "event"    # timing of CAN PDUs the gateway sends: event | dbc (cycle time from DBC)
     add_fibex: bool = True          # add new elements to the SYSTEM's FIBEX-ELEMENTS
     only_previous: bool = False     # regeneration: route only the messages of the previous gateway file
+    eth_routes: bool = True         # CAN <-> Ethernet routes (node RX -> Ethernet, node TX <- Ethernet)
+    can_routes: bool = True         # CAN <-> CAN routes: a message the node receives on one bus and sends on another
+    can_match_id: bool = True       # CAN <-> CAN: also pair renamed messages (same CAN id, length and layout)
 
 
 @dataclass
 class GatewayConfig:
     base: str = ""                  # existing system description (network.arxml); empty = create a new file
     output: str = ""                # file to write (base + gateway)
+    can_gateway: dict = field(default_factory=dict)   # CAN <-> CAN route key -> {"enabled": bool}
+    can_links: list = field(default_factory=list)     # extra CAN <-> CAN pairs: {"src_bus", "src_msg",
+                                                      #                           "dst_bus", "dst_msg"}
     previous: str = ""              # gateway file of the previous generation (already imported in DaVinci):
                                     # its elements are taken out of the base, its header ids / names are kept
     ecu: str = ""                   # gateway ECU-INSTANCE (path or short name; empty = auto). Without a base
@@ -148,7 +154,8 @@ class GatewayConfig:
         eth["eth_to_can"] = build(SocketSide, eth.get("eth_to_can"))
         cfg = cls(base=d.get("base", ""), output=d.get("output", ""), ecu=d.get("ecu", ""),
                   system=d.get("system", ""), schema=d.get("schema", "AUTOSAR_00052"),
-                  previous=d.get("previous", ""),
+                  previous=d.get("previous", ""), can_gateway=dict(d.get("can_gateway") or {}),
+                  can_links=list(d.get("can_links") or []),
                   buses=[build(BusInput, b) for b in d.get("buses", [])],
                   ethernet=build(EthernetSettings, eth),
                   header=build(HeaderSettings, d.get("header")),

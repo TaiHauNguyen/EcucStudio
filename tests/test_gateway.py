@@ -23,6 +23,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = os.path.join(HERE, "fixtures", "gateway_base.arxml")
 DBC = os.path.join(HERE, "fixtures", "gateway_demo.dbc")
 CAN_ONLY = os.path.join(HERE, "fixtures", "gateway_base_can_only.arxml")
+CHASSIS = os.path.join(HERE, "fixtures", "gateway_chassis.dbc")     # second bus: GwEcu forwards Body messages
 
 try:
     import cantools  # noqa: F401
@@ -798,6 +799,172 @@ class GatewayTest(unittest.TestCase):
         self.assertIn("5 route(s) kept, 0 new, 0 removed", buf.getvalue())
         with open(conf, encoding="utf-8") as fh:
             self.assertTrue(json.load(fh)["previous"])
+
+    # ------------------------------------------------------------------ CAN -> CAN
+    def _two_buses(self, out, base=BASE, eth=True):
+        cfg = config(out) if eth else GatewayConfig(base=base, output=out)
+        cfg.base = base
+        if not eth:
+            cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+            cfg.options.eth_routes = False
+        cfg.buses.append(BusInput(dbc=CHASSIS, node="GwEcu"))
+        return cfg
+
+    def _can_maps(self, path):
+        """(source PT, target PT) of the I-PDU-MAPPINGs between two CAN PDU triggerings."""
+        _, idx = index(path)
+        out = set()
+        for m in (e for e in idx.values() if local(e) == "GATEWAY"):
+            for x in m.iter(q("I-PDU-MAPPING")):
+                s, t = x.findtext(q("SOURCE-I-PDU-REF")), x.findtext(".//" + q("TARGET-I-PDU-REF"))
+                if "Eth" not in s and "Eth" not in t:
+                    out.add((s.rsplit("/", 1)[-1], t.rsplit("/", 1)[-1]))
+        return out
+
+    def _refs_resolve(self, path):
+        root, idx = index(path)
+        for r in root.iter():
+            if isinstance(r.tag, str) and r.get("DEST"):
+                target = idx.get(r.text.strip())
+                self.assertIsNotNone(target, r.text)
+                self.assertEqual(local(target), r.get("DEST"), r.text)
+        return root, idx
+
+    def test_can2can_pairing(self):
+        plan = make_plan(self._two_buses(self.out))
+        self.assertEqual(plan.errors, [])
+        can = {c.key: c for c in plan.can_routes}
+        self.assertEqual(set(can), {"Body/EngineData->Chassis/EngineData", "Body/ExtSameId->Chassis/ExtSameId",
+                                    "Body/DoorStatus->Chassis/DoorStatus", "Chassis/GwCommand->Body/GwCommand",
+                                    "Body/BrakeStatus->Chassis/GW_BrakeStatus"})
+        self.assertTrue(can["Body/EngineData->Chassis/EngineData"].enabled)
+        self.assertTrue(can["Chassis/GwCommand->Body/GwCommand"].enabled)
+        brake = can["Body/BrakeStatus->Chassis/GW_BrakeStatus"]
+        self.assertTrue(brake.enabled)
+        self.assertEqual(brake.match, "same name without gateway prefix")
+        self.assertTrue(any("1 of the 2 signals" in n for n in brake.notes), brake.notes)
+        self.assertIn("length differs", can["Body/ExtSameId->Chassis/ExtSameId"].reason)
+        self.assertIn("signal layout differs", can["Body/DoorStatus->Chassis/DoorStatus"].reason)
+        # a message fed from the other CAN bus is not also fed from Ethernet; the source still goes to Ethernet
+        r = {(x.bus.name, x.message.name, x.direction): x for x in plan.routes}
+        for key in (("Chassis", "EngineData", ETH_TO_CAN), ("Chassis", "GW_BrakeStatus", ETH_TO_CAN),
+                    ("Body", "GwCommand", ETH_TO_CAN)):
+            self.assertFalse(r[key].enabled, key)
+            self.assertIn("CAN->CAN", r[key].reason)
+        self.assertTrue(r[("Chassis", "DoorStatus", ETH_TO_CAN)].enabled)      # its CAN route is off
+        self.assertTrue(r[("Body", "EngineData", CAN_TO_ETH)].enabled)
+        # deselecting a CAN route gives the message back to Ethernet
+        cfg = self._two_buses(self.out)
+        cfg.can_gateway["Body/EngineData->Chassis/EngineData"] = {"enabled": False}
+        plan = make_plan(cfg)
+        r = {(x.bus.name, x.message.name, x.direction): x for x in plan.routes}
+        self.assertTrue(r[("Chassis", "EngineData", ETH_TO_CAN)].enabled)
+        self.assertEqual(len(plan.enabled_can_routes), 2)
+        # CAN -> CAN off
+        cfg = self._two_buses(self.out)
+        cfg.options.can_routes = False
+        self.assertEqual(make_plan(cfg).can_routes, [])
+
+    def test_can2can_generate(self):
+        res = generate(make_plan(self._two_buses(self.out)))
+        self.assertEqual(len(res.can_routes), 3)
+        self._refs_resolve(res.output)
+        self.assertEqual(self._can_maps(res.output), {
+            ("EngineData_oBody_PT", "EngineData_oChassis_PT"),
+            ("BrakeStatus_oBody_PT", "GW_BrakeStatus_oChassis_PT"),
+            ("GwCommand_oChassis_PT", "GwCommand_oBody_PT")})
+        _, idx = index(res.output)
+        ports = {p.rsplit("/", 1)[-1]: e.findtext(q("COMMUNICATION-DIRECTION"))
+                 for p, e in idx.items() if local(e) == "I-PDU-PORT"}
+        self.assertEqual(ports["EngineData_oChassis_CN_Chassis"], "OUT")
+        self.assertEqual(ports["GwCommand_oChassis_CN_Chassis"], "IN")
+        self.assertEqual(ports["GwCommand_oBody_CN_Body"], "OUT")
+        # the CAN side of a message that also goes to Ethernet exists once (1:N)
+        pts = [p for p in idx if p.endswith("/EngineData_oBody_PT")]
+        self.assertEqual(len(pts), 1)
+        self._xsd(res.output)
+
+    def test_can_only_mode(self):
+        """Only CAN -> CAN: no Ethernet settings are needed and no Ethernet element is written."""
+        for base in (CAN_ONLY, ""):
+            out = os.path.join(self.tmp, f"can_only_{bool(base)}.arxml")
+            plan = make_plan(self._two_buses(out, base=base, eth=False))
+            self.assertEqual(plan.errors, [])
+            self.assertEqual(plan.enabled_routes, [])
+            self.assertEqual(len(plan.enabled_can_routes), 3)
+            res = generate(plan)
+            self.assertFalse([k for k in res.created if k.startswith(("ETHERNET", "SOCKET", "SO-CON", "NETWORK"))],
+                             res.created)
+            self.assertEqual(res.created["I-PDU-MAPPING"], 3)
+            self._refs_resolve(out)
+            self.assertEqual(len(self._can_maps(out)), 3)
+            self._xsd(out)
+
+    def test_can2can_match_by_id_and_links(self):
+        renamed = os.path.join(self.tmp, "chassis_renamed.dbc")
+        with open(CHASSIS, encoding="utf-8") as fh:
+            text = fh.read().replace("BO_ 256 EngineData:", "BO_ 256 EngData_Fwd:")
+        with open(renamed, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        cfg = self._two_buses(self.out)
+        cfg.buses[1].dbc = renamed
+        can = {c.key: c for c in make_plan(cfg).can_routes}
+        c = can["Body/EngineData->Chassis/EngData_Fwd"]
+        self.assertTrue(c.enabled)
+        self.assertEqual(c.match, "renamed: same CAN id and length")
+        cfg.options.can_match_id = False
+        self.assertNotIn("Body/EngineData->Chassis/EngData_Fwd", {c.key for c in make_plan(cfg).can_routes})
+        # received on two buses: N:1 is not routed until a link chooses the source
+        cfg = self._two_buses(self.out)
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", new_channel=True, bus="Body2"))
+        can = {c.key: c for c in make_plan(cfg).can_routes}
+        c = next(c for c in can.values() if c.dst.message.name == "EngineData" and c.dst.bus.name == "Chassis")
+        self.assertFalse(c.enabled)
+        self.assertIn("received on 2 buses", c.reason)
+        cfg.can_links.append({"src_bus": "Body2", "src_msg": "EngineData", "dst_bus": "Chassis",
+                              "dst_msg": "EngineData"})
+        plan = make_plan(cfg)
+        can = {c.key: c for c in plan.can_routes}
+        c = can["Body2/EngineData->Chassis/EngineData"]
+        self.assertTrue(c.enabled)
+        self.assertEqual(c.match, "link")
+        res = generate(plan)
+        self.assertIn(("EngineData_oBody2_PT", "EngineData_oChassis_PT"), self._can_maps(res.output))
+        # a link to a message the node does not send there is reported
+        cfg.can_links.append({"src_bus": "Body", "src_msg": "EngineData", "dst_bus": "Chassis", "dst_msg": "Nope"})
+        self.assertTrue(any("CAN link" in w for w in make_plan(cfg).warnings))
+        # links survive the JSON configuration
+        conf = os.path.join(self.tmp, "gw.json")
+        cfg.can_gateway["x"] = {"enabled": False}
+        cfg.save(conf)
+        back = GatewayConfig.load(conf)
+        self.assertEqual(back.can_links, cfg.can_links)
+        self.assertEqual(back.can_gateway, cfg.can_gateway)
+
+    def test_can2can_regeneration(self):
+        from ecucstudio.gateway.regen import config_from_file
+        generate(make_plan(self._two_buses(self.out, base="", eth=False)))
+        with open(self.out, "rb") as fh:
+            v1 = fh.read()
+        cfg, _ = config_from_file(self.out)
+        self.assertFalse(cfg.options.eth_routes)
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual([c.change for c in plan.enabled_can_routes], ["kept"] * 3)
+        generate(plan)
+        with open(self.out, "rb") as fh:
+            self.assertEqual(fh.read(), v1)
+        # deselect one CAN route: it is reported as removed and its mapping is gone
+        cfg, _ = config_from_file(self.out)
+        cfg.can_gateway["Chassis/GwCommand->Body/GwCommand"] = {"enabled": False}
+        plan = make_plan(cfg)
+        self.assertEqual([(p.direction, p.dst_pt.rsplit("/", 1)[-1]) for p in plan.removed],
+                         [("CAN->CAN", "GwCommand_oBody_PT")])
+        generate(plan)
+        self.assertEqual(self._can_maps(self.out), {("EngineData_oBody_PT", "EngineData_oChassis_PT"),
+                                                    ("BrakeStatus_oBody_PT", "GW_BrakeStatus_oChassis_PT")})
+        self._refs_resolve(self.out)
+        self._xsd(self.out)
 
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))

@@ -39,6 +39,7 @@ class Result:
     routes: list[Route]
     created: collections.Counter = field(default_factory=collections.Counter)
     warnings: list[str] = field(default_factory=list)
+    can_routes: list = field(default_factory=list)      # CanRoute (CAN -> CAN)
 
 
 def base_type_name(spec: SignalSpec) -> str:
@@ -68,6 +69,7 @@ class Writer:
         self.uuid_tags = with_uuid | ({t for t in xmlorder.IDENTIFIABLE if t not in present} if with_uuid else set())
         self.created = collections.Counter()
         self.added: list = []          # every new element / entry, in creation order (for the delta file)
+        self._can_pts: dict = {}       # id(route) -> CAN PDU triggering path (CAN side created once)
         self.fibex: list[tuple[str, str]] = []
         self.warnings: list[str] = []
         self._sys_signals: set[str] = set()
@@ -130,15 +132,20 @@ class Writer:
             self.side(sp)
         if p.enabled_routes:
             self.id_set()
+        if p.enabled_routes or p.enabled_can_routes:
             self.gateway()
         for r in p.enabled_routes:
             self.route(r)
+        for cr in p.enabled_can_routes:
+            self.can_route(cr)
         self.fibex_refs()
 
     # ------------------------------------------------------------------ CAN bus
     def bus(self, bp):
         p, b = self.p, self.b
-        if not any(r.enabled and r.bus is bp for r in p.routes):
+        used = any(r.enabled and r.bus is bp for r in p.routes) or \
+            any(cr.enabled and bp in (cr.src.bus, cr.dst.bus) for cr in p.can_routes)
+        if not used:
             return
         if bp.new_cluster:
             pkg, cname = bp.cluster.rsplit("/", 1)
@@ -392,13 +399,16 @@ class Writer:
         return pt_path
 
     # ------------------------------------------------------------------ one route
-    def route(self, r: Route):
+    def can_side(self, r: Route) -> str:
+        """CAN frame / PDU / triggerings / ports of the message of *r* (created once, also when several routes use
+        it: CAN -> Ethernet and CAN -> CAN). Returns the CAN PDU triggering path."""
+        key = id(r)
+        if key in self._can_pts:
+            return self._can_pts[key]
         p, naming = self.p, self.cfg.naming
         bp = r.bus
         can_dir = "IN" if r.direction == CAN_TO_ETH else "OUT"
-        eth_dir = "OUT" if r.direction == CAN_TO_ETH else "IN"
         m = r.message
-        # ---------------------------------------------------------- CAN side
         if r.can_side_new:
             frame_pkg = self.p.packages.get("CAN-FRAME") or choose_package(self.b, "CAN-FRAME")
             cycle = m.cycle_ms if (r.direction == CAN_TO_ETH or self.cfg.options.can_tx_timing == "dbc") else None
@@ -440,6 +450,21 @@ class Writer:
             self.ensure_port(r.can_pt, "I-PDU-PORT-REFS", "I-PDU-PORT-REF", "I-PDU-PORT", bp.connector,
                              fmt(naming.pdu_port, pdu=(r.can_pdu or r.can_pt).rsplit("/", 1)[-1], ecu=p.ecu_name,
                                  connector=bp.connector.rsplit("/", 1)[-1]), can_dir)
+        self._can_pts[key] = can_pt
+        return can_pt
+
+    def can_route(self, cr):
+        """PDU gateway between two CAN buses: I-PDU-MAPPING from the received to the sent CAN PDU triggering."""
+        src, dst = self.can_side(cr.src), self.can_side(cr.dst)
+        mapping = E("I-PDU-MAPPING", R("SOURCE-I-PDU-REF", "PDU-TRIGGERING", src),
+                    E("TARGET-I-PDU", R("TARGET-I-PDU-REF", "PDU-TRIGGERING", dst)))
+        self.attach_ref(self.lst(self.p.gateway, "I-PDU-MAPPINGS"), mapping)
+        self.created["I-PDU-MAPPING"] += 1
+
+    def route(self, r: Route):
+        p, naming = self.p, self.cfg.naming
+        eth_dir = "OUT" if r.direction == CAN_TO_ETH else "IN"
+        can_pt = self.can_side(r)
         # ---------------------------------------------------------- Ethernet side
         if r.eth_signals:
             eth_pdu, eth_sigs = self.ipdu(r.eth_pdu, r.length, None, r.eth_signals)
@@ -593,4 +618,4 @@ def generate(plan: Plan, base: Base | None = None, output: str | None = None) ->
         write_meta(base.root, *meta)
         base.xf.path = out
         base.xf.save(backup=os.path.exists(out))
-    return Result(out, plan.enabled_routes, w.created, plan.warnings + w.warnings)
+    return Result(out, plan.enabled_routes, w.created, plan.warnings + w.warnings, plan.enabled_can_routes)

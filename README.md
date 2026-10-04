@@ -22,7 +22,7 @@ nó khởi động GUI bằng đúng bản Python vừa kiểm tra (`pythonw.exe
 | Lệnh | Mở |
 |---|---|
 | `run.bat [project.dpa]` | EcucStudio |
-| `run.bat gateway [gateway.json]` | CAN-Ethernet Gateway Generator |
+| `run.bat gateway [gateway.json]` | CAN Gateway Generator (CAN-Ethernet, CAN-CAN) |
 | `run.bat editor [network.arxml]` | CAN-Ethernet Gateway Editor |
 | `run.bat debug …` | như trên nhưng chạy ngay trong cửa sổ console: mọi thông báo / lỗi hiện tại đó |
 
@@ -133,13 +133,20 @@ python -m ecucstudio generate Project.dpa -m /MICROSAR/Det [--gen-type REAL]
 ```
 `validate` trả exit code 1 nếu còn Error chưa acknowledge (dùng được trong CI).
 
-## Gateway CAN ↔ Ethernet (PduR)
+## Gateway CAN ↔ Ethernet và CAN → CAN (PduR)
 
-Sinh **System Description** (file network ARXML) có gateway PduR giữa CAN và Ethernet để import vào
-DaVinci Configurator (*Input Files*). Từ file này DaVinci tự suy ra PduR routing path, SoAd PduRoute /
+Sinh **System Description** (file network ARXML) có gateway PduR giữa CAN và Ethernet, và giữa các bus CAN, để
+import vào DaVinci Configurator (*Input Files*). Từ file này DaVinci tự suy ra PduR routing path, SoAd PduRoute /
 SocketRoute (header ID) và CanIf PDU — không phải sửa ECUC bằng tay.
 
 Hướng dẫn sử dụng đầy đủ: [docs/GATEWAY.md](docs/GATEWAY.md).
+
+**CAN → CAN**: thêm nhiều DBC (mỗi DBC một bus, chọn node của ECU trong từng DBC). Message ECU nhận trên một bus
+và gửi trên bus khác (cùng tên, tên có tiền tố `GW_`/`XGW_`…, hoặc cùng CAN ID và độ dài) được route thẳng giữa
+hai bus nếu độ dài và layout signal khớp; route `ETH->CAN` của message đó tự tắt. Cặp khác độ dài / khác layout
+/ nhận trên nhiều bus được liệt kê nhưng không route (ghép tay bằng *Add CAN -> CAN link…*). Chỉ cần CAN → CAN thì
+tắt *CAN <-> Ethernet routes* ở tab Options, không cần thông số Ethernet. Chi tiết: mục 12 của
+[docs/GATEWAY.md](docs/GATEWAY.md).
 
 **Đã import file gateway vào DaVinci, giờ cần thêm/bớt DBC hoặc message?** Generator → **Open…** chính file
 gateway `.arxml` (cấu hình được nhúng trong file; file của bản cũ được dựng lại từ nội dung), thay đổi, Generate
@@ -153,7 +160,7 @@ xem tất cả route, sửa header ID / socket connection / port / IP, xoá rout
 dùng) và thêm route mới. Command line: `gateway routes` và `gateway edit`. Chi tiết ở mục 11 của
 [docs/GATEWAY.md](docs/GATEWAY.md).
 
-Mở: menu **Tools → CAN-Ethernet Gateway Generator…**, `run.bat gateway`, hoặc
+Mở: menu **Tools → CAN Gateway Generator (CAN-Ethernet, CAN-CAN)…**, `run.bat gateway`, hoặc
 `python -m ecucstudio gateway gui [gateway.json]`. Cần thêm gói `cantools` (có trong requirements.txt).
 
 **Input**

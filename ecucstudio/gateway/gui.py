@@ -1,4 +1,4 @@
-"""Window of the CAN <-> Ethernet gateway generator (standalone or opened from EcucStudio)."""
+"""Window of the CAN gateway generator: CAN <-> Ethernet and CAN -> CAN (standalone or opened from EcucStudio)."""
 from __future__ import annotations
 
 import os
@@ -13,7 +13,7 @@ from ..gui.widgets import Tooltip, dialog_header
 from . import dbcread, dvproject, report
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
 from .config import BusInput, GatewayConfig, Naming, SocketSide
-from .planner import load_base, make_plan, new_ecu_name
+from .planner import CAN_TO_ETH, ETH_TO_CAN, CanRoute, Route, load_base, make_plan, new_ecu_name
 from .regen import config_from_file
 from .suggest import apply as apply_suggestions
 from .suggest import suggest as suggest_settings
@@ -24,7 +24,7 @@ AUTO = "<auto>"
 NEW_CLUSTER = "<new CAN cluster from DBC>"
 NEW_CHANNEL = "<create new channel (VLAN)>"
 NEW_VALUE = "*new*"
-TITLE = "CAN-Ethernet Gateway Generator"
+TITLE = "CAN Gateway Generator"
 
 
 def _int_or_none(text):
@@ -260,6 +260,52 @@ class RouteDialog(tk.Toplevel):
             self.result["header_id"] = h
         if self.eth.get().strip():
             self.result["eth_pdu"] = self.eth.get().strip()
+        self.destroy()
+
+
+class LinkDialog(tk.Toplevel):
+    """Pair a message the node receives on one bus with a message it sends on another (CAN -> CAN)."""
+
+    def __init__(self, master, plan, preset=None):
+        super().__init__(master)
+        self.title("CAN -> CAN link")
+        self.transient(master)
+        self.result = None
+        dialog_header(self, "Add a CAN -> CAN link",
+                      "The whole PDU received on the source bus is sent unchanged on the destination bus (same "
+                      "length). Use it for messages the automatic pairing does not find or finds on several buses.")
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill="both")
+        label = lambda r: f"{r.bus.name} / {r.message.name}  ({r.message.id_text}, {r.length} byte)"
+        self._src = {label(r): r for r in plan.routes if r.direction == CAN_TO_ETH and not r.can_problem}
+        self._dst = {label(r): r for r in plan.routes if r.direction == ETH_TO_CAN and not r.can_problem}
+        ttk.Label(f, text="Received on (source):").grid(row=0, column=0, sticky="w", pady=3)
+        self.c_src = ttk.Combobox(f, values=sorted(self._src), width=60, state="readonly")
+        self.c_src.grid(row=0, column=1, sticky="we")
+        ttk.Label(f, text="Sent on (destination):").grid(row=1, column=0, sticky="w", pady=3)
+        self.c_dst = ttk.Combobox(f, values=sorted(self._dst), width=60, state="readonly")
+        self.c_dst.grid(row=1, column=1, sticky="we")
+        for r in preset or ():
+            if r.direction == CAN_TO_ETH and label(r) in self._src:
+                self.c_src.set(label(r))
+            elif r.direction == ETH_TO_CAN and label(r) in self._dst:
+                self.c_dst.set(label(r))
+        bb = ttk.Frame(self, padding=(10, 0, 10, 10))
+        bb.pack(fill="x")
+        ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bb, text="OK", command=self.ok).pack(side="right", padx=6)
+        self.grab_set()
+
+    def ok(self):
+        s, d = self._src.get(self.c_src.get()), self._dst.get(self.c_dst.get())
+        if s is None or d is None:
+            messagebox.showwarning(TITLE, "Select the source and the destination message.", parent=self)
+            return
+        if s.bus is d.bus:
+            messagebox.showwarning(TITLE, "Source and destination must be on different buses.", parent=self)
+            return
+        self.result = {"src_bus": s.bus.name, "src_msg": s.message.name,
+                       "dst_bus": d.bus.name, "dst_msg": d.message.name}
         self.destroy()
 
 
@@ -529,6 +575,14 @@ class GatewayWindow:
         nb.add(f, text="  Options & Naming  ")
         o = ttk.LabelFrame(f, text="Options", padding=6)
         o.pack(side="left", fill="y")
+        self.v_ethroutes = tk.BooleanVar(value=True)
+        self.v_canroutes = tk.BooleanVar(value=True)
+        self.v_canmatchid = tk.BooleanVar(value=True)
+        ttk.Checkbutton(o, text="CAN <-> Ethernet routes", variable=self.v_ethroutes).pack(anchor="w")
+        ttk.Checkbutton(o, text="CAN -> CAN routes (a message the node receives on one bus and sends\n"
+                                "on another)", variable=self.v_canroutes).pack(anchor="w")
+        ttk.Checkbutton(o, text="CAN -> CAN: also pair renamed messages (same CAN id and length)",
+                        variable=self.v_canmatchid).pack(anchor="w", padx=(18, 0), pady=(0, 6))
         self.v_extflag = tk.BooleanVar()
         self.v_sigs = tk.StringVar(value="copy")
         self.v_timing = tk.StringVar(value="event")
@@ -576,7 +630,7 @@ class GatewayWindow:
         top.pack(fill="both", expand=True)
         cols = report.COLUMNS
         self.t_routes = ttk.Treeview(top, columns=cols, show="headings", selectmode="extended", height=8)
-        widths = (60, 65, 75, 80, 200, 90, 70, 55, 65, 200, 220, 95, 220, 380)
+        widths = (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 95, 220, 380)
         for c, wd in zip(cols, widths):
             self.t_routes.heading(c, text=c, anchor="w")
             self.t_routes.column(c, width=wd, anchor="w", stretch=c == "Remark")
@@ -940,6 +994,9 @@ class GatewayWindow:
         c.options.can_tx_timing = self.v_timing.get()
         c.options.add_fibex = self.v_fibex.get()
         c.options.only_previous = self.v_onlyprev.get()
+        c.options.eth_routes = self.v_ethroutes.get()
+        c.options.can_routes = self.v_canroutes.get()
+        c.options.can_match_id = self.v_canmatchid.get()
         c.previous = self.v_prev.get().strip()
         for k, v in self.v_naming.items():
             setattr(c.naming, k, v.get().strip() or getattr(Naming(), k))
@@ -962,6 +1019,9 @@ class GatewayWindow:
         self.v_timing.set(c.options.can_tx_timing)
         self.v_fibex.set(c.options.add_fibex)
         self.v_onlyprev.set(c.options.only_previous)
+        self.v_ethroutes.set(c.options.eth_routes)
+        self.v_canroutes.set(c.options.can_routes)
+        self.v_canmatchid.set(c.options.can_match_id)
         self.v_prev.set(c.previous)
         for k, v in self.v_naming.items():
             v.set(getattr(c.naming, k))
@@ -1032,9 +1092,8 @@ class GatewayWindow:
                 self.plan = plan
                 self.fill_routes()
                 self.show_messages(plan.errors, plan.warnings, plan.infos)
-                n = len(plan.enabled_routes)
-                self.status.config(text=f"{n} route(s), {len(plan.warnings)} warning(s), {len(plan.errors)} "
-                                        f"error(s)")
+                n = report.count_text(len(plan.enabled_routes), len(plan.enabled_can_routes))
+                self.status.config(text=f"{n}, {len(plan.warnings)} warning(s), {len(plan.errors)} error(s)")
                 if then and plan.ok:
                     then(plan)
             self._run("Analyzing", lambda: make_plan(cfg, self.base, self.dbc_cache), done)
@@ -1062,10 +1121,12 @@ class GatewayWindow:
             def done(r):
                 res, csv_path = r
                 self.show_messages([], res.warnings, [f"Written {res.output}", f"Route table: {csv_path}"])
-                self.status.config(text=f"Written {os.path.basename(res.output)}: {len(res.routes)} route(s)")
+                n = report.count_text(len(res.routes), len(res.can_routes))
+                self.status.config(text=f"Written {os.path.basename(res.output)}: {n}")
                 regen = cfg.previous and os.path.abspath(cfg.previous) == os.path.abspath(res.output)
-                kept = sum(1 for r in plan.enabled_routes if r.change == "kept")
-                new = sum(1 for r in plan.enabled_routes if r.change == "new")
+                done_routes = plan.enabled_routes + plan.enabled_can_routes
+                kept = sum(1 for r in done_routes if r.change == "kept")
+                new = sum(1 for r in done_routes if r.change == "new")
                 if regen:
                     how = (f"again: it is already in Input Files, so run Update in DaVinci. Kept {kept}, new {new}, "
                            f"removed {len(plan.removed)} route(s); the configuration of the kept routes stays")
@@ -1076,7 +1137,7 @@ class GatewayWindow:
                     how = "instead of the base file"
                 else:
                     how = f"for the ECU instance {new_ecu_name(cfg)} (do not import the same DBC files again)"
-                messagebox.showinfo(TITLE, f"Written {res.output}\n\n{len(res.routes)} route(s).\n"
+                messagebox.showinfo(TITLE, f"Written {res.output}\n\n{n}.\n"
                                            f"Import this file into DaVinci Configurator (Input Files) {how}.",
                                     parent=self.win)
             self._run("Generating", work, done)
@@ -1084,18 +1145,32 @@ class GatewayWindow:
 
     def fill_routes(self):
         t = self.t_routes
+        # keep the selection and the scroll position over a new analysis (rows are found again by their key)
+        keep = {getattr(r, "key", None) for r in self._selected_routes()} - {None}
+        top = t.yview()[0]
         t.delete(*t.get_children())
         if not self.plan:
             return
         self._route_by_iid = {}
-        rows = report.route_rows(self.plan)
-        for k, row in enumerate(rows[len(self.plan.routes):]):
+        items = report.route_items(self.plan)
+        removed = [row for r, row in items if not isinstance(r, (Route, CanRoute))]
+        for k, row in enumerate(removed):
             t.insert("", "end", iid=f"removed-{k}", values=row, tags=("removed",))
-        for i, (r, row) in enumerate(zip(self.plan.routes, rows)):
-            tags = ("off",) if not r.enabled else (("flag",) if r.header_note.startswith("flag") else
-                                                   (("new",) if r.change == "new" else ()))
+        again = []
+        for i, (r, row) in enumerate((r, row) for r, row in items if isinstance(r, (Route, CanRoute))):
+            if not r.enabled:
+                tags = ("off",)
+            elif isinstance(r, Route) and r.header_note.startswith("flag"):
+                tags = ("flag",)
+            else:
+                tags = ("new",) if r.change == "new" else ()
             t.insert("", "end", iid=str(i), values=row, tags=tags)
             self._route_by_iid[str(i)] = r
+            if r.key in keep:
+                again.append(str(i))
+        if again:
+            t.selection_set(again)
+        t.yview_moveto(top)
 
     def show_messages(self, errors=(), warnings=(), infos=(), extra=()):
         t = self.t_msg
@@ -1114,6 +1189,15 @@ class GatewayWindow:
         if not routes:
             return
         r = routes[0]
+        if isinstance(r, CanRoute):
+            text = (f"{r.src.bus.name} / {r.src.message.name}  ->  {r.dst.bus.name} / {r.dst.message.name}\n"
+                    f"Pairing: {r.match}\n" + "".join(f"{x}\n" for x in ([r.reason] if r.reason else []) + r.notes) +
+                    "\nRoute this message from bus to bus?")
+            ans = messagebox.askyesnocancel(TITLE, text, parent=self.win)
+            if ans is not None:
+                self.cfg.can_gateway[r.key] = {"enabled": ans}
+                self.analyze()
+            return
         d = RouteDialog(self.win, r)
         self.win.wait_window(d)
         if d.result is not None:
@@ -1123,6 +1207,9 @@ class GatewayWindow:
     def toggle_routes(self, value=None):
         routes = self._selected_routes()
         for r in routes:
+            if isinstance(r, CanRoute):
+                self.cfg.can_gateway[r.key] = {"enabled": (not r.enabled) if value is None else value}
+                continue
             over = dict(r.bus.cfg.messages.get(r.message.name, {}))
             over["enabled"] = (not r.enabled) if value is None else value
             r.bus.cfg.messages[r.message.name] = over
@@ -1138,12 +1225,37 @@ class GatewayWindow:
         m.add_command(label="Disable", command=lambda: self.toggle_routes(False))
         m.add_command(label="Edit…", command=self.edit_route)
         m.add_separator()
+        m.add_command(label="Add CAN -> CAN link…", command=self.add_link)
+        sel = self._selected_routes()
+        if any(isinstance(r, CanRoute) and r.match == "link" for r in sel):
+            m.add_command(label="Remove CAN -> CAN link", command=self.remove_links)
+        m.add_separator()
         m.add_command(label="Reset overrides of selected", command=self.reset_routes)
         m.tk_popup(e.x_root, e.y_root)
 
     def reset_routes(self):
         for r in self._selected_routes():
-            r.bus.cfg.messages.pop(r.message.name, None)
+            if isinstance(r, CanRoute):
+                self.cfg.can_gateway.pop(r.key, None)
+            else:
+                r.bus.cfg.messages.pop(r.message.name, None)
+        self.analyze()
+
+    def add_link(self):
+        if not self.plan:
+            return
+        d = LinkDialog(self.win, self.plan, [r for r in self._selected_routes() if not isinstance(r, CanRoute)])
+        self.win.wait_window(d)
+        if d.result is not None:
+            self.cfg.can_links = [x for x in self.cfg.can_links
+                                  if (x.get("dst_bus"), x.get("dst_msg")) != (d.result["dst_bus"], d.result["dst_msg"])]
+            self.cfg.can_links.append(d.result)
+            self.analyze()
+
+    def remove_links(self):
+        dead = {(r.dst.bus.name, r.dst.message.name) for r in self._selected_routes()
+                if isinstance(r, CanRoute) and r.match == "link"}
+        self.cfg.can_links = [x for x in self.cfg.can_links if (x.get("dst_bus"), x.get("dst_msg")) not in dead]
         self.analyze()
 
 

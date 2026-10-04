@@ -1,8 +1,13 @@
-# Hướng dẫn sử dụng: Gateway CAN ↔ Ethernet (PduR)
+# Hướng dẫn sử dụng: Gateway CAN ↔ Ethernet và CAN → CAN (PduR)
 
-Tool sinh **System Description** (file network ARXML) có gateway PduR giữa CAN và Ethernet. Import file này
-vào DaVinci Configurator thì DaVinci tự tạo PduR routing path, SoAd PduRoute / SocketRoute (header ID) và
-CanIf PDU, không phải cấu hình ECUC bằng tay.
+Tool sinh **System Description** (file network ARXML) có gateway PduR giữa CAN và Ethernet, và giữa các bus CAN
+với nhau. Import file này vào DaVinci Configurator thì DaVinci tự tạo PduR routing path, SoAd PduRoute /
+SocketRoute (header ID) và CanIf PDU, không phải cấu hình ECUC bằng tay.
+
+- **CAN → Ethernet / Ethernet → CAN**: message ECU gateway nhận trên CAN được đưa lên Ethernet, message ECU gửi
+  trên CAN được lấy từ Ethernet.
+- **CAN → CAN** (mục 12): có nhiều DBC, mỗi DBC một bus. Message ECU gateway **nhận trên bus A** và **gửi trên
+  bus B** được route thẳng từ bus A sang bus B.
 
 Có hai cách dùng: **giao diện** (mục 1–7) hoặc **command line** (mục 8). Cả hai ra cùng một kết quả.
 File network đã có gateway thì mở bằng **Gateway Editor** để xem và sửa lại (mục 11).
@@ -35,7 +40,7 @@ Tool dùng được cho bốn tình huống:
 
 | Cách | Lệnh |
 |---|---|
-| Trong EcucStudio | menu **Tools → CAN-Ethernet Gateway Generator…** |
+| Trong EcucStudio | menu **Tools → CAN Gateway Generator (CAN-Ethernet, CAN-CAN)…** |
 | Chạy riêng | `run.bat gateway` (thêm đường dẫn `gateway.json` để mở cấu hình đã lưu) |
 | Command line | `python -m ecucstudio gateway gui [gateway.json]` |
 
@@ -199,6 +204,10 @@ Hai chiều có thể dùng chung một socket.
 
 ## 4. Tab **Options & Naming** (không bắt buộc)
 
+- **CAN <-> Ethernet routes**: tạo route CAN ↔ Ethernet (mặc định bật). Tắt đi khi chỉ cần CAN → CAN: không cần
+  điền tab Ethernet và file không có phần Ethernet nào.
+- **CAN -> CAN routes**: ghép message giữa các bus (mục 12, mặc định bật).
+  - **also pair renamed messages**: ghép cả message bị đổi tên nhưng cùng CAN ID và độ dài (mặc định bật).
 - **Set bit 31 for extended CAN ids**: luôn đặt bit 31 cho CAN ID extended (kiểu `Can_IdType`).
   Mặc định tắt, tức header = CAN ID đệm 0.
 - **Ethernet PDU content**:
@@ -224,7 +233,7 @@ Bảng route (một dòng là một message):
 | Cột | Ý nghĩa |
 |---|---|
 | Enabled | `yes` / `no` (dòng xám là route bị tắt) |
-| Direction | `CAN->ETH` hoặc `ETH->CAN` |
+| Direction | `CAN->ETH`, `ETH->CAN` hoặc `CAN->CAN` (cột Bus ghi `Body -> Chassis`) |
 | CAN ID, Frame, Length, Cycle ms | thông tin từ DBC (hoặc từ base nếu frame đã có) |
 | CAN PDU / Ethernet PDU | tên PDU hai đầu gateway |
 | Header ID | SoAd header ID (dòng cam = đã tự thêm cờ vì trùng) |
@@ -234,7 +243,7 @@ Thao tác trên bảng:
 
 - **Double-click**: bật/tắt route, nhập header ID tay (ví dụ `0x123`), đổi tên PDU Ethernet.
 - **Space**: đảo bật/tắt các dòng đang chọn.
-- **Chuột phải**: Enable / Disable / Edit… / Reset overrides.
+- **Chuột phải**: Enable / Disable / Edit… / Add CAN -> CAN link… / Reset overrides.
 
 Mọi thay đổi trên bảng được lưu vào cấu hình và áp dụng lại mỗi lần Analyze.
 
@@ -418,7 +427,10 @@ python -m ecucstudio gateway generate gateway.json
     "eth_to_can": {"local_socket": "SA_GwEcu_Rx", "remote_socket": "SA_Tester_Tx"}
   },
   "header": {"extended_flag": false, "flag_shift": 29},
-  "options": {"eth_signals": "copy", "can_tx_timing": "event", "add_fibex": true}
+  "options": {"eth_signals": "copy", "can_tx_timing": "event", "add_fibex": true,
+              "eth_routes": true, "can_routes": true, "can_match_id": true},
+  "can_gateway": {"Body/DoorStatus->Chassis/DoorStatus": {"enabled": false}},
+  "can_links": [{"src_bus": "Body", "src_msg": "EngineData", "dst_bus": "Chassis", "dst_msg": "EngData_Fwd"}]
 }
 ```
 
@@ -439,6 +451,8 @@ python -m ecucstudio gateway generate gateway.json
 - `messages`: chỉnh từng message theo tên trong DBC. `enabled` tắt/bật route, `header_id` đặt header ID tay,
   `eth_pdu` đổi tên PDU Ethernet.
 - `naming` (không ghi thì dùng mặc định): các mẫu tên như ở tab Options & Naming.
+- CAN → CAN (mục 12): `options.eth_routes` / `can_routes` / `can_match_id`; `can_gateway` bật/tắt từng cặp theo
+  khoá `<bus nguồn>/<message>-><bus đích>/<message>` (khoá hiện trong bảng route); `can_links` thêm cặp tay.
 
 ## 10. Lỗi thường gặp
 
@@ -533,9 +547,50 @@ python -m ecucstudio gateway edit network.arxml --header EngineData_oBody_Eth=0x
 ```
 `edit` dừng và không ghi gì nếu có lỗi (ví dụ header ID trùng). `--keep-pdus` chỉ xoá mapping.
 
+## 12. Gateway CAN → CAN (nhiều DBC, mỗi DBC một bus)
+
+Thêm mỗi DBC một dòng ở tab **Input**, mỗi dòng chọn **node của ECU gateway trong DBC đó**. Tên node được phép
+khác nhau giữa các DBC (ví dụ `Gw_Body` trong DBC Body, `Gw_Chassis` trong DBC Chassis): tool chỉ cần biết node
+nào là ECU đang làm trên từng bus.
+
+Khi **Analyze**, tool ghép message ECU **nhận** trên một bus với message ECU **gửi** trên bus khác, theo thứ tự:
+
+1. cùng tên message;
+2. cùng tên sau khi bỏ tiền tố / hậu tố gateway (`XGW_`, `GW_`, `GTW_`, `GWY_`, `_GW`, `_GTW`), ví dụ
+   `BrakeStatus` ↔ `GW_BrakeStatus`;
+3. (tuỳ chọn **also pair renamed messages**) cùng CAN ID, cùng loại ID (standard/extended) và cùng độ dài.
+
+Mỗi cặp được kiểm tra trước khi route (PduR gateway chuyển **nguyên PDU**, không đổi signal):
+
+| Trường hợp | Kết quả |
+|---|---|
+| cùng độ dài, cùng layout signal (start bit, độ dài, byte order) | route, `yes` |
+| bus đích chỉ định nghĩa một phần signal của bus nguồn | route, Remark ghi "defines 1 of the 2 signals" |
+| độ dài khác nhau | **không** route: "length differs" |
+| layout signal khác nhau | **không** route: "signal layout differs (a signal gateway would be needed)" |
+| message nhận trên **nhiều** bus (N:1) | **không** route: chọn nguồn bằng **Add CAN -> CAN link…** |
+| CAN ID khác nhau (ví dụ `0x200 -> 0x210`) | vẫn route nếu độ dài và layout khớp, cột CAN ID ghi cả hai |
+
+Quan hệ với CAN ↔ Ethernet:
+
+- Message bus đích đã được cấp từ bus CAN khác thì route `ETH->CAN` của nó tự tắt (Remark "fed from Body
+  (CAN->CAN)"), để PDU không có hai nguồn. Tắt cặp CAN → CAN thì route `ETH->CAN` tự bật lại.
+- Message nguồn vẫn lên Ethernet như cũ (1:N: một PDU CAN, hai đích), Remark ghi "also routed to Ethernet".
+- Chỉ cần CAN → CAN: bỏ **CAN <-> Ethernet routes** ở tab Options. Không cần điền tab Ethernet; bảng route chỉ
+  còn các dòng `CAN->CAN`.
+
+Trên bảng route, dòng `CAN->CAN` dùng như các dòng khác: Space / chuột phải để bật tắt, double-click xem chi tiết
+cặp. **Add CAN -> CAN link…** (chuột phải) ghép tay một message nhận với một message gửi trên bus khác (dùng khi
+tên và CAN ID đều khác, hoặc để chọn nguồn cho trường hợp N:1). Link nằm trong `can_links` của cấu hình; dòng
+link có thêm mục **Remove CAN -> CAN link**.
+
+Phần tử được tạo cho mỗi cặp: một `I-PDU-MAPPING` trong GATEWAY của ECU, từ PDU-TRIGGERING của bus nguồn tới
+PDU-TRIGGERING của bus đích. DaVinci tạo PduR routing path CanIf → CanIf. Sinh lại (mục 7.1) giữ các cặp không
+đổi; cặp bị tắt hiện dòng `removed` như route Ethernet.
+
 ## Giới hạn hiện tại
 
-- Route 1:1. PDU CAN đã có route trong base thì được thêm đích Ethernet (thành 1:N); chưa cấu hình được
-  N:1 / 1:N trong tool.
+- Route nguyên PDU. PDU CAN đã có route trong base thì được thêm đích Ethernet (thành 1:N). CAN → CAN có 1:N
+  (một nguồn, nhiều bus đích) nhưng không có N:1; khác layout signal cần signal gateway, tool không tạo.
 - Message multiplexed và PDU không phải I-SIGNAL-I-PDU (ví dụ SecOC) được route nguyên PDU, không có signal.
 - TCP: tạo TCP-TP-PORT và TCP-ROLE, các tham số TCP khác dùng mặc định của DaVinci.

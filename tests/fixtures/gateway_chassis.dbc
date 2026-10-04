@@ -1,0 +1,48 @@
+VERSION ""
+
+
+NS_ :
+	CM_
+	BA_DEF_
+	BA_DEF_DEF_
+	BA_
+	VAL_
+
+BS_:
+
+BU_: GwEcu Steering Brake
+
+BO_ 256 EngineData: 8 GwEcu
+ SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Steering
+ SG_ EngineTemp : 16|8@1- (1,-40) [-40|87] "degC" Steering
+
+BO_ 2147484416 GW_BrakeStatus: 16 GwEcu
+ SG_ BrakeActive : 24|1@1+ (1,0) [0|1] "" Steering
+
+BO_ 528 DoorStatus: 2 GwEcu
+ SG_ DoorOpen : 4|1@1+ (1,0) [0|1] "" Steering
+
+BO_ 2147483904 ExtSameId: 4 GwEcu
+ SG_ ExtData : 0|32@1+ (1,0) [0|0] "" Steering
+
+BO_ 768 GwCommand: 4 Steering
+ SG_ Cmd : 0|8@1+ (1,0) [0|255] "" GwEcu
+ SG_ Counter : 8|4@1+ (1,0) [0|15] "" GwEcu
+
+BO_ 1024 ChassisInfo: 8 Steering
+ SG_ SteerAngle : 0|16@1- (0.1,0) [-3276.8|3276.7] "deg" GwEcu
+
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+BA_DEF_ BO_ "VFrameFormat" ENUM "StandardCAN","ExtendedCAN","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","StandardCAN_FD","ExtendedCAN_FD";
+BA_DEF_ "Baudrate" INT 0 1000000;
+BA_DEF_ "DBName" STRING ;
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_DEF_DEF_ "VFrameFormat" "StandardCAN";
+BA_DEF_DEF_ "Baudrate" 500000;
+BA_DEF_DEF_ "DBName" "";
+BA_ "DBName" "Chassis";
+BA_ "Baudrate" 500000;
+BA_ "GenMsgCycleTime" BO_ 256 10;
+BA_ "GenMsgCycleTime" BO_ 768 50;
+BA_ "GenMsgCycleTime" BO_ 1024 20;
+BA_ "VFrameFormat" BO_ 2147484416 15;

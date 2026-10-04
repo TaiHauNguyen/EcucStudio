@@ -13,22 +13,40 @@ COLUMNS = ("Enabled", "Change", "Direction", "Bus", "Message", "CAN ID", "Frame"
 def route_rows(plan: Plan, removed: bool = True) -> list[tuple]:
     """One row per planned route; with *removed* also one per route of the previous file that is not
     generated any more."""
+    return [row for _, row in route_items(plan, removed)]
+
+
+def route_items(plan: Plan, removed: bool = True) -> list[tuple]:
+    """(Route | CanRoute | PrevRoute, row): CAN <-> Ethernet routes (not listed when that routing is off),
+    CAN -> CAN routes, then the removed routes of the previous file."""
     rows = []
-    for r in plan.routes:
+    eth = plan.cfg.options.eth_routes if plan.cfg is not None else True
+    for r in plan.routes if eth else ():
         m = r.message
-        rows.append((
+        rows.append((r, (
             "yes" if r.enabled else "no", r.change if r.enabled else "", r.direction, r.bus.name, m.name, m.id_text,
             ("EXT" if m.extended else "STD") + (" FD" if m.fd else ""), r.length, m.cycle_ms or "",
             (r.can_pdu or "").rsplit("/", 1)[-1] or r.can_pdu, r.eth_pdu,
             r.header_text if r.header_id >= 0 and r.enabled else "", r.header_note if r.enabled else "",
-            "; ".join(([r.reason] if r.reason else []) + r.notes)))
+            "; ".join(([r.reason] if r.reason else []) + r.notes))))
+    for c in plan.can_routes:
+        s, d = c.src.message, c.dst.message
+        msg = s.name if s.name == d.name else f"{s.name} -> {d.name}"
+        cid = s.id_text if s.can_id == d.can_id else f"{s.id_text} -> {d.id_text}"
+        pdus = f"{(c.src.can_pdu or '').rsplit('/', 1)[-1]} -> {(c.dst.can_pdu or '').rsplit('/', 1)[-1]}"
+        rows.append((c, (
+            "yes" if c.enabled else "no", c.change if c.enabled else "", "CAN->CAN",
+            f"{c.src.bus.name} -> {c.dst.bus.name}", msg, cid,
+            ("EXT" if d.extended else "STD") + (" FD" if d.fd else ""), c.dst.length, s.cycle_ms or "", pdus,
+            "", "", "", "; ".join(([c.reason] if c.reason else []) + c.notes))))
     if removed:
         for p in plan.removed:
             can_id = "" if p.can_id is None else f"0x{p.can_id:X}"
-            rows.append(("-", "removed", p.direction, "", p.can_frame or p.can_pt.rsplit("/", 1)[-1], can_id, "", "",
-                         "", p.can_pt.rsplit("/", 1)[-1], p.eth_pdu,
-                         "" if p.header_id is None else f"0x{p.header_id:08X}", "",
-                         "in the previous file, not generated any more"))
+            target = p.eth_pdu or p.dst_pt.rsplit("/", 1)[-1]
+            rows.append((p, ("-", "removed", p.direction, "", p.can_frame or p.can_pt.rsplit("/", 1)[-1], can_id, "",
+                             "", "", p.can_pt.rsplit("/", 1)[-1], target,
+                             "" if p.header_id is None else f"0x{p.header_id:08X}", "",
+                             "in the previous file, not generated any more")))
     return rows
 
 
@@ -66,7 +84,17 @@ def summary(plan: Plan) -> str:
                      f"connector {bp.connector.rsplit('/', 1)[-1]}{' (new)' if bp.new_connector else ''}")
     n = len(plan.enabled_routes)
     lines.append(f"Routes           : {n} enabled of {len(plan.routes)}")
+    if plan.can_routes:
+        lines.append(f"CAN -> CAN       : {len(plan.enabled_can_routes)} enabled of {len(plan.can_routes)}")
     return "\n".join(lines)
+
+
+def count_text(eth: int, can: int) -> str:
+    """"3 CAN<->Ethernet + 2 CAN->CAN route(s)" (only the parts that exist)."""
+    parts = [f"{eth} CAN<->Ethernet"] if eth or not can else []
+    if can:
+        parts.append(f"{can} CAN->CAN")
+    return " + ".join(parts) + " route(s)"
 
 
 def inventory(base: Base) -> str:
