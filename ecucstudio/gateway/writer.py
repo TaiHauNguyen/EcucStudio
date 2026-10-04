@@ -17,6 +17,7 @@ from ..arxml import local, q
 from . import xmlorder
 from .base import Base
 from .planner import CAN_TO_ETH, Plan, Route, SignalSpec, choose_package, fmt, load_base
+from .regen import owned_items, write_meta
 from .xmlorder import E, R, T
 
 # FIBEX-ELEMENTS of the SYSTEM get these new element types (others only if the base file lists the type)
@@ -523,7 +524,7 @@ def _restamp(el, path: str, uuid_tags: set[str]):
             sub.attrib.pop("UUID")
 
 
-def extract_delta(base: Base, added: list, path: str) -> arxml.XmlFile:
+def extract_delta(base: Base, added: list, path: str, meta: tuple | None = None) -> arxml.XmlFile:
     """A file with only the *added* elements of *base*. Their existing ancestors are written as skeletons
     (SHORT-NAME only) so that DaVinci merges the file with the other input files of the project by path."""
     added_set = set(added)
@@ -558,9 +559,11 @@ def extract_delta(base: Base, added: list, path: str) -> arxml.XmlFile:
         dup = copy.deepcopy(el)
         _strip_ws(dup)
         place(mapping[el.getparent()], dup)
+    if meta is not None:
+        write_meta(droot, *meta)
     for e in droot.iter():
         e.tail = None
-        if len(e):
+        if len(e) and not (e.text or "").strip():
             e.text = None
     etree.indent(droot, space="  ")
     raw = b'<?xml version="1.0" encoding="UTF-8"?>\n' + etree.tostring(droot, encoding="UTF-8") + b"\n"
@@ -578,11 +581,16 @@ def generate(plan: Plan, base: Base | None = None, output: str | None = None) ->
     base = base or load_base(cfg)
     w = Writer(plan, base)
     w.apply()
+    # the file carries its configuration and the list of what this generation added (to regenerate it later)
+    conf = cfg.to_dict(os.path.dirname(out))
+    conf["output"] = conf["previous"] = ""
+    meta = (conf, owned_items(base, w.added))
     if plan.delta:
         # DaVinci project: only the new elements, as an additional input file next to the DBC files
-        doc = extract_delta(base, w.added, out)
+        doc = extract_delta(base, w.added, out, meta)
         doc.save(backup=os.path.exists(out))
     else:
+        write_meta(base.root, *meta)
         base.xf.path = out
         base.xf.save(backup=os.path.exists(out))
     return Result(out, plan.enabled_routes, w.created, plan.warnings + w.warnings)

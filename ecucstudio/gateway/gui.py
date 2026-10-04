@@ -14,6 +14,7 @@ from . import dbcread, dvproject, report
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
 from .config import BusInput, GatewayConfig, Naming, SocketSide
 from .planner import load_base, make_plan, new_ecu_name
+from .regen import config_from_file
 from .suggest import apply as apply_suggestions
 from .suggest import suggest as suggest_settings
 from .writer import generate
@@ -415,9 +416,22 @@ class GatewayWindow:
         ttk.Label(f, text="Output file:").grid(row=1, column=0, sticky="w", pady=2)
         ttk.Entry(f, textvariable=self.v_out).grid(row=1, column=1, sticky="we", pady=2)
         ttk.Button(f, text="Browse…", command=self.browse_out).grid(row=1, column=2, padx=4)
-        ttk.Label(f, text="Gateway ECU:").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Label(f, text="Previous gateway file:").grid(row=2, column=0, sticky="w", pady=2)
+        self.v_prev = tk.StringVar()
+        pf = ttk.Frame(f)
+        pf.grid(row=2, column=1, columnspan=2, sticky="we", pady=2)
+        e_prev = ttk.Entry(pf, textvariable=self.v_prev)
+        e_prev.pack(side="left", fill="x", expand=True)
+        e_prev.bind("<FocusOut>", lambda _e: self.load_base())
+        ttk.Button(pf, text="Browse…", command=self.browse_prev).pack(side="left", padx=4)
+        ttk.Button(pf, text="Clear", command=lambda: (self.v_prev.set(""), self.load_base())).pack(side="left")
+        Tooltip(e_prev, "Gateway file generated before and already imported in DaVinci. Its elements are taken "
+                        "out of the base and the routes that stay keep their Ethernet PDU names and header ids, so "
+                        "DaVinci keeps their configuration on the next Update. Set automatically by Open… of a "
+                        "generated .arxml")
+        ttk.Label(f, text="Gateway ECU:").grid(row=3, column=0, sticky="w", pady=2)
         ef = ttk.Frame(f)
-        ef.grid(row=2, column=1, sticky="w", pady=2)
+        ef.grid(row=3, column=1, sticky="w", pady=2)
         self.c_ecu = Choice(ef, width=60, on_change=self.ecu_changed)
         self.c_ecu.cb.pack(side="left")
         self.c_ecu.cb.bind("<FocusOut>", lambda _e: self.new_file_changed())
@@ -430,10 +444,10 @@ class GatewayWindow:
         Tooltip(self.c_schema, "Only for a new file (no base file). DaVinci 5.24 reads up to AUTOSAR_00049, "
                                "DaVinci 5.31 up to AUTOSAR_00053")
         self.base_info = ttk.Label(f, text="", foreground="#666666")
-        self.base_info.grid(row=3, column=1, sticky="w")
+        self.base_info.grid(row=4, column=1, sticky="w")
         lf = ttk.LabelFrame(f, text="CAN buses (DBC)", padding=6)
-        lf.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
-        f.rowconfigure(4, weight=1)
+        lf.grid(row=5, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        f.rowconfigure(5, weight=1)
         cols = ("dbc", "node", "channel", "bus", "dirs")
         self.t_bus = ttk.Treeview(lf, columns=cols, show="headings", height=4, selectmode="browse")
         for c, text, wd in zip(cols, ("DBC file", "Node", "CAN channel", "Bus name", "Directions"),
@@ -536,6 +550,10 @@ class GatewayWindow:
                                                                                                    padx=12)
         ttk.Checkbutton(o, text="Add new elements to the SYSTEM (FIBEX-ELEMENTS)",
                         variable=self.v_fibex).pack(anchor="w", pady=(6, 0))
+        self.v_onlyprev = tk.BooleanVar()
+        ttk.Checkbutton(o, text="Regeneration: on the buses of the previous gateway file, route only\n"
+                                "its messages (new messages stay off until you enable them)",
+                        variable=self.v_onlyprev).pack(anchor="w", pady=(6, 0))
         n = ttk.LabelFrame(f, text="Short-name patterns", padding=6)
         n.pack(side="left", fill="both", expand=True, padx=(8, 0))
         self.v_naming = {}
@@ -558,7 +576,7 @@ class GatewayWindow:
         top.pack(fill="both", expand=True)
         cols = report.COLUMNS
         self.t_routes = ttk.Treeview(top, columns=cols, show="headings", selectmode="extended", height=8)
-        widths = (60, 75, 80, 200, 90, 70, 55, 65, 200, 220, 95, 220, 380)
+        widths = (60, 65, 75, 80, 200, 90, 70, 55, 65, 200, 220, 95, 220, 380)
         for c, wd in zip(cols, widths):
             self.t_routes.heading(c, text=c, anchor="w")
             self.t_routes.column(c, width=wd, anchor="w", stretch=c == "Remark")
@@ -568,6 +586,8 @@ class GatewayWindow:
         ys.pack(side="left", fill="y")
         self.t_routes.tag_configure("off", foreground="#9e9e9e")
         self.t_routes.tag_configure("flag", foreground=COLORS["warning"])
+        self.t_routes.tag_configure("new", foreground=COLORS["info"])
+        self.t_routes.tag_configure("removed", foreground=COLORS["error"])
         self.t_routes.bind("<Double-1>", lambda _e: self.edit_route())
         self.t_routes.bind("<space>", lambda _e: self.toggle_routes())
         self.t_routes.bind("<Button-3>", self.route_menu)
@@ -582,7 +602,8 @@ class GatewayWindow:
 
     # ------------------------------------------------------------------ background work
     def _run(self, label, fn, done):
-        if self._busy:
+        if self._busy:                  # one job at a time: try again when the running one has finished
+            self.win.after(200, lambda: self._run(label, fn, done))
             return
         self._busy = True
         self.status.config(text=label + " …")
@@ -654,7 +675,10 @@ class GatewayWindow:
             return
         if not os.path.isfile(path):
             return
-        key = (os.path.abspath(path), os.path.getmtime(path))
+        prev = self.v_prev.get().strip()
+        prev_ok = bool(prev) and os.path.isfile(prev)
+        key = (os.path.abspath(path), os.path.getmtime(path), os.path.abspath(prev) if prev_ok else "",
+               os.path.getmtime(prev) if prev_ok else 0)
         if key == self._base_key:
             if then:
                 then()
@@ -673,17 +697,30 @@ class GatewayWindow:
             else:
                 self.base_info.config(text=f"{base.schema}: {len(base.ecus())} ECU, {len(base.eth_channels())} "
                                            f"Ethernet channel(s), {len(base.can_channels())} CAN channel(s)")
+            n = sum(getattr(base, "prev_removed", {}).values()) if getattr(base, "prev_removed", None) else 0
+            if n:
+                self.base_info.config(text=self.base_info.cget("text") + f"  -  {n} element(s) of the previous "
+                                                                          f"gateway file taken out")
             self.fill_from_base()
             self.status.config(text="Project loaded." if proj else "Base file loaded.")
             if then:
                 then()
 
+        out = self.v_out.get().strip()          # read the widgets here: work() runs in a thread
+
         def work():
-            if dvproject.is_project(path):
-                proj = dvproject.read(path)
-                return proj, dvproject.load_communication(proj)
-            return None, Base(path)
+            c = GatewayConfig(base=path, previous=prev if prev_ok else "", output=out)
+            return (dvproject.read(path) if dvproject.is_project(path) else None), load_base(c)
         self._run("Loading " + os.path.basename(path), work, done)
+
+    def browse_prev(self):
+        p = filedialog.askopenfilename(parent=self.win, title="Previous gateway file (already imported in DaVinci)",
+                                       filetypes=[("AUTOSAR XML", "*.arxml"), ("All files", "*.*")])
+        if p:
+            self.v_prev.set(os.path.normpath(p))
+            if not self.v_out.get().strip():
+                self.v_out.set(os.path.normpath(p))
+            self.load_base()
 
     def fill_from_base(self):
         b = self.base
@@ -902,11 +939,13 @@ class GatewayWindow:
         c.options.eth_signals = self.v_sigs.get()
         c.options.can_tx_timing = self.v_timing.get()
         c.options.add_fibex = self.v_fibex.get()
+        c.options.only_previous = self.v_onlyprev.get()
+        c.previous = self.v_prev.get().strip()
         for k, v in self.v_naming.items():
             setattr(c.naming, k, v.get().strip() or getattr(Naming(), k))
         return c
 
-    def show_config(self):
+    def show_config(self, then=None):
         c = self.cfg
         self.v_base.set(c.base)
         self.v_out.set(c.output)
@@ -922,12 +961,14 @@ class GatewayWindow:
         self.v_sigs.set(c.options.eth_signals)
         self.v_timing.set(c.options.can_tx_timing)
         self.v_fibex.set(c.options.add_fibex)
+        self.v_onlyprev.set(c.options.only_previous)
+        self.v_prev.set(c.previous)
         for k, v in self.v_naming.items():
             v.set(getattr(c.naming, k))
         self.refresh_buses()
         self.c_ecu.var.set(c.ecu)
         self._base_key = None
-        self.load_base()
+        self.load_base(then=then)
 
     def new_config(self):
         self.cfg, self.cfg_path, self.plan = GatewayConfig(), None, None
@@ -935,20 +976,33 @@ class GatewayWindow:
         self.fill_routes()
 
     def open_config_dialog(self):
-        p = filedialog.askopenfilename(parent=self.win, title="Gateway configuration",
-                                       filetypes=[("Gateway configuration", "*.json"), ("All files", "*.*")])
+        p = filedialog.askopenfilename(
+            parent=self.win, title="Gateway configuration or generated gateway file",
+            filetypes=[("Gateway configuration / generated gateway", "*.json *.arxml"),
+                       ("Gateway configuration", "*.json"), ("Generated gateway file", "*.arxml"),
+                       ("All files", "*.*")])
         if p:
             self.open_config(p)
 
     def open_config(self, path):
+        notes = []
         try:
-            self.cfg = GatewayConfig.load(path)
-        except (OSError, ValueError) as exc:
+            if path.lower().endswith(".arxml"):
+                self.cfg, notes = config_from_file(path)
+                self.cfg_path = None
+                self.win.title(f"{TITLE} - {os.path.basename(path)} (regenerate)")
+            else:
+                self.cfg = GatewayConfig.load(path)
+                self.cfg_path = os.path.abspath(path)
+                self.win.title(f"{TITLE} - {os.path.basename(path)}")
+        except Exception as exc:  # noqa: BLE001 - shown to the user
             messagebox.showerror(TITLE, f"Cannot read {path}:\n{exc}", parent=self.win)
             return
-        self.cfg_path = os.path.abspath(path)
-        self.win.title(f"{TITLE} - {os.path.basename(path)}")
-        self.show_config()
+        self.plan = None
+        self.fill_routes()
+        if notes:
+            self.show_messages(infos=notes)
+        self.show_config(then=self.analyze if self.cfg.previous and self.cfg.base else None)
 
     def save_config(self):
         if not self.cfg_path:
@@ -966,13 +1020,14 @@ class GatewayWindow:
 
     # ------------------------------------------------------------------ plan / generate
     def analyze(self, then=None):
-        cfg = self.collect()
-        if not cfg.base and not cfg.buses:
+        if not self.v_base.get().strip() and not self.cfg.buses:
             messagebox.showwarning(TITLE, "Add a DBC file (and select the base system description if the project "
                                           "already has one).", parent=self.win)
             return
 
         def run_plan():
+            cfg = self.collect()        # now the widgets show the loaded base and the configuration
+
             def done(plan):
                 self.plan = plan
                 self.fill_routes()
@@ -986,16 +1041,18 @@ class GatewayWindow:
         self.load_base(then=run_plan)
 
     def generate(self):
-        cfg = self.collect()
-        if not cfg.output:
+        out, base_path = self.v_out.get().strip(), self.v_base.get().strip()
+        if not out:
             messagebox.showwarning(TITLE, "Select the output file.", parent=self.win)
             return
-        if os.path.abspath(cfg.output) == os.path.abspath(cfg.base or "") and not messagebox.askyesno(
+        if os.path.abspath(out) == os.path.abspath(base_path or "") and not messagebox.askyesno(
                 TITLE, "The output file is the base file itself. Overwrite it (a .bak copy is kept)?",
                 parent=self.win):
             return
 
         def write(plan):
+            cfg = plan.cfg
+
             def work():
                 res = generate(plan, load_base(cfg))
                 csv_path = os.path.splitext(res.output)[0] + "_gateway_routes.csv"
@@ -1006,7 +1063,13 @@ class GatewayWindow:
                 res, csv_path = r
                 self.show_messages([], res.warnings, [f"Written {res.output}", f"Route table: {csv_path}"])
                 self.status.config(text=f"Written {os.path.basename(res.output)}: {len(res.routes)} route(s)")
-                if dvproject.is_project(cfg.base):
+                regen = cfg.previous and os.path.abspath(cfg.previous) == os.path.abspath(res.output)
+                kept = sum(1 for r in plan.enabled_routes if r.change == "kept")
+                new = sum(1 for r in plan.enabled_routes if r.change == "new")
+                if regen:
+                    how = (f"again: it is already in Input Files, so run Update in DaVinci. Kept {kept}, new {new}, "
+                           f"removed {len(plan.removed)} route(s); the configuration of the kept routes stays")
+                elif dvproject.is_project(cfg.base):
                     how = ("as an additional system description for the ECU instance next to the DBC files, "
                            "then run Update")
                 elif cfg.base:
@@ -1025,8 +1088,12 @@ class GatewayWindow:
         if not self.plan:
             return
         self._route_by_iid = {}
-        for i, (r, row) in enumerate(zip(self.plan.routes, report.route_rows(self.plan))):
-            tags = ("off",) if not r.enabled else (("flag",) if r.header_note.startswith("flag") else ())
+        rows = report.route_rows(self.plan)
+        for k, row in enumerate(rows[len(self.plan.routes):]):
+            t.insert("", "end", iid=f"removed-{k}", values=row, tags=("removed",))
+        for i, (r, row) in enumerate(zip(self.plan.routes, rows)):
+            tags = ("off",) if not r.enabled else (("flag",) if r.header_note.startswith("flag") else
+                                                   (("new",) if r.change == "new" else ()))
             t.insert("", "end", iid=str(i), values=row, tags=tags)
             self._route_by_iid[str(i)] = r
 

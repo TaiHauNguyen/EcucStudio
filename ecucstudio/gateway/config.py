@@ -101,12 +101,15 @@ class Options:
     eth_signals: str = "copy"       # copy: ETH PDU gets the same signal layout | none: opaque PDU
     can_tx_timing: str = "event"    # timing of CAN PDUs the gateway sends: event | dbc (cycle time from DBC)
     add_fibex: bool = True          # add new elements to the SYSTEM's FIBEX-ELEMENTS
+    only_previous: bool = False     # regeneration: route only the messages of the previous gateway file
 
 
 @dataclass
 class GatewayConfig:
     base: str = ""                  # existing system description (network.arxml); empty = create a new file
     output: str = ""                # file to write (base + gateway)
+    previous: str = ""              # gateway file of the previous generation (already imported in DaVinci):
+                                    # its elements are taken out of the base, its header ids / names are kept
     ecu: str = ""                   # gateway ECU-INSTANCE (path or short name; empty = auto). Without a base
                                     # file: name of the new ECU-INSTANCE (empty = node of the first DBC)
     schema: str = "AUTOSAR_00052"   # schema of a new file (without base file); DaVinci 5.24 reads <= AUTOSAR_00049
@@ -121,7 +124,7 @@ class GatewayConfig:
     def to_dict(self, rel_to: str | None = None) -> dict:
         d = dataclasses.asdict(self)
         if rel_to:
-            for key in ("base", "output"):
+            for key in ("base", "output", "previous"):
                 d[key] = _rel(d[key], rel_to)
             for b in d["buses"]:
                 b["dbc"] = _rel(b["dbc"], rel_to)
@@ -145,6 +148,7 @@ class GatewayConfig:
         eth["eth_to_can"] = build(SocketSide, eth.get("eth_to_can"))
         cfg = cls(base=d.get("base", ""), output=d.get("output", ""), ecu=d.get("ecu", ""),
                   system=d.get("system", ""), schema=d.get("schema", "AUTOSAR_00052"),
+                  previous=d.get("previous", ""),
                   buses=[build(BusInput, b) for b in d.get("buses", [])],
                   ethernet=build(EthernetSettings, eth),
                   header=build(HeaderSettings, d.get("header")),
@@ -153,6 +157,7 @@ class GatewayConfig:
         if rel_to:
             cfg.base = _abs(cfg.base, rel_to)
             cfg.output = _abs(cfg.output, rel_to)
+            cfg.previous = _abs(cfg.previous, rel_to)
             for b in cfg.buses:
                 b.dbc = _abs(b.dbc, rel_to)
         return cfg
@@ -168,10 +173,10 @@ def _rel(p: str, base: str) -> str:
     if not p:
         return p
     try:
-        r = os.path.relpath(os.path.abspath(p), base)
+        # relative also with "..": a project and its gateway file are usually moved / checked out together
+        return os.path.relpath(os.path.abspath(p), base)
     except ValueError:              # other drive
         return os.path.abspath(p)
-    return r if not r.startswith("..") else os.path.abspath(p)
 
 
 def _abs(p: str, base: str) -> str:

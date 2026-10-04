@@ -141,6 +141,12 @@ SocketRoute (header ID) và CanIf PDU — không phải sửa ECUC bằng tay.
 
 Hướng dẫn sử dụng đầy đủ: [docs/GATEWAY.md](docs/GATEWAY.md).
 
+**Đã import file gateway vào DaVinci, giờ cần thêm/bớt DBC hoặc message?** Generator → **Open…** chính file
+gateway `.arxml` (cấu hình được nhúng trong file; file của bản cũ được dựng lại từ nội dung), thay đổi, Generate
+rồi **Update** trong DaVinci. Route giữ nguyên ra y hệt (tên, UUID, header ID), nên DaVinci giữ nguyên cấu hình
+ECUC của chúng, kể cả tham số đã sửa tay; chỉ phần thêm/bớt thay đổi. Chi tiết: mục 7.1 của
+[docs/GATEWAY.md](docs/GATEWAY.md).
+
 File network **đã có gateway** (do tool sinh ra hoặc từ PREEvision): mở bằng **Gateway Editor** (nút *Edit
 Existing Gateway…* của generator, menu *Tools → CAN-Ethernet Gateway Editor…*, hoặc `gateway editor <file>`) để
 xem tất cả route, sửa header ID / socket connection / port / IP, xoá route (dọn luôn phần tử Ethernet chỉ route đó
@@ -210,7 +216,7 @@ ecucstudio/
   gui/          tkinter: app, tree, editor, properties, validation_view, console, dialogs
   gateway/      gateway CAN <-> Ethernet: dbcread, base (dò file network), planner (route, header ID),
                 writer (ghi ARXML theo thứ tự schema), xmlorder, report, suggest, dvproject (.dpa),
-                existing (đọc / sửa gateway có sẵn), cli, gui, editor_gui
+                existing (đọc / sửa gateway có sẵn), regen (sinh lại file đã import), cli, gui, editor_gui
 rules/          rule plugin (*.py)
 tests/          unittest trên bản sao project thật; tests/fixtures: dữ liệu tổng hợp cho gateway
 ```

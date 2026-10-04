@@ -6,20 +6,29 @@ import csv
 from .base import Base
 from .planner import Plan
 
-COLUMNS = ("Enabled", "Direction", "Bus", "Message", "CAN ID", "Frame", "Length", "Cycle ms", "CAN PDU",
+COLUMNS = ("Enabled", "Change", "Direction", "Bus", "Message", "CAN ID", "Frame", "Length", "Cycle ms", "CAN PDU",
            "Ethernet PDU", "Header ID", "Header note", "Remark")
 
 
-def route_rows(plan: Plan) -> list[tuple]:
+def route_rows(plan: Plan, removed: bool = True) -> list[tuple]:
+    """One row per planned route; with *removed* also one per route of the previous file that is not
+    generated any more."""
     rows = []
     for r in plan.routes:
         m = r.message
         rows.append((
-            "yes" if r.enabled else "no", r.direction, r.bus.name, m.name, m.id_text,
+            "yes" if r.enabled else "no", r.change if r.enabled else "", r.direction, r.bus.name, m.name, m.id_text,
             ("EXT" if m.extended else "STD") + (" FD" if m.fd else ""), r.length, m.cycle_ms or "",
             (r.can_pdu or "").rsplit("/", 1)[-1] or r.can_pdu, r.eth_pdu,
-            r.header_text if r.header_id >= 0 else "", r.header_note,
+            r.header_text if r.header_id >= 0 and r.enabled else "", r.header_note if r.enabled else "",
             "; ".join(([r.reason] if r.reason else []) + r.notes)))
+    if removed:
+        for p in plan.removed:
+            can_id = "" if p.can_id is None else f"0x{p.can_id:X}"
+            rows.append(("-", "removed", p.direction, "", p.can_frame or p.can_pt.rsplit("/", 1)[-1], can_id, "", "",
+                         "", p.can_pt.rsplit("/", 1)[-1], p.eth_pdu,
+                         "" if p.header_id is None else f"0x{p.header_id:08X}", "",
+                         "in the previous file, not generated any more"))
     return rows
 
 
@@ -31,7 +40,7 @@ def write_csv(plan: Plan, path: str):
 
 
 def text_table(plan: Plan) -> str:
-    cols = (0, 1, 2, 3, 4, 5, 6, 9, 10, 11)
+    cols = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12)
     rows = [tuple(str(x) for x in r) for r in route_rows(plan)]
     head = tuple(COLUMNS[i] for i in cols)
     data = [tuple(r[i] for i in cols) for r in rows]

@@ -402,7 +402,7 @@ class GatewayTest(unittest.TestCase):
         self.assertTrue(any("output file" in e for e in make_plan(cfg).errors))
 
     # ------------------------------------------------------------------ DaVinci project as the source
-    def _project(self):
+    def _project(self, extra_input: str = ""):
         """A DaVinci project folder whose merged communication description is the synthetic base file."""
         proj = os.path.join(self.tmp, "Proj")
         os.makedirs(os.path.join(proj, "Config", "System"))
@@ -416,6 +416,7 @@ class GatewayTest(unittest.TestCase):
     <Display>
         <FileSet Id="">
             <File Order="0" EcuInstance="GwEcu" Hash="0" FileCategory="legacy_communication_data">$(DpaProjectFolder)/Body.dbc</File>
+            EXTRA
         </FileSet>
         <Merge>
             <Path Id="ECU-INSTANCE" ARPath="/Topology/Ecus/GwEcu"/>
@@ -423,7 +424,8 @@ class GatewayTest(unittest.TestCase):
         </Merge>
     </Display>
 </ProjectAssistant>
-''')
+'''.replace("EXTRA", f'<File Order="1" EcuInstance="GwEcu" Hash="0" FileCategory="communication_system_extract">'
+                      f'{extra_input}</File>' if extra_input else ""))
         return dpa
 
     def test_project_reader(self):
@@ -653,6 +655,149 @@ class GatewayTest(unittest.TestCase):
         m.delete_routes(m.routes)
         self.assertEqual(m.routes, [])
         m.save()
+
+    # ------------------------------------------------------------------ regenerating an imported gateway file
+    def _dbc_only(self, out):
+        cfg = GatewayConfig(base="", output=out)
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+        e = cfg.ethernet
+        e.vlan_id, e.ecu_ip = 20, "10.0.20.1"
+        e.can_to_eth = SocketSide(local_port=42000, remote_ip="10.0.20.2", remote_port=42000)
+        e.eth_to_can = SocketSide(local_port=42001, remote_ip="10.0.20.2", remote_port=42001)
+        return cfg
+
+    def test_regen_unchanged_is_identical(self):
+        from ecucstudio.gateway.regen import config_from_file, read_meta
+        generate(make_plan(self._dbc_only(self.out)))
+        with open(self.out, "rb") as fh:
+            v1 = fh.read()
+        meta = read_meta(Base(self.out).root)
+        self.assertTrue(meta["owned"]["elements"])
+        cfg, notes = config_from_file(self.out)
+        self.assertEqual(os.path.normcase(cfg.previous), os.path.normcase(self.out))
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual({r.change for r in plan.enabled_routes}, {"kept"})
+        self.assertEqual(plan.removed, [])
+        generate(plan)
+        with open(self.out, "rb") as fh:
+            self.assertEqual(fh.read(), v1)
+        self._xsd(self.out)
+
+    def test_regen_changes_keep_header_ids(self):
+        from ecucstudio.gateway.existing import GatewayModel
+        from ecucstudio.gateway.regen import config_from_file
+        generate(make_plan(self._dbc_only(self.out)))
+        before = {r.eth.name: r.eth.ids[0].header_id for r in GatewayModel(self.out).routes}
+        self.assertEqual(before["ExtSameId_oBody_Eth"], 0x20000100)      # flag because EngineData has 0x100
+        cfg, _ = config_from_file(self.out)
+        cfg.buses[0].messages["EngineData"] = {"enabled": False}       # remove a message
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", new_channel=True, bus="Chassis"))   # add a bus
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual([p.eth_pdu for p in plan.removed], ["EngineData_oBody_Eth"])
+        changes = collections.Counter(r.change for r in plan.enabled_routes)
+        self.assertEqual(changes, {"kept": 4, "new": 5})
+        generate(plan)
+        after = {r.eth.name: r.eth.ids[0].header_id for r in GatewayModel(self.out).routes}
+        self.assertNotIn("EngineData_oBody_Eth", after)
+        for name in ("DoorStatus_oBody_Eth", "ExtSameId_oBody_Eth", "BrakeStatus_oBody_Eth", "GwCommand_oBody_Eth"):
+            self.assertEqual(after[name], before[name], name)              # kept, even 0x20000100
+        self.assertNotIn(after["EngineData_oChassis_Eth"], {after["DoorStatus_oBody_Eth"], after["ExtSameId_oBody_Eth"]})
+        root, idx = index(self.out)
+        self.assertNotIn("/Communication/PDUs/EngineData_oBody_Eth", idx)
+        self.assertIn("/Topology/Clusters/Chassis_Cluster/Chassis", idx)
+        for r in root.iter():
+            if isinstance(r.tag, str) and r.get("DEST"):
+                self.assertIn(r.text.strip(), idx, r.text)
+        self._xsd(self.out)
+        # removing the bus again removes its routes
+        cfg, _ = config_from_file(self.out)
+        cfg.buses = cfg.buses[:1]
+        plan = make_plan(cfg)
+        self.assertEqual(len(plan.removed), 5)
+        generate(plan)
+        self.assertNotIn("/Topology/Clusters/Chassis_Cluster", index(self.out)[1])
+
+    def _imported(self, gen_cfg: GatewayConfig, dpa: str):
+        """Simulate the DaVinci import of the gateway file generated with *gen_cfg*: the project's communication
+        description becomes base + gateway (same elements at the same paths)."""
+        cfg = GatewayConfig(base=BASE, output=os.path.join(os.path.dirname(dpa), "Config", "System",
+                                                             "Communication.arxml"), ethernet=gen_cfg.ethernet)
+        off = {"enabled": False}
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", channel="Body", bus="Body_Cluster", tx=False,
+                                  messages={"EngineData": off, "BrakeStatus": off, "ExtSameId": off}))
+        plan = make_plan(cfg)
+        self.assertEqual([r.message.name for r in plan.enabled_routes], ["DoorStatus"])
+        generate(plan)
+
+    def test_regen_project_file(self):
+        from ecucstudio.gateway.regen import config_from_file
+        delta = os.path.join(self.tmp, "GwEcu_CanEthGateway.arxml")
+        dpa = self._project(extra_input=delta)
+        cfg = GatewayConfig(base=dpa, output=delta)
+        cfg.buses.append(BusInput(channel="Body"))
+        cfg.ethernet.can_to_eth = SocketSide(local_socket="SA_GwEcu_Tx", remote_socket="SA_Tester_Rx")
+        generate(make_plan(cfg))
+        with open(delta, "rb") as fh:
+            v1 = fh.read()
+        self._imported(cfg, dpa)
+        # without "previous" the imported routes look already routed: nothing would be written again
+        plain = make_plan(GatewayConfig(base=dpa, output=delta, buses=[BusInput(channel="Body")],
+                                        ethernet=cfg.ethernet))
+        self.assertEqual(plain.enabled_routes, [])
+        # with the previous file the imported elements are taken out and everything is regenerated
+        cfg2, _ = config_from_file(delta)
+        plan = make_plan(cfg2)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual([r.change for r in plan.enabled_routes], ["kept"])
+        generate(plan)
+        with open(delta, "rb") as fh:
+            self.assertEqual(fh.read(), v1)
+
+    def test_regen_old_file_without_metadata(self):
+        """Files of older versions carry no configuration: it is reconstructed from the content."""
+        from ecucstudio.gateway.regen import config_from_file
+        delta = os.path.join(self.tmp, "GwEcu_CanEthGateway.arxml")
+        dpa = self._project(extra_input=delta)
+        cfg = GatewayConfig(base=dpa, output=delta)
+        cfg.buses.append(BusInput(channel="Body"))
+        cfg.ethernet.can_to_eth = SocketSide(local_port=43000, remote_ip="10.0.10.7", remote_port=43000)
+        cfg.ethernet.eth_to_can = SocketSide(local_port=43001, remote_ip="10.0.10.7", remote_port=43001)
+        generate(make_plan(cfg))
+        xf = Base(delta).xf                                  # strip the metadata = file of an older version
+        admin = xf.root.find(q("ADMIN-DATA"))
+        xf.root.remove(admin)
+        xf.save(backup=False)
+        before_root, before = index(delta)
+        self._imported(cfg, dpa)
+        cfg2, notes = config_from_file(delta)
+        self.assertTrue(any("older version" in n for n in notes))
+        self.assertEqual(os.path.normcase(cfg2.base), os.path.normcase(dpa))      # project found
+        self.assertTrue(cfg2.options.only_previous)
+        self.assertEqual(cfg2.ethernet.can_to_eth.local_port, 43000)
+        self.assertEqual(cfg2.ethernet.can_to_eth.remote_ip, "10.0.10.7")
+        plan = make_plan(cfg2)
+        self.assertEqual(plan.errors, [])
+        generate(plan)
+        after_root, after = index(delta)
+        self.assertEqual(set(before), set(after))
+        self.assertEqual({p: e.get("UUID") for p, e in before.items()}, {p: e.get("UUID") for p, e in after.items()})
+
+    def test_regen_cli(self):
+        import contextlib
+        import io
+        from ecucstudio.gateway import cli
+        generate(make_plan(self._dbc_only(self.out)))
+        conf = os.path.join(self.tmp, "gw.json")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["reopen", self.out, "-o", conf]), 0)
+            self.assertEqual(cli.main(["plan", self.out]), 0)
+            self.assertEqual(cli.main(["generate", self.out]), 0)
+        self.assertIn("5 route(s) kept, 0 new, 0 removed", buf.getvalue())
+        with open(conf, encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh)["previous"])
 
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))

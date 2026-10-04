@@ -486,9 +486,7 @@ class EditorWindow:
             self.save()
         from .gui import open_window
         top = open_window(self.win)
-        gw = top.gateway
-        gw.cfg.base = gw.cfg.output = self.model.path
-        gw.show_config()
+        top.gateway.open_config(self.model.path)
         self.say("Generator opened with this file as base and output; after Generate, come back here (the file is "
                  "reloaded automatically).")
 

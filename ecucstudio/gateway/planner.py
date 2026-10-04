@@ -76,6 +76,8 @@ class Route:
     message: dbcread.Message
     enabled: bool = True
     reason: str = ""            # why it is disabled / special
+    change: str = ""            # regeneration: "kept" / "new" compared with the previous gateway file
+    locked: bool = False        # header id kept from the previous gateway file
     length: int = 0
     # CAN side: existing elements (paths) or names of new ones
     can_ft: str = ""            # existing CAN-FRAME-TRIGGERING path
@@ -168,6 +170,8 @@ class Plan:
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     infos: list[str] = field(default_factory=list)
+    previous: str = ""                                 # gateway file of the previous generation
+    removed: list = field(default_factory=list)        # PrevRoute of the previous file that are not generated
 
     @property
     def enabled_routes(self) -> list[Route]:
@@ -216,12 +220,17 @@ def new_ecu_name(cfg: GatewayConfig) -> str:
 
 def load_base(cfg: GatewayConfig) -> Base:
     """The base file of *cfg*: a network file, the communication description of a DaVinci project (.dpa),
-    or a new system description when no base file is given."""
+    or a new system description when no base file is given. The elements of the previous generation
+    (cfg.previous) are taken out (base.prev_removed, base.prev_problem)."""
+    from .regen import base_without_previous
     if dvproject.is_project(cfg.base):
-        return dvproject.load_communication(dvproject.read(cfg.base))
-    if cfg.base:
-        return Base(cfg.base)
-    return new_document(cfg.output or "network_gateway.arxml", new_ecu_name(cfg), cfg.schema or "AUTOSAR_00052")
+        base = dvproject.load_communication(dvproject.read(cfg.base))
+    elif cfg.base:
+        base = Base(cfg.base)
+    else:
+        return new_document(cfg.output or "network_gateway.arxml", new_ecu_name(cfg), cfg.schema or "AUTOSAR_00052")
+    base, base.prev_removed, base.prev_problem = base_without_previous(cfg, base)
+    return base
 
 
 def choose_package(base: Base, tag: str) -> str:
@@ -239,6 +248,11 @@ class Planner:
         self.cfg = cfg
         self.project = dvproject.read(cfg.base) if dvproject.is_project(cfg.base) else None
         self.base = base or load_base(cfg)
+        self.previous = None
+        if cfg.previous and os.path.isfile(cfg.previous):
+            from .regen import load_previous
+            self.previous = load_previous(cfg.previous)
+        self._prev_used: set = set()
         self.dbc_cache = dbc_cache if dbc_cache is not None else {}
         self.plan = Plan(cfg)
         self._taken: set[str] = set()          # planned paths (to keep new names unique)
@@ -285,6 +299,19 @@ class Planner:
     # ------------------------------------------------------------------ main
     def run(self) -> Plan:
         b, cfg, plan = self.base, self.cfg, self.plan
+        if cfg.previous:
+            plan.previous = os.path.abspath(cfg.previous)
+            if self.previous is None:
+                self.warn(f"Previous gateway file {cfg.previous} does not exist: all routes are new.")
+            else:
+                problem = getattr(self.base, "prev_problem", "")
+                if problem:
+                    self.err(problem)
+                removed = getattr(self.base, "prev_removed", None)
+                n = sum(removed.values()) if removed else 0
+                self.info(f"Regenerating {os.path.basename(cfg.previous)} ({len(self.previous.routes)} route(s)): "
+                          + (f"its {n} element(s) were taken out of the base; " if n else "")
+                          + "Ethernet PDU names and header ids of the routes that stay are kept.")
         if self.project:
             plan.delta = True
             self.info(f"DaVinci project {self.project.name}: CAN messages are read from "
@@ -317,6 +344,12 @@ class Planner:
         plan.system = self._find(cfg.system, "SYSTEM") if cfg.system else b.system_for(plan.ecu)
         if cfg.options.add_fibex and plan.system is None:
             self.warn("The base file has no SYSTEM; new elements are not added to FIBEX-ELEMENTS.")
+        if self.previous is not None:
+            plan.removed = [p for p in self.previous.routes if id(p) not in self._prev_used]
+            self._describe_removed(plan.removed)
+            kept = sum(1 for r in plan.enabled_routes if r.change == "kept")
+            new = sum(1 for r in plan.enabled_routes if r.change == "new")
+            self.info(f"Compared with the previous file: {kept} route(s) kept, {new} new, {len(plan.removed)} removed.")
         if not plan.enabled_routes:
             self.warn("No message is selected for routing.")
         return plan
@@ -591,6 +624,22 @@ class Planner:
         # ---------------------------------------------------------- Ethernet side
         pdu_pkg = self._package("I-SIGNAL-I-PDU")
         eth_name = sanitize(over["eth_pdu"]) if over.get("eth_pdu") else fmt(naming.eth_pdu, **fields)
+        prev = None
+        if self.previous is not None:
+            can_pt = r.can_pt or (f"{bp.channel}/{r.can_pt_name}" if r.can_pt_name else "")
+            prev = self.previous.match(can_pt, direction, eth_name)
+            if prev is not None and not over.get("eth_pdu"):
+                eth_name = prev.eth_pdu                     # same name -> same paths and UUIDs as before
+            bus_known = any(x.can_pt.startswith(bp.channel + "/") for x in self.previous.routes)
+            if "enabled" not in over and opts.only_previous and bus_known:
+                if prev is None and r.enabled:
+                    r.enabled, r.reason = False, "not in the previous gateway file"
+                elif prev is not None and not r.enabled:
+                    r.enabled, r.reason = True, ""
+            if r.enabled:
+                r.change = "kept" if prev is not None else "new"
+                if prev is not None:
+                    self._prev_used.add(id(prev))
         r.header_id = -1
         if r.can_pt and self._already_routed(r.can_pt, f"{pdu_pkg}/{eth_name}", direction):
             r.enabled, r.reason = False, f"already routed to {eth_name} in the base file"
@@ -623,6 +672,9 @@ class Planner:
             else:
                 r.header_id = hid
                 r.header_note = "set by user"
+        elif prev is not None and prev.header_id is not None:
+            r.header_id, r.locked = prev.header_id, True
+            r.header_note = "kept from the previous file"
         plan.routes.append(r)
 
     def _existing_can(self, r: Route, ft):
@@ -679,6 +731,21 @@ class Planner:
                     r.notes.append(f"already a gateway target of {other} (N:1)")
                     self.warn(f"{r.key}: the CAN PDU is already the target of {other}; a second source makes an "
                               f"N:1 route (only supported as a MICROSAR extension).")
+
+    def _describe_removed(self, removed):
+        """CAN frame and id of removed routes whose CAN side is outside the previous file (project mode)."""
+        b = self.base
+        todo = {p.can_pt: p for p in removed if p.can_id is None and p.can_pt}
+        if not todo:
+            return
+        for ftp in b.of_type("CAN-FRAME-TRIGGERING"):
+            ft = b.el(ftp)
+            for pt in b.refs(ft.find(q("PDU-TRIGGERINGS")), "PDU-TRIGGERING-REF"):
+                p = todo.get(pt)
+                if p is not None:
+                    frame = (b.ref(ft, "FRAME-REF") or "").rsplit("/", 1)[-1]
+                    p.can_frame = re.sub(r"_o[A-Za-z0-9]+$", "", frame) or frame
+                    p.can_id = parse_int(arxml.text(ft, "IDENTIFIER"))
 
     def _com_usage(self, r: Route):
         """The ECU itself may send / receive the CAN PDU through Com (its signals have I-SIGNAL-PORTs)."""
@@ -894,13 +961,21 @@ class Planner:
     def _assign_header_ids(self):
         plan, hcfg = self.plan, self.cfg.header
         used = self._scopes()
-        for r in plan.enabled_routes:
+        routes = [r for r in plan.enabled_routes if r.header_id >= 0] + \
+                 [r for r in plan.enabled_routes if r.header_id < 0]     # fixed ids (user / kept) first
+        for r in routes:
             sp = plan.sides.get(r.direction)
             if sp is None:
                 continue
             keys = ([("tx", sp.local), ("rx", sp.remote)] if r.direction == CAN_TO_ETH else [("rx", sp.local)])
             base_id = r.message.can_id | (0x80000000 if hcfg.extended_flag and r.message.extended else 0)
-            if r.header_id >= 0:                    # set by the user: never changed, only checked
+            if r.header_id >= 0 and r.locked:
+                clash = [used[k][r.header_id] for k in keys if r.header_id in used[k]]
+                if clash:
+                    self.warn(f"{r.key}: the previous header id {r.header_text} is now used by {clash[0]} on the "
+                              f"same socket; a new header id is assigned.")
+                    r.header_id, r.locked, r.header_note = -1, False, ""
+            if r.header_id >= 0:                    # set by the user / kept: never changed, only checked
                 clash = [used[k][r.header_id] for k in keys if r.header_id in used[k]]
                 if clash:
                     self.err(f"{r.key}: header id {r.header_text} is already used by {clash[0]} on the same socket.")

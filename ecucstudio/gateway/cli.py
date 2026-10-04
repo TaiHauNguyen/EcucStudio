@@ -3,7 +3,8 @@
     python -m ecucstudio gateway inspect  --base network.arxml [--dbc bus.dbc]
     python -m ecucstudio gateway template [--base network.arxml] --dbc bus.dbc --node ECU -o gateway.json
     python -m ecucstudio gateway suggest  gateway.json [--write]
-    python -m ecucstudio gateway plan     gateway.json
+    python -m ecucstudio gateway plan     gateway.json | generated_gateway.arxml
+    python -m ecucstudio gateway reopen   generated_gateway.arxml -o gateway.json
     python -m ecucstudio gateway generate gateway.json [-o out.arxml]
     python -m ecucstudio gateway gui      [gateway.json]
     python -m ecucstudio gateway routes   network.arxml [--csv routes.csv]
@@ -19,8 +20,26 @@ import time
 
 
 def _load(path):
+    """A gateway.json, or a generated gateway file (its configuration, to regenerate it)."""
+    if path.lower().endswith(".arxml"):
+        from .regen import config_from_file
+        cfg, notes = config_from_file(path)
+        for n in notes:
+            print("[INFO]   ", n)
+        return cfg
     from .config import GatewayConfig
     return GatewayConfig.load(path)
+
+
+def cmd_reopen(a):
+    from .regen import config_from_file
+    cfg, notes = config_from_file(a.file)
+    for n in notes:
+        print("[INFO]   ", n)
+    cfg.save(a.out)
+    print("Written", os.path.abspath(a.out), "- edit it (buses, messages) and run 'generate' to regenerate",
+          os.path.basename(a.file))
+    return 0
 
 
 def _print_plan(plan, verbose=True):
@@ -298,6 +317,10 @@ def main(argv=None):
     p = sub.add_parser("gui")
     p.add_argument("config", nargs="?")
     p.set_defaults(fn=cmd_gui)
+    p = sub.add_parser("reopen", help="configuration of a generated gateway file, to change and regenerate it")
+    p.add_argument("file")
+    p.add_argument("-o", "--out", required=True)
+    p.set_defaults(fn=cmd_reopen)
     p = sub.add_parser("routes", help="list the gateway routes of a network file")
     p.add_argument("file")
     p.add_argument("--direction", help="e.g. CAN->ETH")

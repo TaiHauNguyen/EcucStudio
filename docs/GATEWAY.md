@@ -266,9 +266,8 @@ Tool tạo hai file:
 
 Nếu output trùng với file base, tool hỏi lại và giữ bản `.bak`.
 
-Bấm **Save** để lưu cấu hình `gateway.json` (đường dẫn tương đối). Khi DBC hoặc base thay đổi, mở lại cấu hình
-rồi Generate lại **từ file base gốc**. Nếu lỡ chạy trên chính file output, route đã có sẽ được bỏ qua
-(Remark: `already routed …`), không bị nhân đôi.
+Cấu hình được nhúng luôn trong file output. Bấm **Save** nếu muốn có thêm file `gateway.json`. Muốn thêm/bớt DBC
+hoặc message sau khi đã import vào DaVinci: **Open…** chính file output rồi Generate lại (mục 7.1).
 
 ### Phần tử được tạo
 
@@ -304,6 +303,47 @@ rồi Generate lại **từ file base gốc**. Nếu lỡ chạy trên chính fi
 
 4. Validate rồi generate như bình thường.
 
+### 7.1 Thay đổi sau khi đã import: thêm / bớt DBC hoặc message rồi sinh lại
+
+Dùng khi file gateway đã được import vào DaVinci và bạn muốn thêm/bớt bus (DBC, kênh CAN) hoặc thêm/bớt message.
+DaVinci phải **giữ nguyên** phần không đổi, kể cả các tham số ECUC bạn đã sửa hoặc Solve, và chỉ cập nhật phần
+thay đổi.
+
+1. Generator → **Open…** → chọn **chính file gateway `.arxml`** đã import vào DaVinci.
+   - File sinh bởi bản tool hiện tại mang sẵn cấu hình của nó: base/`.dpa`, DBC, node, Ethernet, message đã
+     chọn. Tool khôi phục y nguyên.
+   - File sinh bởi bản cũ chưa có cấu hình nhúng: tool tự dựng lại từ nội dung file (kênh/VLAN, connector, IP,
+     socket, port, header ID set, các kênh CAN). Tool cũng tự tìm file `.dpa` đang import file đó. Chỉ những
+     message đã có trong file được bật (tuỳ chọn *Regeneration: … route only its messages* ở tab Options).
+   - Ô **Previous gateway file** và **Output file** đều là file đó.
+   - Tool tự Analyze. Cột **Change** cho biết `kept` (giữ nguyên), `new` (mới, chữ xanh). Dòng `removed` (chữ đỏ)
+     là route có trong file cũ nhưng sẽ không sinh nữa.
+2. Thay đổi như bình thường:
+   - thêm bus: **Add DBC…** (chế độ project: chọn kênh CAN; nếu là DBC mới thì import DBC vào DaVinci trước, hoặc
+     chọn file DBC);
+   - bớt bus: **Remove**;
+   - bật/tắt message: bảng route (double-click, Space, chuột phải).
+3. **Generate network ARXML** ghi đè file gateway, bản cũ giữ là `.bak`.
+4. DaVinci: file đã nằm sẵn trong Input Files → chạy **Update**.
+
+Tool đảm bảo route giữ nguyên ra **y hệt** lần trước:
+
+- Phần tử của file cũ được trừ khỏi base trước khi tính. Ở chế độ project, `Communication.arxml` của DaVinci đã
+  chứa chúng sau lần import trước; nếu không trừ, tool sẽ coi các route đó là "đã có sẵn".
+- Route giữ nguyên dùng lại **đúng tên PDU Ethernet** và **header ID cũ**, kể cả header ID có cờ chống trùng. Vì vậy
+  đường dẫn và UUID không đổi. Route mới không được dùng các header ID đó.
+- Không thay đổi gì thì file sinh lại giống từng byte.
+
+Đã kiểm chứng bằng DaVinci 5.24 trên một bản copy project (bỏ 2 message, thêm 1 bus CAN có 22 message):
+
+- route giữ nguyên giữ nguyên tên container PduR / SoAd và header ID;
+- tham số sửa tay `SoAdTxIfTriggerTransmit` trên route giữ nguyên vẫn còn sau Update;
+- container của 2 route bị bỏ đã bị xoá, 22 route mới được tạo.
+
+Cấu hình được nhúng trong ADMIN-DATA/SDGS ở gốc file (`SDG GID="EcucStudio.CanEthGateway"`); DaVinci bỏ qua phần
+này. Đường dẫn trong cấu hình được ghi tương đối so với file gateway. Nếu chuyển máy mà base hoặc DBC không còn
+ở chỗ cũ, tool báo để chọn lại.
+
 ## 8. Command line
 
 ```bat
@@ -326,6 +366,11 @@ python -m ecucstudio gateway plan gateway.json
 
 :: 4. ghi file network mới + CSV (exit code 1 nếu còn ERROR)
 python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
+
+:: sinh lại file gateway đã import vào DaVinci (mục 7.1): plan / generate nhận thẳng file .arxml
+python -m ecucstudio gateway plan     GwEcu_CanEthGateway.arxml      :: kept / new / removed
+python -m ecucstudio gateway reopen   GwEcu_CanEthGateway.arxml -o gateway.json   :: sửa buses / messages trong json
+python -m ecucstudio gateway generate gateway.json
 ```
 
 ## 9. Tham khảo file cấu hình `gateway.json`
@@ -420,7 +465,8 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml] [-v]
 
 ## 11. Sửa gateway trong file network đã có (Gateway Editor)
 
-Mở một file network ARXML **đã có gateway** để xem và sửa lại bằng tool. File có thể do tool sinh ra, do PREEvision
+Mở một file network ARXML **đã có gateway** để xem và sửa trực tiếp từng phần tử (header ID, socket, port, IP,
+xoá route). Muốn thêm/bớt DBC hoặc message rồi sinh lại file gateway thì dùng mục 7.1. File có thể do tool sinh ra, do PREEvision
 xuất, hoặc là file bổ sung của chế độ project.
 
 Mở bằng một trong các cách sau:

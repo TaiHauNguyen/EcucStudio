@@ -606,47 +606,59 @@ class GatewayModel:
                     changed = True
 
     def _remove(self, dead: set):
-        b = self.base
-        tops = [e for e in dead if not any(a in dead for a in e.iterancestors())]
-        deleted = set()
-        removed = collections.Counter()
-        parents = []
-        for e in tops:
-            for d in e.iter():
-                p = b.path_of.get(d)
-                if p:
-                    deleted.add(p)
-            removed[local(e)] += 1
-            parents.append(e.getparent())
-            arxml.remove_child(e)
-        unresolved = []
-        for r in list(b.root.iter()):
-            if not (isinstance(r.tag, str) and r.get("DEST") and r.text and r.text.strip() in deleted):
-                continue
-            p = r.getparent()
-            if p is None or p.getparent() is None:
-                continue
-            lp = local(p)
-            if lp.endswith("-CONDITIONAL"):
-                victim = p
-            elif lp.endswith("-REFS"):
-                victim = r
-            else:
-                unresolved.append(f"{lp}/{local(r)} still references the deleted {r.text.strip()}")
-                continue
-            parents.append(victim.getparent())
-            arxml.remove_child(victim)
-        self._prune(parents)
-        return removed, unresolved
+        return remove_elements(self.base, dead)
 
     @staticmethod
     def _prune(parents):
-        for p in parents:
-            while p is not None and local(p) in PRUNE and p.find(q("SHORT-NAME")) is None and \
-                    not [c for c in p if isinstance(c.tag, str)] and p.getparent() is not None:
-                gp = p.getparent()
-                arxml.remove_child(p)
-                p = gp
+        prune_lists(parents)
+
+
+def remove_elements(base: Base, dead) -> tuple[collections.Counter, list[str]]:
+    """Remove the elements *dead* (and their subtrees) from *base*, then the references to them that are list
+    entries (-CONDITIONAL wrappers, entries of -REFS lists) and the list containers that became empty.
+    Returns (removed element types, references that could not be removed)."""
+    dead = set(dead)
+    tops = [e for e in dead if e.getparent() is not None and not any(a in dead for a in e.iterancestors())]
+    deleted = set()
+    removed = collections.Counter()
+    parents = []
+    for e in tops:
+        for d in e.iter():
+            p = base.path_of.get(d)
+            if p:
+                deleted.add(p)
+        removed[local(e)] += 1
+        parents.append(e.getparent())
+        arxml.remove_child(e)
+    unresolved = []
+    for r in list(base.root.iter()):
+        if not (isinstance(r.tag, str) and r.get("DEST") and r.text and r.text.strip() in deleted):
+            continue
+        p = r.getparent()
+        if p is None or p.getparent() is None:
+            continue
+        lp = local(p)
+        if lp.endswith("-CONDITIONAL"):
+            victim = p
+        elif lp.endswith("-REFS"):
+            victim = r
+        else:
+            unresolved.append(f"{lp}/{local(r)} still references the deleted {r.text.strip()}")
+            continue
+        parents.append(victim.getparent())
+        arxml.remove_child(victim)
+    prune_lists(parents)
+    return removed, unresolved
+
+
+def prune_lists(parents):
+    """Remove list containers (PRUNE) that have no child element any more, walking upwards."""
+    for p in parents:
+        while p is not None and local(p) in PRUNE and p.find(q("SHORT-NAME")) is None and \
+                not [c for c in p if isinstance(c.tag, str)] and p.getparent() is not None:
+            gp = p.getparent()
+            arxml.remove_child(p)
+            p = gp
 
 
 def route_rows(model: GatewayModel, routes: list[ExistingRoute] | None = None) -> list[tuple]:
