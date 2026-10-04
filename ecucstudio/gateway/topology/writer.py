@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import csv
+import os
 
 from ..planner import load_base
 from ..writer import Result, generate
@@ -48,4 +49,6 @@ def generate_topology(tplan: TopologyPlan, only: list[str] | None = None) -> lis
     if cfg.path:
         cfg.save_lock(tplan.header_ids)
         write_contract(tplan)
+        from ..paths import report_of_topology, write_report
+        write_report(report_of_topology(tplan), os.path.splitext(cfg.path)[0])
     return results

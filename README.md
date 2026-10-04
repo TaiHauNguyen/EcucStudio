@@ -147,6 +147,11 @@ Hướng dẫn sử dụng đầy đủ: [docs/GATEWAY.md](docs/GATEWAY.md).
 **Next step** trong cửa sổ chính luôn ghi bước tiếp theo kèm nút làm luôn. Chi tiết: mục *Bắt đầu nhanh* của
 [docs/GATEWAY.md](docs/GATEWAY.md).
 
+**Report đường đi message**: Generate (hoặc nút *Message Report*, hay `gateway report <cấu hình | file gateway |
+topology>`) ghi `..._message_paths.html` / `.csv`: mỗi message (theo CAN ID; cùng ID trên nhiều kênh là một
+message) xuất phát từ node / bus nào, đi qua ECU gateway nào (chặng Ethernet kèm header ID), đi về bus / node nào;
+kèm bảng message không được route và lý do. Chi tiết: mục 14 của [docs/GATEWAY.md](docs/GATEWAY.md).
+
 **CAN → CAN**: thêm nhiều DBC (mỗi DBC một bus, chọn node của ECU trong từng DBC). Message ECU nhận trên một bus
 và gửi trên bus khác (cùng tên, tên có tiền tố `GW_`/`XGW_`…, hoặc cùng CAN ID và độ dài) được route thẳng giữa
 hai bus nếu độ dài và layout signal khớp; route `ETH->CAN` của message đó tự tắt. Cặp khác độ dài / khác layout

@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from ..gui.theme import COLORS, init_style
 from ..gui.widgets import Tooltip, dialog_header
-from . import dbcread, dvproject, report, start
+from . import dbcread, dvproject, paths, report, start
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
 from .config import BusInput, EthPeer, GatewayConfig, Naming, SocketSide
 from .planner import CAN_TO_ETH, ETH_TO_CAN, CanRoute, Route, load_base, make_plan, new_ecu_name
@@ -547,6 +547,10 @@ class GatewayWindow:
         self.b_plan.pack(side="left", padx=(0, 4))
         self.b_gen = ttk.Button(tb, text="Generate network ARXML", command=self.generate)
         self.b_gen.pack(side="left")
+        b_rep = ttk.Button(tb, text="Message Report", command=self.message_report)
+        b_rep.pack(side="left", padx=(4, 0))
+        Tooltip(b_rep, "Write and open the message path report: for every message (by CAN id) where it comes from, "
+                       "which gateway it passes and where it goes (HTML + CSV next to the output file)")
         ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
         b_edit = ttk.Button(tb, text="Edit Existing Gateway…", command=self.open_editor)
         b_edit.pack(side="left")
@@ -1350,11 +1354,13 @@ class GatewayWindow:
                 res = generate(plan, load_base(cfg))
                 csv_path = os.path.splitext(res.output)[0] + "_gateway_routes.csv"
                 report.write_csv(plan, csv_path)
+                self._report_files = paths.write_report(paths.report_of_plan(plan), os.path.splitext(res.output)[0])
                 return res, csv_path
 
             def done(r):
                 res, csv_path = r
-                self.show_messages([], res.warnings, [f"Written {res.output}", f"Route table: {csv_path}"])
+                self.show_messages([], res.warnings, [f"Written {res.output}", f"Route table: {csv_path}",
+                                                      f"Message paths: {self._report_files[0]}"])
                 n = report.count_text(len(res.routes), len(res.can_routes))
                 self.status.config(text=f"Written {os.path.basename(res.output)}: {n}")
                 regen = cfg.previous and os.path.abspath(cfg.previous) == os.path.abspath(res.output)
@@ -1379,6 +1385,21 @@ class GatewayWindow:
                                            f"Import this file into DaVinci Configurator (Input Files) {how}.",
                                     parent=self.win)
             self._run("Generating", work, done)
+        self.analyze(then=write)
+
+    # ------------------------------------------------------------------ message path report
+    def message_report(self):
+        """Message path report of the current plan (analyzed first), opened in the browser."""
+        def write(plan):
+            stem = os.path.splitext(plan.cfg.output or os.path.join(os.getcwd(), "gateway"))[0]
+            try:
+                files = paths.write_report(paths.report_of_plan(plan), stem)
+            except OSError as exc:
+                messagebox.showerror(TITLE, f"Cannot write the report:\n{exc}", parent=self.win)
+                return
+            self.show_messages(infos=[f"Message paths: {files[0]}", f"Message paths (CSV): {files[1]}"])
+            if hasattr(os, "startfile"):
+                os.startfile(files[0])
         self.analyze(then=write)
 
     # ------------------------------------------------------------------ guided start / next step

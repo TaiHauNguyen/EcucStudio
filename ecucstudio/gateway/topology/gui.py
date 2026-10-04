@@ -150,6 +150,10 @@ class TopologyWindow:
         ttk.Button(tb, text="Analyze", command=self.analyze).pack(side="left", padx=(0, 4))
         b_gen = ttk.Button(tb, text="Generate", command=self.generate)
         b_gen.pack(side="left")
+        b_rep = ttk.Button(tb, text="Message Report", command=self.message_report)
+        b_rep.pack(side="left", padx=(4, 0))
+        Tooltip(b_rep, "Write and open the message path report of the whole network: for every message (by CAN id) "
+                       "where it comes from, which gateway ECUs it passes and where it goes")
         Tooltip(b_gen, "Write the gateway file of every ECU marked 'generate', the lock file (header ids) and the "
                        "contract (all Ethernet PDUs) next to the topology file")
         self.status = ttk.Label(tb, text="Add the ECUs (DaVinci project or DBC files) and the peers of the network.")
@@ -665,6 +669,21 @@ class TopologyWindow:
                                     parent=self.win)
                 self.analyze()
             self._run("Generating", lambda: generate_topology(tplan), done)
+        self.analyze(then=write)
+
+    def message_report(self):
+        from ..paths import report_of_topology, write_report
+
+        def write(tplan):
+            stem = os.path.splitext(self.cfg.path)[0] if self.cfg.path else os.path.join(os.getcwd(), "topology")
+            try:
+                files = write_report(report_of_topology(tplan), stem)
+            except OSError as exc:
+                messagebox.showerror(TITLE, f"Cannot write the report:\n{exc}", parent=self.win)
+                return
+            self.show_messages(infos=[f"Message paths: {files[0]}", f"Message paths (CSV): {files[1]}"])
+            if hasattr(os, "startfile"):
+                os.startfile(files[0])
         self.analyze(then=write)
 
     # ------------------------------------------------------------------ tables

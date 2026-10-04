@@ -10,6 +10,7 @@
     python -m ecucstudio gateway routes   network.arxml [--csv routes.csv]
     python -m ecucstudio gateway edit     network.arxml --header PDU=0x123 --delete PDU --port SOCKET=50000
     python -m ecucstudio gateway editor   [network.arxml]
+    python -m ecucstudio gateway report   gateway.json | generated_gateway.arxml | topology.json [-o report]
     python -m ecucstudio gateway topology plan|generate|contract topology.json [--ecu ZoneB]
     python -m ecucstudio gateway topology gui [topology.json]
 """
@@ -170,12 +171,15 @@ def cmd_generate(a):
     res = generate(plan)
     csv_path = os.path.splitext(res.output)[0] + "_gateway_routes.csv"
     report.write_csv(plan, csv_path)
+    from . import paths
+    html_path, _ = paths.write_report(paths.report_of_plan(plan), os.path.splitext(res.output)[0])
     for w in res.warnings[len(plan.warnings):]:
         print("[WARNING]", w)
     print(f"\nWritten {res.output} ({report.count_text(len(res.routes), len(res.can_routes))}, "
           f"{time.time() - t:.1f} s)")
     print("Created:", ", ".join(f"{k} {v}" for k, v in sorted(res.created.items())))
     print("Route table:", csv_path)
+    print("Message paths:", html_path)
     return 0
 
 
@@ -330,6 +334,36 @@ def cmd_topology_gui(a):
     return run_window(f"gateway topology file={a.topology or '-'}", start)
 
 
+def cmd_report(a):
+    """Message path report of a gateway configuration / generated file, or of a topology."""
+    import json
+    from . import paths
+    is_topology = False
+    if a.config.lower().endswith(".json"):
+        with open(a.config, encoding="utf-8-sig") as fh:
+            is_topology = "ecus" in json.load(fh)
+    if is_topology:
+        from .topology import TopologyConfig, make_topology_plan
+        tplan = make_topology_plan(TopologyConfig.load(a.config))
+        errors = tplan.errors
+        rep = paths.report_of_topology(tplan)
+    else:
+        from .planner import make_plan
+        plan = make_plan(_load(a.config))
+        errors = plan.errors
+        rep = paths.report_of_plan(plan)
+    for e in errors:
+        print("[ERROR]  ", e)
+    stem = os.path.splitext(a.output)[0] if a.output else os.path.splitext(os.path.abspath(a.config))[0]
+    html_path, csv_path = paths.write_report(rep, stem)
+    for p in rep.paths:
+        print(f"{p.can_id:<12} {p.names:<30} {p.origin}  ->  {' -> '.join(p.via)}  ->  {p.destination}")
+    print(f"\n{rep.messages} message(s), {len(rep.paths)} path(s), {len(rep.not_routed)} not routed")
+    print("Written", html_path)
+    print("Written", csv_path)
+    return 1 if errors else 0
+
+
 def cmd_gui(a):
     from ..__main__ import run_window
 
@@ -415,6 +449,11 @@ def main(argv=None):
     q = tsub.add_parser("gui", help="open the topology window")
     q.add_argument("topology", nargs="?")
     q.set_defaults(fn=cmd_topology_gui)
+    p = sub.add_parser("report", help="message path report (HTML + CSV): where every message comes from, which "
+                                      "gateways it passes and where it goes")
+    p.add_argument("config", help="gateway.json, a generated gateway .arxml or a topology .json")
+    p.add_argument("-o", "--output", help="file name stem / .html of the report (default: next to the input)")
+    p.set_defaults(fn=cmd_report)
     p = sub.add_parser("editor", help="open the gateway editor window")
     p.add_argument("file", nargs="?")
     p.set_defaults(fn=cmd_editor)

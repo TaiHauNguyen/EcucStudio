@@ -714,7 +714,8 @@ Bảng bên dưới:
 - file gateway của mọi ECU có **Generate**, đúng định dạng của mục 6 / 2.2 (project → file bổ sung cho Input Files);
 - `<topology>.lock.json`: header ID của mọi PDU Ethernet. **Không sửa tay; luôn để cùng file topology** (ví dụ cùng
   repo). Team khác sinh ECU của họ sau, từ cùng topology + lock, sẽ được đúng giá trị file của bạn đang dùng;
-- `<topology>_contract.csv`: tài liệu giao diện (cho node không dùng tool, ví dụ máy tính trung tâm).
+- `<topology>_contract.csv`: tài liệu giao diện (cho node không dùng tool, ví dụ máy tính trung tâm);
+- `<topology>_message_paths.html` / `.csv`: đường đi của mọi message qua các ECU (mục 14).
 
 Sinh lại: file gateway cũ của mỗi ECU tự được dùng làm file "previous" (mục 7.1), DaVinci giữ nguyên phần không đổi.
 
@@ -755,6 +756,36 @@ python -m ecucstudio gateway topology contract topology.json [-o contract.csv]
 - `routes` / `links`: khoá như cột From / To của bảng ECU -> ECU (`<ECU>/<bus>/<message>`).
 - Kiểm tra trước khi sinh: tên node trùng hoặc có ký tự lạ, IP trùng, IP của ECU khác IP trong project, port của
   hai đầu lệch, header ID nhập tay trùng.
+
+## 14. Report đường đi message
+
+File report cho biết **mỗi message xuất phát từ đâu, đi qua những ECU gateway nào và đi về đâu**.
+
+- Một message được nhận diện bằng **CAN ID** (và loại ID standard / extended): cùng CAN ID trên nhiều kênh là
+  **một** message (cột Message ghi các tên của nó, ví dụ `PowerState / RadarObj`). Cặp CAN → CAN / ECU → ECU giữa
+  message đổi ID (ghép bằng link) cũng gộp vào cùng một dòng chảy.
+- Mỗi dòng là một đường đi:
+
+  | Cột | Nội dung |
+  |---|---|
+  | From | node gửi message trên bus của nó (`Abs @ Chassis`), hoặc node Ethernet (`Central (Ethernet)`). Với project DaVinci, file Communication chỉ biết ECU của project nên chỉ ghi `bus Chassis` |
+  | Via | các ECU gateway theo thứ tự, chặng Ethernet ghi header ID: `ZoneB → [ETH 0x00000120] → ZoneC`; đi qua một bus giữa hai gateway ghi `bus X` |
+  | To | bus đích và các node nhận (`Body → Door`), hoặc node Ethernet |
+  | Gateways | danh sách ECU gateway trên đường đi |
+
+- Message đi tới nhiều nơi (1:N) có nhiều dòng. Node Ethernet là điểm cuối / điểm đầu: tool không biết node đó có
+  chuyển tiếp message hay không, nên không nối hai chiều qua nó.
+- Bảng **Not routed**: message có thể route nhưng không route, kèm lý do (bị tắt, khác layout, N:1 …).
+
+Cách tạo:
+
+| Ở đâu | File |
+|---|---|
+| Generator: **Generate** (tự ghi), hoặc nút **Message Report** (ghi và mở) | `<output>_message_paths.html` + `.csv` cạnh file output |
+| Topology: **Generate** (tự ghi), hoặc nút **Message Report** | `<topology>_message_paths.html` + `.csv` cạnh file topology: đường đi qua **mọi** ECU của mạng |
+| Command line | `python -m ecucstudio gateway report gateway.json` (hoặc file gateway `.arxml`, hoặc `topology.json`) `[-o tên]` |
+
+File HTML mở bằng trình duyệt, có ô lọc (CAN ID, tên message, bus, ECU). File CSV (dấu `;`) mở bằng Excel.
 
 ## Giới hạn hiện tại
 
