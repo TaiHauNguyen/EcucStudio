@@ -102,7 +102,7 @@ class StartWizard(tk.Toplevel):
 
     def _case_pages(self, case):
         return {"dbc": [self._page_dbcs, self._page_newfile, self._page_routing],
-                "project": [self._page_project, self._page_routing],
+                "project": [self._page_project, self._page_partners, self._page_routing],
                 "update": [self._page_update, self._page_changes]}[case]
 
     # ------------------------------------------------------------------ paging
@@ -228,14 +228,7 @@ class StartWizard(tk.Toplevel):
                     "ECU: messages between its buses stay inside it (CAN -> CAN); messages between ECUs go over "
                     "Ethernet. Type the same ECU name to merge nodes that are named after their bus.")
         dbcs = self.s.setdefault("dbcs", [])
-        top = ttk.Frame(self.body)
-        top.pack(fill="x")
-        ttk.Button(top, text="Add DBC files…", command=lambda: self._add_dbcs(rows)).pack(side="left")
-        ttk.Label(top, text="   (several at once: hold Ctrl in the file dialog)", foreground="#666666").pack(
-            side="left")
-        rows = ttk.Frame(self.body)
-        rows.pack(fill="both", expand=True, pady=(10, 0))
-        self._fill_dbc_rows(rows)
+        self._dbc_list()
 
         def leave():
             if not dbcs:
@@ -252,16 +245,46 @@ class StartWizard(tk.Toplevel):
             return True
         self.leave = leave
 
+    def _dkey(self):
+        """DBC list of the page: all buses (only DBC files) or the buses of the other ECUs (project case)."""
+        return "pdbcs" if self.case.get() == "project" else "dbcs"
+
+    def _dbc_list(self):
+        top = ttk.Frame(self.body)
+        top.pack(fill="x")
+        ttk.Button(top, text="Add DBC files…", command=lambda: self._add_dbcs(rows)).pack(side="left")
+        ttk.Label(top, text="   (several at once: hold Ctrl in the file dialog)", foreground="#666666").pack(
+            side="left")
+        holder = ttk.Frame(self.body)
+        holder.pack(fill="both", expand=True, pady=(10, 0))
+        rows = self._scroll_area(holder, height=200)
+        self._fill_dbc_rows(rows)
+
+    def _own_bus(self, d) -> bool:
+        """Project case: a DBC of a bus that is already in the project (ignored: the project has it)."""
+        info = self.s.get("pinfo")
+        if self._dkey() != "pdbcs" or info is None:
+            return False
+        own = set()
+        for path, label, _rx, _tx in info.channels:
+            own |= {label.lower(), path.rsplit("/", 1)[-1].lower(), path.rsplit("/", 2)[-2].lower()}
+        return d["db"].name.lower() in own
+
     def _groups(self):
-        return start.group_ecus([(d["path"], d["node"].get(), d["ecu"].get().strip() or d["node"].get())
-                                 for d in self.s.get("dbcs", [])])
+        rows = [(d["path"], d["node"].get(), d["ecu"].get().strip() or d["node"].get())
+                for d in self.s.get(self._dkey(), []) if not self._own_bus(d)]
+        groups = start.group_ecus(rows)
+        info = self.s.get("pinfo")
+        if self._dkey() == "pdbcs" and info is not None:
+            groups.pop(info.project.ecu_name, None)          # that ECU is the project itself
+        return groups
 
     def _add_dbcs(self, rows):
         paths = filedialog.askopenfilenames(parent=self, title="DBC files",
                                             filetypes=[("CAN database", "*.dbc"), ("All files", "*.*")])
         if not paths:
             return
-        dbcs = self.s["dbcs"]
+        dbcs = self.s.setdefault(self._dkey(), [])
         have = {os.path.normcase(d["path"]) for d in dbcs}
         for p in paths:
             p = os.path.abspath(p)
@@ -285,7 +308,7 @@ class StartWizard(tk.Toplevel):
     def _fill_dbc_rows(self, rows):
         for w in rows.winfo_children():
             w.destroy()
-        dbcs = self.s.get("dbcs", [])
+        dbcs = self.s.get(self._dkey(), [])
         if not dbcs:
             ttk.Label(rows, text="No DBC file yet.", foreground="#666666").pack(anchor="w")
             return
@@ -295,11 +318,18 @@ class StartWizard(tk.Toplevel):
         summary.grid(row=2 * len(dbcs) + 1, column=0, columnspan=5, sticky="w", padx=4, pady=(8, 0))
 
         def show_groups(*_a):
-            groups = self._groups()
-            parts = [f"{e} ({', '.join(self._bus_of(p) for p, _n in v)})" for e, v in groups.items()]
-            what = ("one ECU: one network file" if len(groups) == 1 else
-                    f"{len(groups)} ECUs: one network file each, ECU -> ECU over Ethernet")
-            summary.config(text=f"\u2192 {what}:  " + ",  ".join(parts))
+            try:
+                groups = self._groups()
+                parts = [f"{e} ({', '.join(self._bus_of(p) for p, _n in v)})" for e, v in groups.items()]
+                if self._dkey() == "pdbcs":
+                    what = (f"{len(groups)} other ECU(s) for ECU -> ECU routes" if groups else
+                            "no other ECU: only the project's ECU")
+                else:
+                    what = ("one ECU: one network file" if len(groups) == 1 else
+                            f"{len(groups)} ECUs: one network file each, ECU -> ECU over Ethernet")
+                summary.config(text=f"\u2192 {what}:  " + ",  ".join(parts))
+            except tk.TclError:
+                pass
         for i, d in enumerate(dbcs, start=1):
             db = d["db"]
             ttk.Label(rows, text=os.path.basename(d["path"])).grid(row=2 * i - 1, column=0, sticky="w", padx=4)
@@ -321,6 +351,9 @@ class StartWizard(tk.Toplevel):
                 d["traced"] = True
 
             def info_of(d):
+                if self._own_bus(d):
+                    d["info"].config(text="a bus of the project: ignored (its messages come from the project)")
+                    return
                 rx, tx = start.node_counts(d["db"]).get(d["node"].get(), (0, 0))
                 why = "" if d.get("chosen") else f" - {d['reason']}"
                 d["info"].config(text=f"receives {rx}, sends {tx} message(s){why}")
@@ -367,15 +400,52 @@ class StartWizard(tk.Toplevel):
         self.leave = leave
 
     def _bus_of(self, path):
-        return next((d["db"].name for d in self.s.get("dbcs", []) if d["path"] == path), os.path.basename(path))
+        return next((d["db"].name for d in self.s.get(self._dkey(), []) if d["path"] == path),
+                    os.path.basename(path))
+
+    # ------------------------------------------------------------------ case 2: other ECUs (optional)
+    def _page_partners(self):
+        info = self.s["pinfo"]
+        ecu = info.project.ecu_name
+        self.header("2  Other ECUs on the Ethernet network (optional)",
+                    f"Only for messages that {ecu} exchanges directly with another ECU over Ethernet (for example "
+                    f"received on its CAN bus and sent by another zone ECU on its own bus). Add the DBC files of the "
+                    f"other ECUs' buses: the tool finds those ECUs from their node names and only reads what they "
+                    f"need / send. Nothing of them is imported in this project. Leave the list empty when {ecu} has "
+                    f"no ECU -> ECU route.")
+        self.s.setdefault("pdbcs", [])
+        self._dbc_list()
+
+        def leave():
+            pd = self.s.get("pdbcs", [])
+            if any(not d["node"].get() for d in pd if not self._own_bus(d)):
+                messagebox.showinfo(TITLE, "Select the gateway node of every DBC.", parent=self)
+                return False
+            partners = self._groups()
+            head = [self._page_start, self._page_project, self._page_partners]
+            if not partners:
+                self.flow = head + [self._page_routing]
+                return True
+            self.s["groups"] = {ecu: [], **partners}
+            self.s["projects"] = {ecu: (info.project.path, info)}
+            self.flow = head + [self._page_network]
+            return True
+        self.leave = leave
 
     def _page_network(self):
         groups = self.s["groups"]
-        self.header(f"2/2  {len(groups)} ECUs and Ethernet",
-                    "Each ECU gets its own network file. A message one ECU receives and another ECU sends goes "
-                    "directly between them over Ethernet (CAN -> ETH on the sender, ETH -> CAN on the receiver); a "
-                    "message between the buses of one ECU stays inside it (CAN -> CAN).")
-        folder = os.path.dirname(self.s["dbcs"][0]["path"])
+        projects = self.s.setdefault("projects", {})
+        case2 = self.case.get() == "project"
+        self.header(f"{'3/3' if case2 else '2/2'}  {len(groups)} ECUs and Ethernet",
+                    "A message one ECU receives and another ECU sends goes directly between them over Ethernet (CAN "
+                    "-> ETH on the sender, ETH -> CAN on the receiver); a message between the buses of one ECU stays "
+                    "inside it (CAN -> CAN). An ECU with its DaVinci project (DBC files imported there) gets a file "
+                    "with only Ethernet + gateway; an ECU known only from DBC files gets a complete new network file, "
+                    "or is only referenced (Generate off).")
+        if case2:
+            folder = self.s["pinfo"].project.dir
+        else:
+            folder = os.path.dirname(self.s["dbcs"][0]["path"])
         st = self.s.setdefault("net", {})
         v = {k: st.setdefault(k, tk.StringVar(value=x)) for k, x in (
             ("vlan", ""), ("tx", "50000"), ("rx", "50001"), ("pname", "Central"), ("pip", ""),
@@ -386,14 +456,26 @@ class StartWizard(tk.Toplevel):
         for e in list(ecus):
             if e not in groups:
                 del ecus[e]
-        ips = start.suggest_ips(len(groups), _int(v["vlan"].get()))
+        known = [start.project_ecu_ip(pi) for _dpa, pi in projects.values()]
+        known = [ip for ip in known if ip]
+
+        def suggestions():
+            # same subnet as an ECU whose project already has an address, else 192.168.<VLAN>.x
+            return start.suggest_ips(len(groups), _int(v["vlan"].get()), known[0] if known else "", known)
+        ips = suggestions()
         for k, e in enumerate(groups):
-            ecus.setdefault(e, {"gen": tk.BooleanVar(value=True), "ip": tk.StringVar(value=ips[k]),
-                                "out": tk.StringVar(value=start.default_output(folder, e))})
+            if e in projects:
+                pinfo = projects[e][1]
+                ecus.setdefault(e, {"gen": tk.BooleanVar(value=True),
+                                    "ip": tk.StringVar(value=start.project_ecu_ip(pinfo) or ips[k]),
+                                    "out": tk.StringVar(value=start.default_output(pinfo.project.dir, e, True))})
+            else:
+                ecus.setdefault(e, {"gen": tk.BooleanVar(value=not case2), "ip": tk.StringVar(value=ips[k]),
+                                    "out": tk.StringVar(value=start.default_output(folder, e))})
 
         def vlan_changed(*_a):
             # suggested addresses follow the VLAN (192.168.<VLAN>.x) unless they were typed
-            new = start.suggest_ips(len(groups), _int(v["vlan"].get()))
+            new = suggestions()
             old = st.get("suggested", ips)
             for k, e in enumerate(groups):
                 if ecus[e]["ip"].get() in old:
@@ -406,18 +488,30 @@ class StartWizard(tk.Toplevel):
         f = self.body
         box = ttk.LabelFrame(f, text="ECUs (found from the gateway nodes of the DBC files)", padding=6)
         box.pack(fill="x")
-        for c, text in enumerate(("Generate", "ECU", "CAN buses", "IP address", "Output file")):
+        for c, text in enumerate(("Generate", "ECU", "Source (CAN buses)", "", "IP address", "Output file")):
             ttk.Label(box, text=text, font=("Segoe UI", 9, "bold")).grid(row=0, column=c, sticky="w", padx=4)
-        box.columnconfigure(4, weight=1)
+        box.columnconfigure(5, weight=1)
         for r, (e, dbcs) in enumerate(groups.items(), start=1):
             x = ecus[e]
             ttk.Checkbutton(box, variable=x["gen"]).grid(row=r, column=0, padx=4)
             ttk.Label(box, text=e).grid(row=r, column=1, sticky="w", padx=4)
-            ttk.Label(box, text=", ".join(self._bus_of(p) for p, _n in dbcs)).grid(row=r, column=2, sticky="w",
-                                                                                   padx=4)
-            ttk.Entry(box, textvariable=x["ip"], width=15).grid(row=r, column=3, sticky="w", padx=4, pady=1)
+            if e in projects:
+                dpa, pinfo = projects[e]
+                used = [c[1] for c in pinfo.channels if c[2] + c[3]]
+                src = f"project {os.path.basename(dpa)}: gateway only ({', '.join(used)})"
+            else:
+                src = "DBC: " + ", ".join(self._bus_of(p) for p, _n in dbcs)
+            ttk.Label(box, text=src, wraplength=330, justify="left").grid(row=r, column=2, sticky="w", padx=4)
+            if not (case2 and e == self.s["pinfo"].project.ecu_name):
+                if e in projects:
+                    ttk.Button(box, text="No project", width=10, command=lambda e=e: self._detach(e, folder)).grid(
+                        row=r, column=3, padx=2)
+                else:
+                    ttk.Button(box, text="Project…", width=10, command=lambda e=e: self._attach(e)).grid(
+                        row=r, column=3, padx=2)
+            ttk.Entry(box, textvariable=x["ip"], width=15).grid(row=r, column=4, sticky="w", padx=4, pady=1)
             of = ttk.Frame(box)
-            of.grid(row=r, column=4, sticky="we", padx=4)
+            of.grid(row=r, column=5, sticky="we", padx=4)
             ttk.Entry(of, textvariable=x["out"], width=40).pack(side="left", fill="x", expand=True)
             ttk.Button(of, text="…", width=3, command=lambda var=x["out"]: self._save_as(var)).pack(side="left")
         net = ttk.LabelFrame(f, text="Network", padding=6)
@@ -473,6 +567,32 @@ class StartWizard(tk.Toplevel):
             return True
         self.leave = leave
 
+    def _attach(self, e):
+        """Use the DaVinci project of ECU *e* (its DBC files imported there): its file gets only Ethernet + gateway."""
+        p = filedialog.askopenfilename(parent=self, title=f"DaVinci project of {e}",
+                                       filetypes=[("DaVinci project", "*.dpa"), ("All files", "*.*")])
+        if not p:
+            return
+
+        def done(info):
+            self.s.setdefault("projects", {})[e] = (os.path.abspath(p), info)
+            x = self.s["net"]["ecus"][e]
+            x["out"].set(start.default_output(info.project.dir, e, project=True))
+            x["gen"].set(True)
+            ip = start.project_ecu_ip(info)
+            if ip:
+                x["ip"].set(ip)
+            if not start.channels_in_use(info):
+                messagebox.showwarning(TITLE, f"The ECU of {os.path.basename(p)} has no CAN channel with messages: "
+                                              f"import its DBC files in DaVinci first.", parent=self)
+            self._show()
+        self._bg("Reading the project", lambda: start.read_project(p), done)
+
+    def _detach(self, e, folder):
+        self.s.get("projects", {}).pop(e, None)
+        self.s["net"]["ecus"][e]["out"].set(start.default_output(folder, e))
+        self._show()
+
     def _save_json(self, var):
         p = filedialog.asksaveasfilename(parent=self, title="Topology file", defaultextension=".json",
                                          initialdir=os.path.dirname(var.get()) or None,
@@ -485,12 +605,15 @@ class StartWizard(tk.Toplevel):
         groups, st = self.s["groups"], self.s["net"]
         ecus = st["ecus"]
         path = os.path.abspath(st["topo"].get().strip())
+        projects = {e: (dpa, start.channels_in_use(info)) for e, (dpa, info) in self.s.get("projects", {}).items()
+                    if e in groups}
         t = start.topology_for_dbcs(
             groups, os.path.dirname(path), start.DAVINCI_SCHEMAS[self.s["davinci"].get()],
             {e: x["ip"].get().strip() for e, x in ecus.items()}, {e: x["gen"].get() for e, x in ecus.items()},
             {e: x["out"].get().strip() for e, x in ecus.items()}, _int(st["vlan"].get()),
             (st["pname"].get().strip(), st["pip"].get().strip()) if st["peer"].get() else None,
-            _int(st["tx"].get()) or 50000, _int(st["rx"].get()) or 50001, os.path.splitext(os.path.basename(path))[0])
+            _int(st["tx"].get()) or 50000, _int(st["rx"].get()) or 50001, os.path.splitext(os.path.basename(path))[0],
+            projects=projects)
         try:
             t.save(path)
         except OSError as exc:
@@ -843,7 +966,7 @@ class StartWizard(tk.Toplevel):
     def finish(self):
         case = self.case.get()
         notes = []
-        if case == "dbc" and len(self.s.get("groups") or {}) > 1:
+        if self.flow and self.flow[-1] == self._page_network:
             self._finish_topology()
             return
         if case == "update":

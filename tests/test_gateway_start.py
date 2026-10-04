@@ -142,6 +142,40 @@ class StartTest(unittest.TestCase):
         self.assertEqual(os.path.normcase(info.cfg.base), os.path.normcase(dpa))
 
 
+    def test_project_ecu_with_partner_dbc(self):
+        """The ECU of a DaVinci project (DBC files imported) and a partner ECU known from its DBC: the project's file
+        holds only Ethernet + gateway (no CAN cluster / frame: nothing is imported twice in DaVinci)."""
+        from ecucstudio.gateway.topology import generate_topology, make_topology_plan
+        dpa = self.project()
+        info = start.read_project(dpa)
+        self.assertEqual(start.project_ecu_ip(info), "10.0.10.1")
+        self.assertEqual(start.channels_in_use(info), [info.channels[0][0]])
+        partner = os.path.join(self.tmp, "Cabin.dbc")
+        with open(partner, "w", encoding="utf-8") as fh:
+            fh.write('VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: ZC9 Seat\n\n'
+                     'BO_ 512 DoorStatus: 2 ZC9\n SG_ DoorOpen : 0|1@1+ (1,0) [0|1] "" Seat\n\n'
+                     'BA_DEF_ "DBName" STRING ;\nBA_DEF_DEF_ "DBName" "";\nBA_ "DBName" "Cabin";\n')
+        groups = {"GwEcu": [], "ZC9": [(partner, "ZC9")]}
+        t = start.topology_for_dbcs(groups, self.tmp, "AUTOSAR_00052", {"GwEcu": "10.0.10.1", "ZC9": "10.0.10.9"},
+                                    generate={"GwEcu": True, "ZC9": False}, vlan=10,
+                                    projects={"GwEcu": (dpa, start.channels_in_use(info))})
+        t.ethernet.channel = "VLAN10"
+        t.save(os.path.join(self.tmp, "topology.json"))
+        tp = make_topology_plan(t)
+        self.assertEqual(tp.errors, [])
+        self.assertEqual([c.key for c in tp.enabled_cross], ["GwEcu/Body_Cluster/DoorStatus -> ZC9/Cabin/DoorStatus"])
+        self.assertTrue(tp.plans["GwEcu"].delta)
+        res = dict(generate_topology(tp))
+        self.assertEqual(set(res), {"GwEcu"})                         # ZC9 is only referenced
+        out = res["GwEcu"].output
+        self.assertEqual(os.path.dirname(out), os.path.dirname(dpa))  # next to the project
+        with open(out, encoding="utf-8") as fh:
+            text = fh.read()
+        for tag in ("<CAN-CLUSTER", "<CAN-FRAME ", "<CAN-FRAME>", "<CAN-FRAME-TRIGGERING"):
+            self.assertNotIn(tag, text)
+        self.assertIn("<I-PDU-MAPPING>", text)
+        self.assertIn("SA_ZC9_CanGw_Rx", text)
+
     # ------------------------------------------------------------------ several ECUs found by their node names
     def network_dbcs(self):
         """PowerBus has ZC1, BodyBus has ZC2, ChassisBus and SensorBus have ZC3 (synthetic)."""

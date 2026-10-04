@@ -94,21 +94,43 @@ def group_ecus(rows: list[tuple[str, str, str]]) -> dict[str, list[tuple[str, st
     return out
 
 
-def suggest_ips(n: int, vlan: int | None = None) -> list[str]:
-    net = vlan if vlan is not None and 0 < int(vlan) < 255 else 1
-    return [f"192.168.{net}.{11 + i}" for i in range(n)]
+def suggest_ips(n: int, vlan: int | None = None, like: str = "", used=()) -> list[str]:
+    """*n* free addresses: in the subnet of *like* (an address a project already has), else 192.168.<VLAN>.x."""
+    if like and like.count(".") == 3:
+        prefix = like.rsplit(".", 1)[0]
+    else:
+        prefix = f"192.168.{vlan if vlan is not None and 0 < int(vlan) < 255 else 1}"
+    out, k, taken = [], 11, set(used) | {like}
+    while len(out) < n and k < 255:
+        ip = f"{prefix}.{k}"
+        if ip not in taken:
+            out.append(ip)
+        k += 1
+    return out
 
 
 def topology_for_dbcs(groups: dict, folder: str, schema: str, ips: dict, generate: dict | None = None,
                       outputs: dict | None = None, vlan: int | None = None, peer: tuple[str, str] | None = None,
-                      tx_port: int = 50000, rx_port: int = 50001, name: str = ""):
-    """Several gateway ECUs found in the DBC files -> topology: one ECU per group (a new network file each),
-    optionally a central Ethernet node (*peer* = (name, ip)) for the messages no ECU needs."""
+                      tx_port: int = 50000, rx_port: int = 50001, name: str = "", projects: dict | None = None):
+    """Several gateway ECUs -> topology: one ECU per group, optionally a central Ethernet node (*peer* = (name, ip))
+    for the messages no ECU needs.
+
+    An ECU of *projects* ({ECU: (dpa, [CAN channel paths])}) is read from its DaVinci project, in which its DBC files
+    are imported: its output is an additional input file with only Ethernet + gateway (nothing is imported twice).
+    The other ECUs come from their DBC files: a complete new network file each (or only referenced)."""
     from .topology import EcuNode, PeerNode, TopoEthernet, TopologyConfig
     t = TopologyConfig(name=name, ethernet=TopoEthernet(vlan_id=vlan), tx_port=tx_port, rx_port=rx_port)
+    projects = projects or {}
     for ecu, dbcs in groups.items():
-        g = GatewayConfig(base="", output=(outputs or {}).get(ecu) or default_output(folder, ecu), ecu=ecu,
-                          schema=schema, buses=[BusInput(dbc=os.path.abspath(p), node=n) for p, n in dbcs])
+        out = (outputs or {}).get(ecu)
+        if ecu in projects:
+            dpa, channels = projects[ecu]
+            g = GatewayConfig(base=os.path.abspath(dpa),
+                              output=out or default_output(os.path.dirname(os.path.abspath(dpa)), ecu, project=True),
+                              buses=[BusInput(channel=c) for c in channels])
+        else:
+            g = GatewayConfig(base="", output=out or default_output(folder, ecu), ecu=ecu, schema=schema,
+                              buses=[BusInput(dbc=os.path.abspath(p), node=n) for p, n in dbcs])
         t.ecus.append(EcuNode(name=ecu, ip=ips.get(ecu, ""), generate=(generate or {}).get(ecu, True), gateway=g))
     if peer and peer[0]:
         t.peers.append(PeerNode(name=peer[0], ip=peer[1]))
@@ -171,6 +193,27 @@ def read_project(dpa: str) -> ProjectInfo:
             path.rsplit("/", 1)[-1]
         chans.append((path, label, rx, tx))
     return ProjectInfo(proj, base, chans, project_gateway_files(dpa))
+
+
+def project_ecu_ip(info: ProjectInfo) -> str:
+    """IP address of the project's ECU on Ethernet ('' when it has none yet)."""
+    b, want = info.base, info.project.ecu_path
+    ecu = next((e for e in b.ecus() if want in (e, e.rsplit("/", 1)[-1])), "")
+    if not ecu:
+        return ""
+    ips = {e.path: e.ip for ch in b.eth_channels() for e in ch.endpoints if e.ip}
+    from ..arxml import q
+    for c in b.ecu_connectors(ecu):
+        el = b.el(c)
+        for nep in b.refs(el.find(q("NETWORK-ENDPOINT-REFS")) if el is not None else None, "NETWORK-ENDPOINT-REF"):
+            if ips.get(nep):
+                return ips[nep].strip()
+    return ""
+
+
+def channels_in_use(info: ProjectInfo) -> list[str]:
+    """CAN channels of the project on which the ECU receives or sends messages."""
+    return [c[0] for c in info.channels if c[2] + c[3]]
 
 
 def config_for_dbcs(dbcs: list[tuple[str, str]], output: str, ecu: str, schema: str, eth_routes: bool = True,
