@@ -58,8 +58,9 @@ class StartWizard(tk.Toplevel):
         super().__init__(master)
         self.title(TITLE)
         self.transient(master)
-        self.geometry("900x600+%d+%d" % (master.winfo_rootx() + 60, master.winfo_rooty() + 40))
-        self.minsize(820, 520)
+        height = min(640, max(480, self.winfo_screenheight() - 120))
+        self.geometry("900x%d+%d+%d" % (height, master.winfo_rootx() + 60, max(0, master.winfo_rooty() + 20)))
+        self.minsize(820, 460)
         self.on_finish, self.on_topology, self.on_open = on_finish, on_topology, on_open
         self.cache = dbc_cache if dbc_cache is not None else {}
         self.case = tk.StringVar(value="")
@@ -74,11 +75,13 @@ class StartWizard(tk.Toplevel):
                                foreground="#444444")
         self.h_text.pack(fill="x", padx=14, pady=(2, 10))
         ttk.Separator(self).pack(fill="x")
+        # the buttons are packed before the page so that a long page never pushes them out of the window
+        foot = ttk.Frame(self, padding=(14, 8))
+        foot.pack(side="bottom", fill="x")
+        ttk.Separator(self).pack(side="bottom", fill="x")
         self.body = ttk.Frame(self, padding=14)
         self.body.pack(fill="both", expand=True)
-        ttk.Separator(self).pack(fill="x")
-        foot = ttk.Frame(self, padding=(14, 8))
-        foot.pack(fill="x")
+        self.bind("<Return>", lambda _e: self.next())
         self.f_status = ttk.Label(foot, text="", foreground="#666666")
         self.f_status.pack(side="left")
         ttk.Button(foot, text="Cancel", command=self.destroy).pack(side="right")
@@ -91,6 +94,31 @@ class StartWizard(tk.Toplevel):
         self._show()
 
     # ------------------------------------------------------------------ paging
+    def _scroll_area(self, parent, height=120):
+        """Frame inside *parent* that scrolls vertically when its content is taller than the space it gets."""
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True)
+        canvas = tk.Canvas(outer, highlightthickness=0, height=height, background=COLORS.get("bg", "#f0f0f0"))
+        bar = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        win = canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        def resize(_e=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfigure(win, width=canvas.winfo_width())
+            if inner.winfo_reqheight() > canvas.winfo_height():
+                bar.pack(side="right", fill="y")
+            else:
+                bar.pack_forget()
+        inner.bind("<Configure>", resize)
+        canvas.bind("<Configure>", resize)
+        wheel = lambda e: canvas.yview_scroll(int(-e.delta / 120) or (-1 if e.delta > 0 else 1), "units")
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", wheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        return inner
+
     def _show(self):
         for w in self.body.winfo_children():
             w.destroy()
@@ -321,6 +349,7 @@ class StartWizard(tk.Toplevel):
         banner.grid(row=1, column=0, columnspan=2, sticky="we")
         box = ttk.LabelFrame(f, text="CAN channels of the ECU", padding=6)
         box.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(8, 0))
+        box.inner = self._scroll_area(box)
         f.rowconfigure(2, weight=1)
         ttk.Label(f, text="Output file:").grid(row=3, column=0, sticky="w", pady=(8, 4))
         of = ttk.Frame(f)
@@ -330,7 +359,7 @@ class StartWizard(tk.Toplevel):
         if self.s.get("pinfo"):
             self._show_project(box, banner)
         else:
-            ttk.Label(box, text="Select the project first.", foreground="#666666").pack(anchor="w")
+            ttk.Label(box.inner, text="Select the project first.", foreground="#666666").pack(anchor="w")
 
         def leave():
             info = self.s.get("pinfo")
@@ -362,14 +391,14 @@ class StartWizard(tk.Toplevel):
 
     def _show_project(self, box, banner):
         info = self.s["pinfo"]
-        for w in list(box.winfo_children()) + list(banner.winfo_children()):
+        for w in list(box.inner.winfo_children()) + list(banner.winfo_children()):
             w.destroy()
         box.config(text=f"CAN channels of {info.project.ecu_name} (project {info.project.name})")
         for path, label, rx, tx in info.channels:
-            ttk.Checkbutton(box, text=f"{label}   -  ECU receives {rx}, sends {tx} message(s)",
+            ttk.Checkbutton(box.inner, text=f"{label}   -  ECU receives {rx}, sends {tx} message(s)",
                             variable=self.s["chan_vars"][path]).pack(anchor="w")
         if not info.channels:
-            ttk.Label(box, text="The ECU of the project has no CAN channel: import the DBC files in DaVinci (Input "
+            ttk.Label(box.inner, text="The ECU of the project has no CAN channel: import the DBC files in DaVinci (Input "
                                 "Files), run Update and save the project.", foreground=COLORS["error"]).pack(anchor="w")
         if info.gateway_files:
             gw = info.gateway_files[0]
@@ -561,7 +590,7 @@ class StartWizard(tk.Toplevel):
             self.s["uinfo"] = info
             self.s["bus_vars"] = [tk.BooleanVar(value=True) for _ in info.cfg.buses]
             self.s["new_vars"] = {c[0]: tk.BooleanVar(value=False) for c in info.unused_channels}
-            self.s["onlyprev"] = tk.BooleanVar(value=info.cfg.options.only_previous)
+            self.s["onlyprev"] = tk.BooleanVar(value=True)       # the recommended choice
             if self.step == 1:
                 self._show_update()
         if not start.is_gateway_file(path):
@@ -589,25 +618,28 @@ class StartWizard(tk.Toplevel):
                                            "the main window after Finish (the route table shows kept / new / "
                                            "removed routes).")
         f = self.body
+        note = ttk.Label(f, text="Then click Finish: the main window shows the routes (kept / new / removed). "
+                                 "Generate writes the same file again; in DaVinci run Update (the file is already in "
+                                 "Input Files).", foreground="#666666", wraplength=840, justify="left")
+        note.pack(side="bottom", anchor="w", pady=(10, 0))
+        opt = ttk.LabelFrame(f, text="Messages of the buses that stay", padding=6)
+        opt.pack(side="bottom", fill="x", pady=(10, 0))
         box = ttk.LabelFrame(f, text="CAN buses", padding=6)
-        box.pack(fill="x")
+        box.pack(fill="both", expand=True)
+        inner = self._scroll_area(box)
         for b, v in zip(cfg.buses, self.s["bus_vars"]):
             label = b.bus or (os.path.basename(b.dbc) if b.dbc else b.channel.rsplit("/", 1)[-1])
-            ttk.Checkbutton(box, text=f"{label}   (in the file)", variable=v).pack(anchor="w")
+            ttk.Checkbutton(inner, text=f"{label}   (in the file)", variable=v).pack(anchor="w")
         for path, label, rx, tx in info.unused_channels:
-            ttk.Checkbutton(box, text=f"{label}   -  new: ECU receives {rx}, sends {tx} message(s)",
+            ttk.Checkbutton(inner, text=f"{label}   -  new: ECU receives {rx}, sends {tx} message(s)",
                             variable=self.s["new_vars"][path]).pack(anchor="w")
         if not cfg.base:
-            ttk.Button(box, text="Add DBC file…", command=self._add_update_dbc).pack(anchor="w", pady=(6, 0))
-        opt = ttk.LabelFrame(f, text="Messages of the buses that stay", padding=6)
-        opt.pack(fill="x", pady=(10, 0))
+            ttk.Button(inner, text="Add DBC file…", command=self._add_update_dbc).pack(anchor="w", pady=(6, 0))
         ttk.Radiobutton(opt, text="Keep exactly the messages of the file; new messages in the databases stay off "
                                   "until you enable them (recommended)", value=True,
                         variable=self.s["onlyprev"]).pack(anchor="w")
         ttk.Radiobutton(opt, text="Route every message of the buses again (also new ones)", value=False,
                         variable=self.s["onlyprev"]).pack(anchor="w")
-        ttk.Label(f, text="After Generate the same file is written again. In DaVinci run Update (the file is already "
-                          "in Input Files).", foreground="#666666").pack(anchor="w", pady=(12, 0))
         self.leave = lambda: True
 
     def _add_update_dbc(self):
