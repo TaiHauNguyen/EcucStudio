@@ -289,6 +289,24 @@ socket gửi của ECU và trên socket nhận của mọi node đích. DaVinci 
 node (đã kiểm chứng với DaVinci 5.24). Phần tử tạo thêm cho mỗi node: NETWORK-ENDPOINT `NEP_<node>` (nếu IP chưa
 có), socket remote `SA_<node>_CanGw_Rx` / `_Tx`, và STATIC-SOCKET-CONNECTION từ local socket tới đó.
 
+### 3.4 Bus của ECU khác (mạng zonal)
+
+Ví dụ đang sinh gateway cho zone Z2; mạng có các zone Z1, Z2, Z3 và ECU trung tâm (node mặc định, ví dụ `Central`) trên
+cùng VLAN. Thêm DBC của bus thuộc zone khác vào **CAN buses** và chọn node của zone đó (ví dụ Z3):
+
+- Nếu DBC đó **không có** node của ECU đang sinh (Z2), tool hiểu đó là **bus của Z3**: hộp thoại ghi rõ, không cần chọn
+  kênh CAN của Z2, bảng bus ghi *to / from Z3 over Ethernet*. Không sinh CAN → CAN và không tạo phần tử CAN nào của
+  bus đó.
+- Tool hỏi **IP và port của Z3** (một Ethernet peer tên Z3, cùng kênh / VLAN với node mặc định; port điền sẵn theo
+  node mặc định).
+- Routing:
+  - message Z2 nhận trên bus của nó và Z3 gửi trên bus của Z3 (cùng tên, tên bỏ tiền tố GW, hoặc cùng CAN ID + độ
+    dài): CAN → ETH tới **Central và Z3** (mọi message zone nhận đều lên Central);
+  - message Z2 gửi trên bus của nó và Z3 nhận trên bus của Z3: ETH → CAN **từ Z3**;
+  - khác độ dài / layout signal: không route sang Z3 (WARNING).
+- **WARNING** liệt kê các message vừa lên Central vừa sang zone khác; cột **Peer** của bảng route ghi `Central, Z3`.
+- Chọn node peer cho message bằng tay (mục 3.3) thì tool giữ lựa chọn đó.
+
 ## 4. Tab **Options & Naming** (không bắt buộc)
 
 - **CAN <-> Ethernet routes**: tạo route CAN ↔ Ethernet (mặc định bật). Tắt đi khi chỉ cần CAN → CAN: không cần

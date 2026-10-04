@@ -1038,6 +1038,40 @@ class GatewayTest(unittest.TestCase):
         with open(self.out, "rb") as fh:
             self.assertEqual(fh.read(), v1)
 
+    # ------------------------------------------------------------------ bus of another ECU (zone) over Ethernet
+    def test_bus_of_another_ecu(self):
+        cabin = os.path.join(self.tmp, "Cabin.dbc")
+        with open(cabin, "w", encoding="utf-8") as fh:
+            fh.write('VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: ZoneB Seat\n\n'
+                     'BO_ 256 EngineData: 8 ZoneB\n SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Seat\n'
+                     ' SG_ EngineTemp : 16|8@1- (1,-40) [-40|87] "degC" Seat\n\n'
+                     'BO_ 768 GwCommand: 4 Seat\n SG_ Cmd : 0|8@1+ (1,0) [0|255] "" ZoneB\n'
+                     ' SG_ Counter : 8|4@1+ (1,0) [0|15] "" ZoneB\n\n'
+                     'BO_ 512 DoorStatus: 4 ZoneB\n SG_ DoorOpen : 0|1@1+ (1,0) [0|1] "" Seat\n\n'
+                     'BA_DEF_ "DBName" STRING ;\nBA_DEF_DEF_ "DBName" "";\nBA_ "DBName" "Cabin";\n')
+        cfg = config(self.out)
+        cfg.ethernet.default_peer = "Central"
+        cfg.buses.append(BusInput(dbc=cabin, node="ZoneB", remote_ecu="ZoneB"))
+        plan = make_plan(cfg)
+        self.assertTrue(any(e.startswith("ZoneB: enter its IP address") for e in plan.errors), plan.errors)
+        cfg.ethernet.peers.append(EthPeer("ZoneB", SocketSide(remote_ip="10.0.10.3", remote_port=50001),
+                                          SocketSide(remote_ip="10.0.10.3", remote_port=50000)))
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        r = {x.message.name: x for x in plan.routes}
+        self.assertEqual(r["EngineData"].peers, ["Central", "ZoneB"])      # everything received goes to Central too
+        self.assertEqual(r["GwCommand"].peers, ["ZoneB"])              # ZoneB receives it on its bus
+        self.assertEqual(r["DoorStatus"].peers, ["Central"])               # length differs: not to ZoneB
+        self.assertTrue(any("not routed to ZoneB" in w for w in plan.warnings))
+        self.assertTrue(any("forwarded to Central and to another zone ECU: Body/EngineData (ZoneB)" in w
+                            for w in plan.warnings), plan.warnings)
+        self.assertEqual(plan.can_routes, [])                          # never CAN -> CAN with another ECU's bus
+        self.assertEqual([bp.name for bp in plan.buses], ["Body"])     # its bus is not generated
+        res = generate(plan)
+        root, idx = index(res.output)
+        self.assertFalse([p for p in idx if "Cabin" in p])
+        self.assertIn("/Topology/Clusters/EthCluster/Eth_VLAN10/SA_ZoneB_CanGw_Rx", idx)
+
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))
         self.assertTrue(any("already has VLAN 10" in e for e in plan.errors), plan.errors)

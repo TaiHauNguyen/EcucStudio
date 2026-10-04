@@ -78,9 +78,11 @@ class Choice:
 class BusDialog(tk.Toplevel):
     """Add / edit one DBC input."""
 
-    def __init__(self, master, bus: BusInput, base: Base | None, dbc_cache: dict, project_ecu: str = ""):
+    def __init__(self, master, bus: BusInput, base: Base | None, dbc_cache: dict, project_ecu: str = "",
+                 target_node: str = ""):
         super().__init__(master)
         self.title("CAN Bus Input")
+        self.target_node = target_node      # gateway node of the ECU being generated (from the other buses)
         self.transient(master)
         self.resizable(True, False)
         self.bus, self.base, self.cache, self.result = bus, base, dbc_cache, None
@@ -114,16 +116,19 @@ class BusDialog(tk.Toplevel):
         r += 1
         ttk.Label(f, text="Bus name {bus}:").grid(row=r, column=0, sticky="w", pady=2)
         self.busname = tk.StringVar(value=bus.bus)
-        ttk.Entry(f, textvariable=self.busname, width=24).grid(row=r, column=1, sticky="w", pady=2)
+        self.e_busname = ttk.Entry(f, textvariable=self.busname, width=24)
+        self.e_busname.grid(row=r, column=1, sticky="w", pady=2)
         r += 1
         bf = ttk.Frame(f)
         bf.grid(row=r, column=1, sticky="w", pady=2)
         ttk.Label(f, text="Baud rate (new):").grid(row=r, column=0, sticky="w")
         self.baud = tk.StringVar(value=bus.baudrate or "")
         self.fdbaud = tk.StringVar(value=bus.fd_baudrate or "")
-        ttk.Entry(bf, textvariable=self.baud, width=10).pack(side="left")
+        self.e_baud = ttk.Entry(bf, textvariable=self.baud, width=10)
+        self.e_baud.pack(side="left")
         ttk.Label(bf, text="  CAN FD data baud rate:").pack(side="left")
-        ttk.Entry(bf, textvariable=self.fdbaud, width=10).pack(side="left")
+        self.e_fdbaud = ttk.Entry(bf, textvariable=self.fdbaud, width=10)
+        self.e_fdbaud.pack(side="left")
         ttk.Label(bf, text="  (empty = from DBC)", foreground="#666666").pack(side="left")
         r += 1
         cf = ttk.Frame(f)
@@ -132,10 +137,16 @@ class BusDialog(tk.Toplevel):
         self.tx = tk.BooleanVar(value=bus.tx)
         self.nm = tk.BooleanVar(value=bus.include_nm)
         self.diag = tk.BooleanVar(value=bus.include_diag)
-        ttk.Checkbutton(cf, text="RX messages: CAN -> ETH", variable=self.rx).pack(side="left", padx=(0, 12))
-        ttk.Checkbutton(cf, text="TX messages: ETH -> CAN", variable=self.tx).pack(side="left", padx=(0, 12))
+        self.cb_rx = ttk.Checkbutton(cf, text="RX messages: CAN -> ETH", variable=self.rx)
+        self.cb_rx.pack(side="left", padx=(0, 12))
+        self.cb_tx = ttk.Checkbutton(cf, text="TX messages: ETH -> CAN", variable=self.tx)
+        self.cb_tx.pack(side="left", padx=(0, 12))
         ttk.Checkbutton(cf, text="include NM", variable=self.nm).pack(side="left", padx=(0, 12))
         ttk.Checkbutton(cf, text="include diagnostic", variable=self.diag).pack(side="left")
+        # bus of another ECU: explained here, its CAN channel settings are not used
+        self.remote_info = ttk.Label(self, text="", foreground=COLORS["info"], wraplength=680, justify="left",
+                                     padding=(10, 0, 10, 8))
+        self.remote_info.pack(fill="x")
         bb = ttk.Frame(self, padding=(10, 0, 10, 10))
         bb.pack(fill="x")
         ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
@@ -186,11 +197,28 @@ class BusDialog(tk.Toplevel):
             self.busname.set(self.db.name)
         self.node_changed()
 
+    def is_remote(self) -> bool:
+        """The chosen node is another ECU and the DBC has no node of the ECU being generated: a bus of that ECU."""
+        node, t = self.node.get(), self.target_node
+        return bool(self.db is not None and node and t and node != t and t not in self.db.nodes)
+
     def node_changed(self):
         if self.db is None or not self.node.get():
             self.node_info.config(text="")
+            self.remote_info.config(text="")
             return
         self.node_info.config(text=f"{self.db.name}{', CAN FD' if self.db.has_fd else ''}")
+        remote = self.is_remote()
+        node = self.node.get()
+        self.remote_info.config(text=(
+            f"{self.db.name} is a bus of {node}, not of {self.target_node} ({self.target_node} is not in this DBC). "
+            f"Messages between the buses of {self.target_node} and this bus go over Ethernet: CAN -> ETH to {node} "
+            f"and ETH -> CAN from {node}; no CAN -> CAN and no CAN channel of {self.target_node} for it. The tool "
+            f"asks for the IP address and ports of {node}.") if remote else "")
+        for w in (self.channel.cb, self.e_busname, self.e_baud, self.e_fdbaud):
+            w.configure(state="disabled" if remote else ("readonly" if w is self.channel.cb else "normal"))
+        for w in (self.cb_rx, self.cb_tx):
+            w.state(["disabled"] if remote else ["!disabled"])
 
     def channel_changed(self):
         ch = self.channel.get()
@@ -200,6 +228,15 @@ class BusDialog(tk.Toplevel):
             self.busname.set(c.cluster_name if generic else ch.rsplit("/", 1)[-1])
 
     def ok(self):
+        if self.is_remote():
+            b = self.bus
+            b.dbc, b.node = os.path.abspath(self.dbc.get().strip()), self.node.get()
+            b.remote_ecu, b.channel, b.new_channel, b.bus = self.node.get(), "", False, ""
+            b.include_nm, b.include_diag = self.nm.get(), self.diag.get()
+            self.result = b
+            self.destroy()
+            return
+        self.bus.remote_ecu = ""
         project_only = self.project_ecu and not self.dbc.get().strip()
         if project_only and not self.channel.get():
             messagebox.showwarning(TITLE, "Select a CAN channel of the project.", parent=self)
@@ -1165,17 +1202,56 @@ class GatewayWindow:
     def refresh_buses(self):
         self.t_bus.delete(*self.t_bus.get_children())
         for i, b in enumerate(self.cfg.buses):
+            if b.remote_ecu:
+                self.t_bus.insert("", "end", iid=str(i), values=(
+                    os.path.basename(b.dbc), f"{b.node}  (other ECU)", "- (bus of another ECU)", "-",
+                    f"to / from {b.remote_ecu} over Ethernet"))
+                continue
             dirs = ", ".join(x for x, on in (("CAN->ETH", b.rx), ("ETH->CAN", b.tx)) if on)
             self.t_bus.insert("", "end", iid=str(i), values=(
                 os.path.basename(b.dbc) if b.dbc else "(DaVinci project)", b.node or "(project ECU)",
                 b.channel or NEW_CLUSTER, b.bus or "(auto)", dirs))
 
+    def target_node(self, skip=None) -> str:
+        """Gateway node of the ECU being generated: the node of most of its own (not other ECUs') DBC buses."""
+        import collections as _c
+        nodes = _c.Counter(b.node for i, b in enumerate(self.cfg.buses)
+                           if i != skip and b.dbc and b.node and not b.remote_ecu)
+        return nodes.most_common(1)[0][0] if nodes else ""
+
+    def ensure_peer(self, name: str):
+        """A bus of another ECU needs that ECU as Ethernet peer (its IP address and ports, same VLAN)."""
+        if name in self.peer_names():
+            return
+        e = self.cfg.ethernet
+        self.side_tx.store(e.can_to_eth)
+        self.side_rx.store(e.eth_to_can)
+        messagebox.showinfo(TITLE, f"{name} is another ECU: messages go to / come from it over Ethernet. Enter its "
+                                   f"IP address and ports (on the Ethernet channel of the default node).",
+                            parent=self.win)
+        def port(s):
+            # same ports on every node: those of the default node (also when it uses an existing socket)
+            if s.remote_port is not None or not s.remote_socket:
+                return s.remote_port
+            ch = self.channel()
+            return next((x.port for x in (ch.sockets if ch else []) if x.path == s.remote_socket), None)
+        new = EthPeer(name=name, can_to_eth=SocketSide(remote_port=port(e.can_to_eth)),
+                      eth_to_can=SocketSide(remote_port=port(e.eth_to_can)))
+        d = PeerDialog(self.win, self, new, taken=self.peer_names())
+        self.win.wait_window(d)
+        if d.result is not None:
+            e.peers.append(d.result)
+            self.refresh_peers()
+
     def add_bus(self):
-        d = BusDialog(self.win, BusInput(), self.base, self.dbc_cache, self.project_ecu())
+        d = BusDialog(self.win, BusInput(), self.base, self.dbc_cache, self.project_ecu(), self.target_node())
         self.win.wait_window(d)
         if d.result:
             self.cfg.buses.append(d.result)
             self.refresh_buses()
+            if d.result.remote_ecu:
+                self.ensure_peer(d.result.remote_ecu)
+                return
             if not self.v_base.get().strip():
                 if not self.v_out.get().strip():
                     db = self.dbc_cache.get(os.path.abspath(d.result.dbc))
@@ -1187,9 +1263,13 @@ class GatewayWindow:
         sel = self.t_bus.selection()
         if not sel:
             return
-        d = BusDialog(self.win, self.cfg.buses[int(sel[0])], self.base, self.dbc_cache, self.project_ecu())
+        i = int(sel[0])
+        d = BusDialog(self.win, self.cfg.buses[i], self.base, self.dbc_cache, self.project_ecu(),
+                      self.target_node(skip=i))
         self.win.wait_window(d)
         self.refresh_buses()
+        if d.result is not None and d.result.remote_ecu:
+            self.ensure_peer(d.result.remote_ecu)
 
     def remove_bus(self):
         sel = self.t_bus.selection()

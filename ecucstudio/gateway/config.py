@@ -98,6 +98,10 @@ class BusInput:
     tx: bool = True                 # route messages the node sends: ETH -> CAN
     include_nm: bool = False
     include_diag: bool = False
+    # bus of another ECU (e.g. another zone ECU), named after its node in the DBC: no CAN element is made for it; it
+    # tells which messages go to that ECU (it sends them on its bus) or come from it (it receives them) over Ethernet.
+    # The Ethernet peer with this name gives its IP address and ports.
+    remote_ecu: str = ""
     messages: dict = field(default_factory=dict)   # name -> {"enabled": bool, "header_id": "0x..", "eth_pdu": "..",
                                                    #   "eth_peers": [..] (CAN -> ETH destinations),
                                                    #   "eth_peer": ".." (ETH -> CAN source)}

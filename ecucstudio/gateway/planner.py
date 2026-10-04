@@ -302,6 +302,7 @@ class Planner:
             from .regen import load_previous
             self.previous = load_previous(cfg.previous)
         self._prev_used: set = set()
+        self._remotes: list = []            # (ECU, database, node) of the buses of other ECUs
         self.dbc_cache = dbc_cache if dbc_cache is not None else {}
         self.plan = Plan(cfg)
         self._taken: set[str] = set()          # planned paths (to keep new names unique)
@@ -405,6 +406,10 @@ class Planner:
             return False
         if cfg.options.can_routes:
             self._plan_can_routes()
+        if eth and self._remotes:
+            self._plan_remote_routes()
+        if plan.errors:
+            return False
         if eth and plan.enabled_routes:
             self._resolve_sides()
             self._resolve_id_set()
@@ -604,6 +609,15 @@ class Planner:
     # ------------------------------------------------------------------ buses
     def _plan_bus(self, bc: BusInput):
         b, plan, naming = self.base, self.plan, self.cfg.naming
+        if bc.remote_ecu and bc.dbc:
+            # bus of another ECU: only read (which messages it sends / receives); nothing of it is generated
+            db = self.dbc(bc.dbc)
+            if bc.node and bc.node not in db.nodes:
+                raise ValueError(f"node '{bc.node}' is not in {db.name} (nodes: {', '.join(db.nodes)})")
+            self._remotes.append((sanitize(bc.remote_ecu), db, bc.node))
+            self.info(f"{db.name}: bus of {bc.remote_ecu}; its messages to / from {plan.ecu_name} go over Ethernet "
+                      f"(no CAN -> CAN, no CAN element of it is generated).")
+            return
         can_channels = b.can_channels()
         if not bc.dbc:
             if not self.project:
@@ -930,6 +944,88 @@ class Planner:
         if plan.can_routes:
             self.info(f"CAN -> CAN: {len(plan.enabled_can_routes)} of {len(plan.can_routes)} paired message(s) "
                       f"routed between the buses.")
+
+    # ------------------------------------------------------------------ buses of other ECUs (over Ethernet)
+    def _plan_remote_routes(self):
+        """A message this ECU receives on CAN and another ECU sends on its bus goes to that ECU too (besides the
+        default peer, which gets every received message); a message this ECU sends on CAN and another ECU receives on
+        its bus comes from that ECU. Pairing: same name, name without gateway prefix, same CAN id + length."""
+        from types import SimpleNamespace
+        plan, opts = self.plan, self.cfg.options
+        sends, receives = [], []
+        for ecu, db, node in self._remotes:
+            rx, tx = db.node_messages(node)
+            sends += [(ecu, db, m) for m in tx]
+            receives += [(ecu, db, m) for m in rx]
+
+        def index(items):
+            by_name, by_norm, by_id = (collections.defaultdict(list) for _ in range(3))
+            for ecu, db, m in items:
+                by_name[m.name].append((ecu, db, m))
+                by_norm[_norm_gateway_name(m.name)].append((ecu, db, m))
+                by_id[(m.can_id, m.extended, m.length)].append((ecu, db, m))
+            return by_name, by_norm, by_id
+
+        def find(idx, r):
+            by_name, by_norm, by_id = idx
+            m = r.message
+            for hits in (by_name.get(m.name), by_norm.get(_norm_gateway_name(m.name)),
+                         by_id.get((m.can_id, m.extended, r.length)) if opts.can_match_id else None):
+                if hits:
+                    return hits
+            return []
+
+        def check(local, ecu, db, rm, local_is_src):
+            other = SimpleNamespace(length=rm.length, message=rm, bus=SimpleNamespace(name=f"{ecu}/{db.name}"))
+            a, b_ = (local, other) if local_is_src else (other, local)
+            return pair_problem(a, b_)
+
+        missing, both = set(), []
+        sent_idx, recv_idx = index(sends), index(receives)
+        for r in plan.routes:
+            if not r.enabled or r.can_problem:
+                continue
+            over = r.bus.cfg.messages.get(r.message.name, {}) if isinstance(r.bus.cfg.messages, dict) else {}
+            if r.direction == CAN_TO_ETH:
+                if "eth_peers" in over:
+                    continue                        # chosen by the user
+                for ecu, db, rm in find(sent_idx, r):
+                    reason, notes = check(r, ecu, db, rm, True)
+                    if reason:
+                        r.notes.append(f"{ecu} sends it on {db.name} but {reason}: not routed to {ecu}")
+                        self.warn(f"{r.key}: {ecu} sends it on {db.name} but {reason}; it is not routed to {ecu}.")
+                        continue
+                    if ecu not in self._peer_cfg:
+                        missing.add(ecu)
+                        continue
+                    if ecu not in r.peers:
+                        r.peers.append(ecu)
+                        r.notes.append(f"also to {ecu} ({db.name}/{rm.name})" + (f"; {notes[0]}" if notes else ""))
+                if len(r.peers) > 1 and plan.default_peer in r.peers:
+                    both.append(r)
+            else:
+                if "eth_peer" in over or "eth_peers" in over:
+                    continue
+                hits = [h for h in find(recv_idx, r) if not check(r, h[0], h[1], h[2], False)[0]]
+                ecus = list(dict.fromkeys(h[0] for h in hits))
+                if len(ecus) > 1:
+                    self.warn(f"{r.key}: received by several ECUs ({', '.join(ecus)}); it keeps coming from "
+                              f"{r.peers[0] if r.peers else plan.default_peer} (choose the source in the route).")
+                elif ecus:
+                    ecu = ecus[0]
+                    if ecu not in self._peer_cfg:
+                        missing.add(ecu)
+                    else:
+                        r.peers = [ecu]
+                        r.notes.append(f"from {ecu} ({hits[0][1].name}/{hits[0][2].name})")
+        for ecu in sorted(missing):
+            self.err(f"{ecu}: enter its IP address and ports (Ethernet tab -> Ethernet peers -> Add peer, name {ecu}): "
+                     f"messages go to / come from it over Ethernet.")
+        if both:
+            names = ", ".join(f"{r.key} ({', '.join(p for p in r.peers if p != plan.default_peer)})" for r in both[:12])
+            more = f" and {len(both) - 12} more" if len(both) > 12 else ""
+            self.warn(f"{len(both)} message(s) are forwarded to {plan.default_peer} and to another zone ECU: "
+                      f"{names}{more}.")
 
     def _check_can_route(self, cr: CanRoute, prev_can: list):
         b, cfg, opts = self.base, self.cfg, self.cfg.options
