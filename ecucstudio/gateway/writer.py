@@ -489,10 +489,12 @@ class Writer:
         ident = self.ident("SO-CON-I-PDU-IDENTIFIER", id_path, T("HEADER-ID", r.header_id),
                            R("PDU-TRIGGERING-REF", "PDU-TRIGGERING", eth_pt))
         self.attach(self.lst(p.id_set, "I-PDU-IDENTIFIERS"), ident, p.id_set)
-        sp = p.sides[r.direction]
-        ids = self.lst(sp.connection, "I-PDU-IDENTIFIERS")
-        self.attach_ref(ids, E("SO-CON-I-PDU-IDENTIFIER-REF-CONDITIONAL",
-                               R("SO-CON-I-PDU-IDENTIFIER-REF", "SO-CON-I-PDU-IDENTIFIER", id_path)))
+        # one identifier, referenced by the socket connection of every peer (CAN -> ETH to several nodes: 1:N)
+        for peer in r.peers:
+            sp = p.sides[(r.direction, peer)]
+            ids = self.lst(sp.connection, "I-PDU-IDENTIFIERS")
+            self.attach_ref(ids, E("SO-CON-I-PDU-IDENTIFIER-REF-CONDITIONAL",
+                                   R("SO-CON-I-PDU-IDENTIFIER-REF", "SO-CON-I-PDU-IDENTIFIER", id_path)))
         # ---------------------------------------------------------- gateway
         src, dst = (can_pt, eth_pt) if r.direction == CAN_TO_ETH else (eth_pt, can_pt)
         mapping = E("I-PDU-MAPPING", R("SOURCE-I-PDU-REF", "PDU-TRIGGERING", src),

@@ -53,6 +53,15 @@ class SocketSide:
 
 
 @dataclass
+class EthPeer:
+    """Another Ethernet node the gateway ECU exchanges PDUs with (besides the default peer of can_to_eth /
+    eth_to_can). Empty local socket fields share the local sockets of the default peer."""
+    name: str = ""                  # used in message overrides ("eth_peers" / "eth_peer") and in new names
+    can_to_eth: SocketSide = field(default_factory=SocketSide)     # where CAN -> ETH PDUs are sent to
+    eth_to_can: SocketSide = field(default_factory=SocketSide)     # where ETH -> CAN PDUs come from
+
+
+@dataclass
 class EthernetSettings:
     channel: str = ""               # ETHERNET-PHYSICAL-CHANNEL (path, short name or VLANnn; empty = the only one)
     connector: str = ""             # ECU's ETHERNET-COMMUNICATION-CONNECTOR on that channel (empty = auto / new)
@@ -72,6 +81,8 @@ class EthernetSettings:
     can_to_eth: SocketSide = field(default_factory=SocketSide)
     eth_to_can: SocketSide = field(default_factory=SocketSide)
     id_set: str = ""                # SOCKET-CONNECTION-IPDU-IDENTIFIER-SET (path or new name; empty = auto)
+    default_peer: str = ""          # name of the node of can_to_eth / eth_to_can (empty = "default")
+    peers: list[EthPeer] = field(default_factory=list)  # more nodes; a message picks them by name
 
 
 @dataclass
@@ -87,7 +98,9 @@ class BusInput:
     tx: bool = True                 # route messages the node sends: ETH -> CAN
     include_nm: bool = False
     include_diag: bool = False
-    messages: dict = field(default_factory=dict)   # name -> {"enabled": bool, "header_id": "0x..", "eth_pdu": ".."}
+    messages: dict = field(default_factory=dict)   # name -> {"enabled": bool, "header_id": "0x..", "eth_pdu": "..",
+                                                   #   "eth_peers": [..] (CAN -> ETH destinations),
+                                                   #   "eth_peer": ".." (ETH -> CAN source)}
 
 
 @dataclass
@@ -152,6 +165,9 @@ class GatewayConfig:
         eth = dict(d.get("ethernet") or {})
         eth["can_to_eth"] = build(SocketSide, eth.get("can_to_eth"))
         eth["eth_to_can"] = build(SocketSide, eth.get("eth_to_can"))
+        eth["peers"] = [EthPeer(name=x.get("name", ""), can_to_eth=build(SocketSide, x.get("can_to_eth")),
+                                eth_to_can=build(SocketSide, x.get("eth_to_can")))
+                        for x in eth.get("peers") or [] if isinstance(x, dict)]
         cfg = cls(base=d.get("base", ""), output=d.get("output", ""), ecu=d.get("ecu", ""),
                   system=d.get("system", ""), schema=d.get("schema", "AUTOSAR_00052"),
                   previous=d.get("previous", ""), can_gateway=dict(d.get("can_gateway") or {}),

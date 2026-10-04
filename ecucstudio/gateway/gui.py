@@ -12,7 +12,7 @@ from ..gui.theme import COLORS, init_style
 from ..gui.widgets import Tooltip, dialog_header
 from . import dbcread, dvproject, report
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
-from .config import BusInput, GatewayConfig, Naming, SocketSide
+from .config import BusInput, EthPeer, GatewayConfig, Naming, SocketSide
 from .planner import CAN_TO_ETH, ETH_TO_CAN, CanRoute, Route, load_base, make_plan, new_ecu_name
 from .regen import config_from_file
 from .suggest import apply as apply_suggestions
@@ -221,7 +221,7 @@ class BusDialog(tk.Toplevel):
 
 
 class RouteDialog(tk.Toplevel):
-    def __init__(self, master, route):
+    def __init__(self, master, route, peers=()):
         super().__init__(master)
         self.title("Route")
         self.transient(master)
@@ -244,6 +244,23 @@ class RouteDialog(tk.Toplevel):
         self.eth = tk.StringVar(value=over.get("eth_pdu", ""))
         ttk.Entry(f, textvariable=self.eth, width=50).grid(row=2, column=1, columnspan=2, sticky="we")
         ttk.Label(f, text=f"(planned {route.eth_pdu})", foreground="#666666").grid(row=3, column=1, sticky="w")
+        # Ethernet peers (only when more than one node is configured)
+        self.peers, self.v_peers, self.v_peer = list(peers), {}, tk.StringVar()
+        if len(self.peers) > 1:
+            pf = ttk.Frame(f)
+            pf.grid(row=4, column=1, columnspan=2, sticky="w", pady=(4, 0))
+            current = route.peers or self.peers[:1]
+            if route.direction == CAN_TO_ETH:
+                ttk.Label(f, text="Send to:").grid(row=4, column=0, sticky="w", pady=(4, 0))
+                for name in self.peers:
+                    v = self.v_peers[name] = tk.BooleanVar(value=name in current)
+                    ttk.Checkbutton(pf, text=name, variable=v).pack(side="left", padx=(0, 8))
+            else:
+                ttk.Label(f, text="Receive from:").grid(row=4, column=0, sticky="w", pady=(4, 0))
+                self.v_peer.set(current[0])
+                ttk.Combobox(pf, textvariable=self.v_peer, values=self.peers, width=24,
+                             state="readonly").pack(side="left")
+        self.direction = route.direction
         bb = ttk.Frame(self, padding=(10, 0, 10, 10))
         bb.pack(fill="x")
         ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
@@ -260,6 +277,102 @@ class RouteDialog(tk.Toplevel):
             self.result["header_id"] = h
         if self.eth.get().strip():
             self.result["eth_pdu"] = self.eth.get().strip()
+        if len(self.peers) > 1:
+            if self.direction == CAN_TO_ETH:
+                chosen = [n for n in self.peers if self.v_peers[n].get()]
+                if not chosen:
+                    messagebox.showwarning(TITLE, "Select at least one Ethernet peer.", parent=self)
+                    self.result = None
+                    return
+                if chosen != self.peers[:1]:
+                    self.result["eth_peers"] = chosen
+            elif self.v_peer.get() and self.v_peer.get() != self.peers[0]:
+                self.result["eth_peer"] = self.v_peer.get()
+        self.destroy()
+
+
+class PeerPickDialog(tk.Toplevel):
+    """Ethernet peers of several routes: destinations (CAN -> ETH) or the source (ETH -> CAN)."""
+
+    def __init__(self, master, peers, multi: bool, current=()):
+        super().__init__(master)
+        self.title("Ethernet peers")
+        self.transient(master)
+        self.result, self.peers, self.multi = None, list(peers), multi
+        dialog_header(self, "Send the selected messages to" if multi else "Receive the selected messages from",
+                      "CAN -> ETH: one PDU can go to several nodes (one header id for all of them)." if multi else
+                      "ETH -> CAN: a CAN PDU has one Ethernet source.")
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill="both")
+        self.vars, self.one = {}, tk.StringVar(value=(list(current) or self.peers)[0])
+        for name in self.peers:
+            if multi:
+                v = self.vars[name] = tk.BooleanVar(value=name in current)
+                ttk.Checkbutton(f, text=name, variable=v).pack(anchor="w")
+            else:
+                ttk.Radiobutton(f, text=name, value=name, variable=self.one).pack(anchor="w")
+        bb = ttk.Frame(self, padding=(10, 0, 10, 10))
+        bb.pack(fill="x")
+        ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bb, text="OK", command=self.ok).pack(side="right", padx=6)
+        self.grab_set()
+
+    def ok(self):
+        chosen = [n for n in self.peers if self.vars[n].get()] if self.multi else [self.one.get()]
+        if not chosen:
+            messagebox.showwarning(TITLE, "Select at least one Ethernet peer.", parent=self)
+            return
+        self.result = chosen
+        self.destroy()
+
+
+class PeerDialog(tk.Toplevel):
+    """Another Ethernet node: its sockets for both directions (the local sockets are shared by default)."""
+
+    def __init__(self, master, app, peer: EthPeer, taken=()):
+        super().__init__(master)
+        self.title("Ethernet peer")
+        self.transient(master)
+        self.result, self.taken = None, set(taken)
+        dialog_header(self, "Ethernet peer",
+                      "Another node the gateway ECU exchanges PDUs with (for example another zone ECU). Leave the "
+                      "local socket at <create new> with empty name and port to share the local sockets of the "
+                      "default peer (one sending and one receiving port for all nodes).")
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill="both", expand=True)
+        top = ttk.Frame(f)
+        top.pack(fill="x")
+        ttk.Label(top, text="Name:").pack(side="left")
+        self.v_name = tk.StringVar(value=peer.name)
+        ttk.Entry(top, textvariable=self.v_name, width=30).pack(side="left", padx=6)
+        sides = ttk.Frame(f)
+        sides.pack(fill="both", expand=True, pady=(8, 0))
+        self.tx = SideFrame(sides, "CAN -> ETH  (sent to this node)", app)
+        self.rx = SideFrame(sides, "ETH -> CAN  (received from this node)", app)
+        self.tx.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        self.rx.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        ch, conn = app.channel(), app.connector()
+        for frame, side in ((self.tx, peer.can_to_eth), (self.rx, peer.eth_to_can)):
+            frame.fill(ch, conn)
+            frame.load(side)
+        bb = ttk.Frame(self, padding=(10, 0, 10, 10))
+        bb.pack(fill="x")
+        ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bb, text="OK", command=self.ok).pack(side="right", padx=6)
+        self.grab_set()
+
+    def ok(self):
+        name = self.v_name.get().strip()
+        if not name:
+            messagebox.showwarning(TITLE, "Enter the name of the peer.", parent=self)
+            return
+        if name in self.taken or name == "default":
+            messagebox.showwarning(TITLE, f"The name {name} is already used.", parent=self)
+            return
+        peer = EthPeer(name=name)
+        self.tx.store(peer.can_to_eth)
+        self.rx.store(peer.eth_to_can)
+        self.result = peer
         self.destroy()
 
 
@@ -545,6 +658,98 @@ class GatewayWindow:
         self.side_rx = SideFrame(sides, "ETH -> CAN  (gateway ECU receives from Ethernet)", self)
         self.side_tx.pack(side="left", fill="both", expand=True, padx=(0, 4))
         self.side_rx.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        # in the free space under the channel settings (the tab does not get taller)
+        pl = ttk.LabelFrame(top, text="Ethernet peers (nodes the PDUs are sent to / received from)", padding=6)
+        pl.grid(row=5, column=0, columnspan=3, sticky="we", pady=(10, 0))
+        left = ttk.Frame(pl)
+        left.pack(side="left", fill="y")
+        ttk.Label(left, text="Name of the node above:").pack(anchor="w")
+        self.v_defpeer = tk.StringVar()
+        e_def = ttk.Entry(left, textvariable=self.v_defpeer, width=22)
+        e_def.pack(anchor="w", pady=(2, 0))
+        Tooltip(e_def, "Name of the node of the two socket frames above (the default peer of every route). "
+                       "Empty = default.")
+        cols = ("Peer", "CAN -> ETH to", "ETH -> CAN from")
+        self.t_peers = ttk.Treeview(pl, columns=cols, show="headings", height=3, selectmode="browse")
+        for c, wd in zip(cols, (140, 200, 200)):
+            self.t_peers.heading(c, text=c, anchor="w")
+            self.t_peers.column(c, width=wd, anchor="w")
+        self.t_peers.pack(side="left", fill="x", expand=True, padx=(10, 0))
+        self.t_peers.bind("<Double-1>", lambda _e: self.edit_peer())
+        pb = ttk.Frame(pl)
+        pb.pack(side="left", fill="y", padx=(6, 0))
+        ttk.Button(pb, text="Add peer…", command=self.add_peer).pack(fill="x")
+        ttk.Button(pb, text="Edit…", command=self.edit_peer).pack(fill="x", pady=3)
+        ttk.Button(pb, text="Remove", command=self.remove_peer).pack(fill="x")
+
+    # ------------------------------------------------------------------ Ethernet peers
+    def peer_names(self) -> list[str]:
+        e = self.cfg.ethernet
+        return [self.v_defpeer.get().strip() or "default"] + [p.name for p in e.peers]
+
+    def refresh_peers(self):
+        t = self.t_peers
+        t.delete(*t.get_children())
+
+        def where(s: SocketSide):
+            if s.remote_socket:
+                return s.remote_socket.rsplit("/", 1)[-1]
+            return f"{s.remote_ip or '?'}:{s.remote_port if s.remote_port is not None else '?'}"
+        for i, p in enumerate(self.cfg.ethernet.peers):
+            t.insert("", "end", iid=str(i), values=(p.name, where(p.can_to_eth), where(p.eth_to_can)))
+
+    def add_peer(self):
+        e = self.cfg.ethernet
+        self.side_tx.store(e.can_to_eth)
+        self.side_rx.store(e.eth_to_can)
+        # the same ports on every node (one receiving / one sending port): prefilled from the default peer
+        new = EthPeer(can_to_eth=SocketSide(remote_port=e.can_to_eth.remote_port),
+                      eth_to_can=SocketSide(remote_port=e.eth_to_can.remote_port))
+        d = PeerDialog(self.win, self, new, taken=self.peer_names())
+        self.win.wait_window(d)
+        if d.result is not None:
+            e.peers.append(d.result)
+            self.refresh_peers()
+
+    def edit_peer(self):
+        sel = self.t_peers.selection()
+        if not sel:
+            return
+        i = int(sel[0])
+        peers = self.cfg.ethernet.peers
+        old = peers[i].name
+        d = PeerDialog(self.win, self, peers[i], taken=[n for n in self.peer_names() if n != old])
+        self.win.wait_window(d)
+        if d.result is not None:
+            peers[i] = d.result
+            if d.result.name != old:
+                self._rename_peer(old, d.result.name)
+            self.refresh_peers()
+
+    def remove_peer(self):
+        sel = self.t_peers.selection()
+        if not sel:
+            return
+        name = self.cfg.ethernet.peers[int(sel[0])].name
+        del self.cfg.ethernet.peers[int(sel[0])]
+        self._rename_peer(name, None)
+        self.refresh_peers()
+
+    def _rename_peer(self, old, new):
+        """Message overrides follow a renamed peer; a removed peer is dropped from them."""
+        for b in self.cfg.buses:
+            for over in b.messages.values():
+                if over.get("eth_peer") == old:
+                    if new:
+                        over["eth_peer"] = new
+                    else:
+                        over.pop("eth_peer")
+                if isinstance(over.get("eth_peers"), list) and old in over["eth_peers"]:
+                    rest = [new if x == old else x for x in over["eth_peers"] if new or x != old]
+                    if rest:
+                        over["eth_peers"] = rest
+                    else:
+                        over.pop("eth_peers")
 
     def _new_eth_frame(self, parent):
         """Fields for a new Ethernet channel / ECU connection (base file without Ethernet, new VLAN, or an
@@ -630,7 +835,7 @@ class GatewayWindow:
         top.pack(fill="both", expand=True)
         cols = report.COLUMNS
         self.t_routes = ttk.Treeview(top, columns=cols, show="headings", selectmode="extended", height=8)
-        widths = (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 95, 220, 380)
+        widths = (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 90, 95, 220, 380)
         for c, wd in zip(cols, widths):
             self.t_routes.heading(c, text=c, anchor="w")
             self.t_routes.column(c, width=wd, anchor="w", stretch=c == "Remark")
@@ -989,6 +1194,7 @@ class GatewayWindow:
         e.id_set = self.c_idset.get()
         self.side_tx.store(e.can_to_eth)
         self.side_rx.store(e.eth_to_can)
+        e.default_peer = self.v_defpeer.get().strip()
         c.header.extended_flag = self.v_extflag.get()
         c.options.eth_signals = self.v_sigs.get()
         c.options.can_tx_timing = self.v_timing.get()
@@ -1014,6 +1220,8 @@ class GatewayWindow:
         self.v_mask.set(c.ethernet.ecu_netmask or "255.255.255.0")
         self.v_mac.set(c.ethernet.mac)
         self.v_role.set(c.ethernet.tcp_role or "CONNECT")
+        self.v_defpeer.set(c.ethernet.default_peer)
+        self.refresh_peers()
         self.v_extflag.set(c.header.extended_flag)
         self.v_sigs.set(c.options.eth_signals)
         self.v_timing.set(c.options.can_tx_timing)
@@ -1198,7 +1406,7 @@ class GatewayWindow:
                 self.cfg.can_gateway[r.key] = {"enabled": ans}
                 self.analyze()
             return
-        d = RouteDialog(self.win, r)
+        d = RouteDialog(self.win, r, self.peer_names())
         self.win.wait_window(d)
         if d.result is not None:
             r.bus.cfg.messages[r.message.name] = d.result
@@ -1224,6 +1432,8 @@ class GatewayWindow:
         m.add_command(label="Enable", command=lambda: self.toggle_routes(True))
         m.add_command(label="Disable", command=lambda: self.toggle_routes(False))
         m.add_command(label="Edit…", command=self.edit_route)
+        if self.cfg.ethernet.peers:
+            m.add_command(label="Ethernet peers…", command=self.set_peers)
         m.add_separator()
         m.add_command(label="Add CAN -> CAN link…", command=self.add_link)
         sel = self._selected_routes()
@@ -1239,6 +1449,33 @@ class GatewayWindow:
                 self.cfg.can_gateway.pop(r.key, None)
             else:
                 r.bus.cfg.messages.pop(r.message.name, None)
+        self.analyze()
+
+    def set_peers(self):
+        routes = [r for r in self._selected_routes() if not isinstance(r, CanRoute)]
+        dirs = {r.direction for r in routes}
+        if len(dirs) != 1:
+            if routes:
+                messagebox.showwarning(TITLE, "Select routes of one direction (CAN->ETH or ETH->CAN).",
+                                       parent=self.win)
+            return
+        multi = dirs == {CAN_TO_ETH}
+        names = self.peer_names()
+        current = routes[0].peers if routes[0].peers else names[:1]
+        d = PeerPickDialog(self.win, names, multi, current)
+        self.win.wait_window(d)
+        if d.result is None:
+            return
+        for r in routes:
+            over = dict(r.bus.cfg.messages.get(r.message.name, {}))
+            over.pop("eth_peers", None)
+            over.pop("eth_peer", None)
+            if d.result != names[:1]:
+                if multi:
+                    over["eth_peers"] = d.result
+                else:
+                    over["eth_peer"] = d.result[0]
+            r.bus.cfg.messages[r.message.name] = over
         self.analyze()
 
     def add_link(self):

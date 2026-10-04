@@ -202,6 +202,29 @@ Trong mỗi khung:
 
 Hai chiều có thể dùng chung một socket.
 
+### 3.3 Nhiều node Ethernet (peers)
+
+Mặc định mọi PDU đi tới node của hai khung ở mục 3.2 (ví dụ máy tính trung tâm). Khi một số message phải tới node
+khác (ví dụ một zone ECU khác, đi thẳng qua switch), khai báo node đó trong khung **Ethernet peers**:
+
+- **Name of the node above**: tên của node ở mục 3.2 (bỏ trống = `default`), hiện trong cột **Peer** của bảng route.
+- **Add peer…**: tên node và socket hai chiều của nó, cùng cách điền như mục 3.2:
+  - **CAN -> ETH (sent to this node)**: IP và port mà node đó **nhận**;
+  - **ETH -> CAN (received from this node)**: IP và port mà node đó **gửi**.
+  - Để local socket là `<create new>` với tên và port trống thì dùng chung local socket của node mặc định (ECU có
+    một port gửi và một port nhận cho mọi node). Port được điền sẵn theo node mặc định.
+
+Chọn node cho message trên bảng route (sau **Analyze**):
+
+- **Double-click** một route: ô **Send to** (CAN->ETH, chọn được nhiều node) hoặc **Receive from** (ETH->CAN, một
+  node).
+- Chọn nhiều dòng cùng chiều → chuột phải → **Ethernet peers…**.
+
+Message gửi tới nhiều node (1:N) có **một** PDU Ethernet và **một** header ID; header ID đó phải còn trống trên
+socket gửi của ECU và trên socket nhận của mọi node đích. DaVinci tạo một SoAdPduRoute với một PduRouteDest cho mỗi
+node (đã kiểm chứng với DaVinci 5.24). Phần tử tạo thêm cho mỗi node: NETWORK-ENDPOINT `NEP_<node>` (nếu IP chưa
+có), socket remote `SA_<node>_CanGw_Rx` / `_Tx`, và STATIC-SOCKET-CONNECTION từ local socket tới đó.
+
 ## 4. Tab **Options & Naming** (không bắt buộc)
 
 - **CAN <-> Ethernet routes**: tạo route CAN ↔ Ethernet (mặc định bật). Tắt đi khi chỉ cần CAN → CAN: không cần
@@ -236,6 +259,7 @@ Bảng route (một dòng là một message):
 | Direction | `CAN->ETH`, `ETH->CAN` hoặc `CAN->CAN` (cột Bus ghi `Body -> Chassis`) |
 | CAN ID, Frame, Length, Cycle ms | thông tin từ DBC (hoặc từ base nếu frame đã có) |
 | CAN PDU / Ethernet PDU | tên PDU hai đầu gateway |
+| Peer | node Ethernet nhận (CAN->ETH, có thể nhiều node) hoặc gửi (ETH->CAN) PDU, mục 3.3 |
 | Header ID | SoAd header ID (dòng cam = đã tự thêm cờ vì trùng) |
 | Remark | lý do tắt, frame dùng lại từ base, 1:N / N:1, chênh lệch độ dài… |
 
@@ -243,7 +267,8 @@ Thao tác trên bảng:
 
 - **Double-click**: bật/tắt route, nhập header ID tay (ví dụ `0x123`), đổi tên PDU Ethernet.
 - **Space**: đảo bật/tắt các dòng đang chọn.
-- **Chuột phải**: Enable / Disable / Edit… / Add CAN -> CAN link… / Reset overrides.
+- **Chuột phải**: Enable / Disable / Edit… / Ethernet peers… (khi có nhiều node) / Add CAN -> CAN link… / Reset
+  overrides.
 
 Mọi thay đổi trên bảng được lưu vào cấu hình và áp dụng lại mỗi lần Analyze.
 
@@ -405,7 +430,9 @@ python -m ecucstudio gateway generate gateway.json
       "include_diag": false,
       "messages": {
         "DoorStatus": {"enabled": false},
-        "EngineData": {"header_id": "0x1100", "eth_pdu": "EngineData_Eth"}
+        "EngineData": {"header_id": "0x1100", "eth_pdu": "EngineData_Eth"},
+        "BrakeStatus": {"eth_peers": ["Central", "ZoneB"]},
+        "GwCommand": {"eth_peer": "ZoneB"}
       }
     }
   ],
@@ -424,7 +451,13 @@ python -m ecucstudio gateway generate gateway.json
     "controller": "",
     "mac": "",
     "can_to_eth": {"local_port": 50100, "remote_ip": "10.0.10.2", "remote_port": 50100},
-    "eth_to_can": {"local_socket": "SA_GwEcu_Rx", "remote_socket": "SA_Tester_Tx"}
+    "eth_to_can": {"local_socket": "SA_GwEcu_Rx", "remote_socket": "SA_Tester_Tx"},
+    "default_peer": "Central",
+    "peers": [
+      {"name": "ZoneB",
+       "can_to_eth": {"remote_ip": "10.0.10.3", "remote_port": 50100},
+       "eth_to_can": {"remote_ip": "10.0.10.3", "remote_port": 50101}}
+    ]
   },
   "header": {"extended_flag": false, "flag_shift": 29},
   "options": {"eth_signals": "copy", "can_tx_timing": "event", "add_fibex": true,
@@ -449,7 +482,9 @@ python -m ecucstudio gateway generate gateway.json
   `ecu_ip`, `ecu_netmask`, `controller`, `mac`. Base không có Ethernet thì tự tạo kênh, chỉ cần `ecu_ip`
   (và `vlan_id` nếu là VLAN).
 - `messages`: chỉnh từng message theo tên trong DBC. `enabled` tắt/bật route, `header_id` đặt header ID tay,
-  `eth_pdu` đổi tên PDU Ethernet.
+  `eth_pdu` đổi tên PDU Ethernet, `eth_peers` (CAN->ETH, danh sách) / `eth_peer` (ETH->CAN) chọn node Ethernet.
+- `default_peer` / `peers` (mục 3.3): tên node của `can_to_eth` / `eth_to_can`, và các node khác. Trường local
+  của một peer bỏ trống = dùng chung local socket của node mặc định.
 - `naming` (không ghi thì dùng mặc định): các mẫu tên như ở tab Options & Naming.
 - CAN → CAN (mục 12): `options.eth_routes` / `can_routes` / `can_match_id`; `can_gateway` bật/tắt từng cặp theo
   khoá `<bus nguồn>/<message>-><bus đích>/<message>` (khoá hiện trong bảng route); `can_links` thêm cặp tay.

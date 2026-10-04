@@ -7,7 +7,7 @@ from .base import Base
 from .planner import Plan
 
 COLUMNS = ("Enabled", "Change", "Direction", "Bus", "Message", "CAN ID", "Frame", "Length", "Cycle ms", "CAN PDU",
-           "Ethernet PDU", "Header ID", "Header note", "Remark")
+           "Ethernet PDU", "Peer", "Header ID", "Header note", "Remark")
 
 
 def route_rows(plan: Plan, removed: bool = True) -> list[tuple]:
@@ -26,7 +26,7 @@ def route_items(plan: Plan, removed: bool = True) -> list[tuple]:
         rows.append((r, (
             "yes" if r.enabled else "no", r.change if r.enabled else "", r.direction, r.bus.name, m.name, m.id_text,
             ("EXT" if m.extended else "STD") + (" FD" if m.fd else ""), r.length, m.cycle_ms or "",
-            (r.can_pdu or "").rsplit("/", 1)[-1] or r.can_pdu, r.eth_pdu,
+            (r.can_pdu or "").rsplit("/", 1)[-1] or r.can_pdu, r.eth_pdu, ", ".join(r.peers) if r.enabled else "",
             r.header_text if r.header_id >= 0 and r.enabled else "", r.header_note if r.enabled else "",
             "; ".join(([r.reason] if r.reason else []) + r.notes))))
     for c in plan.can_routes:
@@ -38,13 +38,13 @@ def route_items(plan: Plan, removed: bool = True) -> list[tuple]:
             "yes" if c.enabled else "no", c.change if c.enabled else "", "CAN->CAN",
             f"{c.src.bus.name} -> {c.dst.bus.name}", msg, cid,
             ("EXT" if d.extended else "STD") + (" FD" if d.fd else ""), c.dst.length, s.cycle_ms or "", pdus,
-            "", "", "", "; ".join(([c.reason] if c.reason else []) + c.notes))))
+            "", "", "", "", "; ".join(([c.reason] if c.reason else []) + c.notes))))
     if removed:
         for p in plan.removed:
             can_id = "" if p.can_id is None else f"0x{p.can_id:X}"
             target = p.eth_pdu or p.dst_pt.rsplit("/", 1)[-1]
             rows.append((p, ("-", "removed", p.direction, "", p.can_frame or p.can_pt.rsplit("/", 1)[-1], can_id, "",
-                             "", "", p.can_pt.rsplit("/", 1)[-1], target,
+                             "", "", p.can_pt.rsplit("/", 1)[-1], target, "",
                              "" if p.header_id is None else f"0x{p.header_id:08X}", "",
                              "in the previous file, not generated any more")))
     return rows
@@ -58,7 +58,8 @@ def write_csv(plan: Plan, path: str):
 
 
 def text_table(plan: Plan) -> str:
-    cols = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12)
+    peers = len(plan.cfg.ethernet.peers) if plan.cfg is not None else 0
+    cols = (0, 1, 2, 3, 4, 5, 6, 7, 10) + ((11,) if peers else ()) + (12, 13)
     rows = [tuple(str(x) for x in r) for r in route_rows(plan)]
     head = tuple(COLUMNS[i] for i in cols)
     data = [tuple(r[i] for i in cols) for r in rows]
@@ -75,8 +76,9 @@ def summary(plan: Plan) -> str:
              f"Local endpoint   : {plan.local_endpoint or '-'}",
              f"Header id set    : {plan.id_set or '-'}{' (new)' if plan.id_set_new else ''}",
              f"Gateway          : {plan.gateway or '-'}{' (new)' if plan.gateway_new else ''}"]
-    for d, sp in plan.sides.items():
-        lines.append(f"{d:<17}: {sp.local.rsplit('/', 1)[-1]}{' (new' if sp.local_new else ' (existing'}, port "
+    for (d, peer), sp in plan.sides.items():
+        label = d if peer == plan.default_peer and not plan.cfg.ethernet.peers else f"{d} {peer}"
+        lines.append(f"{label:<17}: {sp.local.rsplit('/', 1)[-1]}{' (new' if sp.local_new else ' (existing'}, port "
                      f"{sp.local_port}) -> {sp.remote.rsplit('/', 1)[-1]}{' (new' if sp.remote_new else ' (existing'}"
                      f", port {sp.remote_port}) via {sp.connection.rsplit('/', 1)[-1]}")
     for bp in plan.buses:

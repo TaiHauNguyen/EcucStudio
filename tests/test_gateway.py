@@ -15,7 +15,7 @@ from lxml import etree
 from ecucstudio.arxml import local, q
 from ecucstudio.gateway import dbcread, xmlorder
 from ecucstudio.gateway.base import Base
-from ecucstudio.gateway.config import BusInput, GatewayConfig, SocketSide
+from ecucstudio.gateway.config import BusInput, EthPeer, GatewayConfig, SocketSide
 from ecucstudio.gateway.planner import CAN_TO_ETH, ETH_TO_CAN, make_plan
 from ecucstudio.gateway.writer import generate
 
@@ -965,6 +965,78 @@ class GatewayTest(unittest.TestCase):
                                                     ("BrakeStatus_oBody_PT", "GW_BrakeStatus_oChassis_PT")})
         self._refs_resolve(self.out)
         self._xsd(self.out)
+
+    # ------------------------------------------------------------------ Ethernet peers
+    def _peers(self, out, **messages):
+        cfg = self._dbc_only(out)
+        cfg.ethernet.default_peer = "Central"
+        cfg.ethernet.peers.append(EthPeer("ZoneB", SocketSide(remote_ip="10.0.20.3", remote_port=42000),
+                                          SocketSide(remote_ip="10.0.20.3", remote_port=42001)))
+        cfg.buses[0].messages = messages or {"EngineData": {"eth_peers": ["Central", "ZoneB"]},
+                                             "DoorStatus": {"eth_peers": ["ZoneB"]},
+                                             "ExtSameId": {"eth_peers": ["ZoneB"]},
+                                             "GwCommand": {"eth_peer": "ZoneB"}}
+        return cfg
+
+    def test_eth_peers(self):
+        plan = make_plan(self._peers(self.out))
+        self.assertEqual(plan.errors, [])
+        r = {x.message.name: x for x in plan.routes}
+        self.assertEqual(r["EngineData"].peers, ["Central", "ZoneB"])
+        self.assertEqual(r["BrakeStatus"].peers, ["Central"])           # default peer
+        self.assertEqual(r["GwCommand"].peers, ["ZoneB"])
+        self.assertEqual(set(plan.sides), {(CAN_TO_ETH, "Central"), (CAN_TO_ETH, "ZoneB"), (ETH_TO_CAN, "ZoneB")})
+        # one sending port for every peer: the local socket is shared
+        self.assertEqual(plan.sides[(CAN_TO_ETH, "Central")].local, plan.sides[(CAN_TO_ETH, "ZoneB")].local)
+        # ExtSameId (0x100) leaves the same local socket as EngineData (0x100): flag
+        self.assertEqual(r["ExtSameId"].header_id, 0x20000100)
+        res = generate(plan)
+        root, idx = self._refs_resolve(res.output)
+        ch = "/Topology/Clusters/EthernetCluster/Channel_VLAN20"
+        self.assertEqual(idx[f"{ch}/SA_ZoneB_CanGw_Rx"].findtext(".//" + q("PORT-NUMBER")), "42000")
+        self.assertEqual(idx[f"{ch}/NEP_ZoneB"].findtext(".//" + q("IPV-4-ADDRESS")), "10.0.20.3")
+
+        def ids(conn):
+            return {x.text.rsplit("/", 1)[-1] for x in idx[conn].iter(q("SO-CON-I-PDU-IDENTIFIER-REF"))}
+        tx = f"{ch}/SA_GwEcu_CanGw_Tx"
+        self.assertEqual(ids(f"{tx}/SA_GwEcu_CanGw_Tx_to_SA_Remote_CanGw_Rx"),
+                         {"EngineData_oBody_Eth_ID", "BrakeStatus_oBody_Eth_ID"})
+        self.assertEqual(ids(f"{tx}/SA_GwEcu_CanGw_Tx_to_SA_ZoneB_CanGw_Rx"),
+                         {"EngineData_oBody_Eth_ID", "DoorStatus_oBody_Eth_ID", "ExtSameId_oBody_Eth_ID"})
+        self.assertEqual(ids(f"{ch}/SA_GwEcu_CanGw_Rx/SA_GwEcu_CanGw_Rx_to_SA_ZoneB_CanGw_Tx"),
+                         {"GwCommand_oBody_Eth_ID"})
+        # one identifier (one header id) per PDU, also for two destinations
+        self.assertEqual(len([p for p, e in idx.items() if local(e) == "SO-CON-I-PDU-IDENTIFIER"]), 5)
+        self._xsd(res.output)
+        # the table shows the peers
+        from ecucstudio.gateway import report
+        rows = {row[4]: row for row in report.route_rows(plan)}
+        self.assertEqual(rows["EngineData"][report.COLUMNS.index("Peer")], "Central, ZoneB")
+
+    def test_eth_peers_errors_and_roundtrip(self):
+        plan = make_plan(self._peers(self.out, DoorStatus={"eth_peers": ["Nobody"]}))
+        self.assertTrue(any("'Nobody' is not defined" in e for e in plan.errors), plan.errors)
+        cfg = self._peers(self.out)
+        cfg.ethernet.peers.append(EthPeer("ZoneB"))
+        self.assertTrue(any("used twice" in e for e in make_plan(cfg).errors))
+        cfg = self._peers(self.out)
+        conf = os.path.join(self.tmp, "gw.json")
+        cfg.save(conf)
+        back = GatewayConfig.load(conf)
+        self.assertEqual(back.ethernet.peers, cfg.ethernet.peers)
+        self.assertEqual(back.ethernet.default_peer, "Central")
+        # regeneration of a file with peers is unchanged
+        from ecucstudio.gateway.regen import config_from_file
+        generate(make_plan(cfg))
+        with open(self.out, "rb") as fh:
+            v1 = fh.read()
+        cfg2, _ = config_from_file(self.out)
+        self.assertEqual([p.name for p in cfg2.ethernet.peers], ["ZoneB"])
+        plan = make_plan(cfg2)
+        self.assertEqual({r.change for r in plan.enabled_routes}, {"kept"})
+        generate(plan)
+        with open(self.out, "rb") as fh:
+            self.assertEqual(fh.read(), v1)
 
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))

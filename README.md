@@ -148,6 +148,11 @@ hai bus nếu độ dài và layout signal khớp; route `ETH->CAN` của messag
 tắt *CAN <-> Ethernet routes* ở tab Options, không cần thông số Ethernet. Chi tiết: mục 12 của
 [docs/GATEWAY.md](docs/GATEWAY.md).
 
+**Nhiều node Ethernet**: ngoài node mặc định (ví dụ máy tính trung tâm), khai báo thêm node ở khung *Ethernet peers*
+của tab Ethernet (ví dụ một zone ECU khác, đi thẳng qua switch), rồi chọn node cho từng message: CAN->ETH gửi được
+tới nhiều node cùng lúc (một PDU, một header ID), ETH->CAN nhận từ một node. Chi tiết: mục 3.3 của
+[docs/GATEWAY.md](docs/GATEWAY.md).
+
 **Đã import file gateway vào DaVinci, giờ cần thêm/bớt DBC hoặc message?** Generator → **Open…** chính file
 gateway `.arxml` (cấu hình được nhúng trong file; file của bản cũ được dựng lại từ nội dung), thay đổi, Generate
 rồi **Update** trong DaVinci. Route giữ nguyên ra y hệt (tên, UUID, header ID), nên DaVinci giữ nguyên cấu hình

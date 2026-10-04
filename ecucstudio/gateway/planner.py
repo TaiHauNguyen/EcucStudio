@@ -12,6 +12,7 @@ The plan only reads the base file; :mod:`writer` applies it. Rules:
 from __future__ import annotations
 
 import collections
+import dataclasses
 import os
 import re
 from dataclasses import dataclass, field
@@ -98,6 +99,7 @@ class Route:
     header_id: int = 0
     header_note: str = ""
     notes: list[str] = field(default_factory=list)
+    peers: list[str] = field(default_factory=list)  # Ethernet nodes: CAN->ETH destinations / ETH->CAN source
 
     @property
     def can_side_new(self) -> bool:
@@ -140,7 +142,7 @@ class BusPlan:
 
 @dataclass
 class SidePlan:
-    """Sockets for one direction; *_new* flags tell the writer what to create."""
+    """Sockets for one direction and one Ethernet peer; *_new* flags tell the writer what to create."""
     direction: str
     local: str                  # SOCKET-ADDRESS path
     local_new: bool
@@ -154,6 +156,7 @@ class SidePlan:
     remote_netmask: str
     connection: str             # STATIC-SOCKET-CONNECTION path
     connection_new: bool
+    peer: str = ""
 
 
 @dataclass
@@ -182,7 +185,8 @@ class Plan:
     gateway_new: bool = False
     packages: dict = field(default_factory=dict)
     buses: list[BusPlan] = field(default_factory=list)
-    sides: dict = field(default_factory=dict)          # direction -> SidePlan
+    sides: dict = field(default_factory=dict)          # (direction, peer) -> SidePlan
+    default_peer: str = "default"                      # name of the peer of ethernet.can_to_eth / eth_to_can
     routes: list[Route] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -366,6 +370,8 @@ class Planner:
             return plan
         eth = cfg.options.eth_routes
         if eth:
+            self._check_peers()
+        if eth and not plan.errors:
             self._resolve_ethernet()
         if plan.errors:
             return plan
@@ -715,6 +721,7 @@ class Planner:
                     for s in r.can_signals]
             elif r.copy_signals_from:
                 pass            # existing CAN PDU: the writer copies its signal mappings
+        self._route_peers(r, over)
         r.header_id = -1
         if over.get("header_id") not in (None, ""):
             hid = parse_int(over["header_id"])
@@ -727,6 +734,42 @@ class Planner:
             r.header_id, r.locked = prev.header_id, True
             r.header_note = "kept from the previous file"
         plan.routes.append(r)
+
+    # ------------------------------------------------------------------ Ethernet peers
+    def _check_peers(self):
+        eth, plan = self.cfg.ethernet, self.plan
+        plan.default_peer = sanitize(eth.default_peer) if eth.default_peer else "default"
+        self._peer_cfg = {plan.default_peer: (eth.can_to_eth, eth.eth_to_can)}
+        for p in eth.peers:
+            name = sanitize(p.name) if p.name else ""
+            if not name:
+                self.err("An Ethernet peer has no name.")
+            elif name in self._peer_cfg or name == "default":
+                self.err(f"Ethernet peer name '{name}' is used twice.")
+            else:
+                self._peer_cfg[name] = (p.can_to_eth, p.eth_to_can)
+
+    def _route_peers(self, r: Route, over: dict):
+        """Ethernet nodes of a route: CAN -> ETH can go to several peers, ETH -> CAN comes from one."""
+        plan = self.plan
+        alias = lambda n: plan.default_peer if n in ("", "default") else sanitize(str(n))
+        many = over.get("eth_peers")
+        if isinstance(many, str):
+            many = [x.strip() for x in many.split(",")]
+        if r.direction == CAN_TO_ETH:
+            want = [alias(x) for x in (many or [plan.default_peer])]
+        else:
+            one = over.get("eth_peer") or (many[0] if many else "")
+            want = [alias(one)]
+            if many and len(many) > 1:
+                self.warn(f"{r.key}: an ETH->CAN route has one source; using peer {want[0]}.")
+        peers = []
+        for n in want:
+            if n not in self._peer_cfg:
+                self.err(f"{r.key}: Ethernet peer '{n}' is not defined (peers: {', '.join(self._peer_cfg)}).")
+            elif n not in peers:
+                peers.append(n)
+        r.peers = peers
 
     def _existing_can(self, r: Route, ft):
         """Route uses a frame that already exists in the base file."""
@@ -964,17 +1007,24 @@ class Planner:
     # ------------------------------------------------------------------ sockets
     def _resolve_sides(self):
         plan = self.plan
-        need = {r.direction for r in plan.enabled_routes}
-        for direction, side in ((CAN_TO_ETH, self.cfg.ethernet.can_to_eth), (ETH_TO_CAN, self.cfg.ethernet.eth_to_can)):
-            if direction in need:
-                sp = self._side(direction, side)
+        need = {(r.direction, p) for r in plan.enabled_routes for p in r.peers}
+        default_sides = self._peer_cfg[plan.default_peer]
+        for peer, sides in self._peer_cfg.items():          # default peer first, then in configuration order
+            for k, direction in enumerate((CAN_TO_ETH, ETH_TO_CAN)):
+                if (direction, peer) not in need:
+                    continue
+                s = sides[k] if peer == plan.default_peer else _with_local(sides[k], default_sides[k])
+                sp = self._side(direction, s, peer)
                 if sp:
-                    plan.sides[direction] = sp
+                    plan.sides[(direction, peer)] = sp
 
-    def _side(self, direction: str, s: SocketSide) -> SidePlan | None:
+    def _side(self, direction: str, s: SocketSide, peer: str = "") -> SidePlan | None:
         b, plan, ch = self.base, self.plan, self._eth
         tag = "Tx" if direction == CAN_TO_ETH else "Rx"
         what = "CAN->ETH" if direction == CAN_TO_ETH else "ETH->CAN"
+        extra = bool(peer) and peer != plan.default_peer
+        if extra:
+            what += f" ({peer})"
         sockets = {x.path: x for x in ch.sockets}
         # ---- local socket
         local_path, local_new, local_port = "", False, s.local_port
@@ -1040,9 +1090,8 @@ class Planner:
                     if not _valid_ip(ip):
                         self.err(f"{what}: '{ip}' is not an IPv4 address.")
                         return None
-                    nep_name = self._unique(ch.path, sanitize(s.remote_endpoint_name or
-                                                              "NEP_Remote_" + ip.replace(".", "_")),
-                                            "Network endpoint")
+                    nep_name = self._unique(ch.path, sanitize(s.remote_endpoint_name or (
+                        f"NEP_{peer}" if extra else "NEP_Remote_" + ip.replace(".", "_"))), "Network endpoint")
                     nep_path, nep_new = f"{ch.path}/{nep_name}", True
                     self._planned[("endpoint", ip)] = nep_path
             else:
@@ -1057,7 +1106,7 @@ class Planner:
             if nep_path in own:
                 self.warn(f"{what}: the remote endpoint {nep_path.rsplit('/', 1)[-1]} is an address of "
                           f"{plan.ecu_name} itself; enter the IP address of the other node.")
-            name = sanitize(s.remote_name or f"SA_Remote_CanGw_{'Rx' if tag == 'Tx' else 'Tx'}")
+            name = sanitize(s.remote_name or f"SA_{peer if extra else 'Remote'}_CanGw_{'Rx' if tag == 'Tx' else 'Tx'}")
             existing = f"{ch.path}/{name}"
             if existing in sockets and not sockets[existing].connector:
                 remote_path, remote_port = existing, sockets[existing].port
@@ -1086,7 +1135,7 @@ class Planner:
         if not local_new and not remote_new and conn_new:
             self.info(f"{what}: new socket connection {conn_path.rsplit('/', 1)[-1]}.")
         return SidePlan(direction, local_path, local_new, local_port, remote_path, remote_new, remote_port,
-                        nep_path, nep_new, ip, mask, conn_path, conn_new)
+                        nep_path, nep_new, ip, mask, conn_path, conn_new, peer or plan.default_peer)
 
     def _resolve_id_set(self):
         b, plan, value = self.base, self.plan, self.cfg.ethernet.id_set
@@ -1132,10 +1181,13 @@ class Planner:
         routes = [r for r in plan.enabled_routes if r.header_id >= 0] + \
                  [r for r in plan.enabled_routes if r.header_id < 0]     # fixed ids (user / kept) first
         for r in routes:
-            sp = plan.sides.get(r.direction)
-            if sp is None:
+            sps = [plan.sides[(r.direction, p)] for p in r.peers if (r.direction, p) in plan.sides]
+            if not sps:
                 continue
-            keys = ([("tx", sp.local), ("rx", sp.remote)] if r.direction == CAN_TO_ETH else [("rx", sp.local)])
+            # one identifier (header id) for every destination: free on each local and remote socket involved
+            keys = list(dict.fromkeys(
+                [("tx", sp.local) for sp in sps] + [("rx", sp.remote) for sp in sps] if r.direction == CAN_TO_ETH
+                else [("rx", sp.local) for sp in sps]))
             base_id = r.message.can_id | (0x80000000 if hcfg.extended_flag and r.message.extended else 0)
             if r.header_id >= 0 and r.locked:
                 clash = [used[k][r.header_id] for k in keys if r.header_id in used[k]]
@@ -1181,6 +1233,14 @@ class Planner:
             pkg = self._package("GATEWAY")
             name = self._unique(pkg, fmt(self.cfg.naming.gateway, ecu=plan.ecu_name), "Gateway")
             plan.gateway, plan.gateway_new = f"{pkg}/{name}", True
+
+
+def _with_local(s: SocketSide, default: SocketSide) -> SocketSide:
+    """Socket settings of another peer: without own local socket settings it shares the default peer's."""
+    if s.local_socket or s.local_name or s.local_port is not None:
+        return s
+    return dataclasses.replace(s, local_socket=default.local_socket, local_name=default.local_name,
+                               local_port=default.local_port)
 
 
 def _valid_ip(ip: str) -> bool:
