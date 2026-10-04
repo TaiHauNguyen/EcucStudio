@@ -1,0 +1,32 @@
+VERSION ""
+
+
+NS_ :
+	CM_
+	BA_DEF_
+	BA_DEF_DEF_
+	BA_
+	VAL_
+
+BS_:
+
+BU_: ZoneA Radar
+
+BO_ 768 RadarObj: 8 Radar
+ SG_ ObjDist : 0|16@1+ (1,0) [0|0] "" ZoneA
+ SG_ ObjSpeed : 16|16@1+ (1,0) [0|0] "" ZoneA
+
+BO_ 336 VehSpeed: 8 Radar
+ SG_ Speed : 0|16@1+ (1,0) [0|0] "" ZoneA
+
+BO_ 784 SensorCmd: 4 ZoneA
+ SG_ Mode : 0|8@1+ (1,0) [0|0] "" Radar
+
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+BA_DEF_ "Baudrate" INT 0 1000000;
+BA_DEF_ "DBName" STRING ;
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_DEF_DEF_ "Baudrate" 500000;
+BA_DEF_DEF_ "DBName" "";
+BA_ "DBName" "Sensor";
+BA_ "Baudrate" 500000;

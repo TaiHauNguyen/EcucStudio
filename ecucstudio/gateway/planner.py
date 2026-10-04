@@ -341,7 +341,15 @@ class Planner:
 
     # ------------------------------------------------------------------ main
     def run(self) -> Plan:
-        b, cfg, plan = self.base, self.cfg, self.plan
+        if self.prepare():
+            self.assign_header_ids()
+            self.finish()
+        return self.plan
+
+    def prepare(self) -> bool:
+        """Routes, CAN -> CAN pairs, Ethernet sockets and identifier set; False when errors stop the planning.
+        The multi-ECU planner assigns the header ids of all ECUs between prepare() and assign_header_ids()."""
+        cfg, plan = self.cfg, self.plan
         if cfg.previous:
             plan.previous = os.path.abspath(cfg.previous)
             if self.previous is None:
@@ -367,14 +375,14 @@ class Planner:
                 self.err("Select the output file (there is no base file).")
         self._resolve_ecu()
         if plan.errors:
-            return plan
+            return False
         eth = cfg.options.eth_routes
         if eth:
             self._check_peers()
         if eth and not plan.errors:
             self._resolve_ethernet()
         if plan.errors:
-            return plan
+            return False
         for bus_cfg in cfg.buses:
             try:
                 self._plan_bus(bus_cfg)
@@ -383,13 +391,21 @@ class Planner:
         if not cfg.buses:
             self.err("No DBC file selected.")
         if plan.errors:
-            return plan
+            return False
         if cfg.options.can_routes:
             self._plan_can_routes()
         if eth and plan.enabled_routes:
             self._resolve_sides()
             self._resolve_id_set()
+        return True
+
+    def assign_header_ids(self):
+        if self.cfg.options.eth_routes and self.plan.enabled_routes:
             self._assign_header_ids()
+
+    def finish(self):
+        """Gateway, SYSTEM and the comparison with the previous gateway file."""
+        b, cfg, plan = self.base, self.cfg, self.plan
         if plan.enabled_routes or plan.enabled_can_routes:
             self._resolve_gateway()
         plan.system = self._find(cfg.system, "SYSTEM") if cfg.system else b.system_for(plan.ecu)
@@ -404,7 +420,6 @@ class Planner:
             self.info(f"Compared with the previous file: {kept} route(s) kept, {new} new, {len(plan.removed)} removed.")
         if not plan.enabled_routes and not plan.enabled_can_routes:
             self.warn("No message is selected for routing.")
-        return plan
 
     # ------------------------------------------------------------------ ECU / Ethernet
     def _resolve_ecu(self):
@@ -652,7 +667,7 @@ class Planner:
             if r.enabled:
                 r.reason = ""
             elif not r.reason:
-                r.reason = "deselected"
+                r.reason = over.get("reason") or "deselected"
         fields = dict(bus=bp.name, msg=m.name, ecu=plan.ecu_name, node=bp.cfg.node or plan.ecu_name,
                       canid=f"{m.can_id:X}")
         # ---------------------------------------------------------- CAN side
@@ -905,20 +920,10 @@ class Planner:
         src, dst = cr.src, cr.dst
         if cr.match != "same name":
             cr.notes.append(cr.match)
-        if src.length != dst.length:
-            cr.enabled, cr.reason = False, f"length differs ({src.bus.name} {src.length}, {dst.bus.name} {dst.length})"
-        else:
-            layout = lambda m: {(s.start, s.length, s.little_endian) for s in m.signals if not s.multiplexed}
-            ls, ld = layout(src.message), layout(dst.message)
-            if ls and ld and ls != ld:
-                if ld < ls:
-                    cr.notes.append(f"{dst.bus.name} defines {len(ld)} of the {len(ls)} signals (the whole PDU is "
-                                    f"forwarded)")
-                else:
-                    cr.enabled = False
-                    cr.reason = "signal layout differs (a signal gateway would be needed)"
-            elif ls and ld and {s.name for s in src.message.signals} != {s.name for s in dst.message.signals}:
-                cr.notes.append("same layout, different signal names")
+        reason, notes = pair_problem(src, dst)
+        cr.notes += notes
+        if reason:
+            cr.enabled, cr.reason = False, reason
         src_pt, dst_pt = self._can_pt_path(src), self._can_pt_path(dst)
         if src.can_pt and dst.can_pt:
             for g in b.gateways():
@@ -1233,6 +1238,22 @@ class Planner:
             pkg = self._package("GATEWAY")
             name = self._unique(pkg, fmt(self.cfg.naming.gateway, ecu=plan.ecu_name), "Gateway")
             plan.gateway, plan.gateway_new = f"{pkg}/{name}", True
+
+
+def pair_problem(src: Route, dst: Route, src_label: str = "", dst_label: str = "") -> tuple[str, list[str]]:
+    """Can the whole PDU received as *src* be sent unchanged as *dst*? (reason it cannot, notes)"""
+    sl, dl = src_label or src.bus.name, dst_label or dst.bus.name
+    if src.length != dst.length:
+        return f"length differs ({sl} {src.length}, {dl} {dst.length})", []
+    layout = lambda m: {(s.start, s.length, s.little_endian) for s in m.signals if not s.multiplexed}
+    ls, ld = layout(src.message), layout(dst.message)
+    if ls and ld and ls != ld:
+        if ld < ls:
+            return "", [f"{dl} defines {len(ld)} of the {len(ls)} signals (the whole PDU is forwarded)"]
+        return "signal layout differs (a signal gateway would be needed)", []
+    if ls and ld and {s.name for s in src.message.signals} != {s.name for s in dst.message.signals}:
+        return "", ["same layout, different signal names"]
+    return "", []
 
 
 def _with_local(s: SocketSide, default: SocketSide) -> SocketSide:

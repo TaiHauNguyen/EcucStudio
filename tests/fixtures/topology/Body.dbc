@@ -1,0 +1,35 @@
+VERSION ""
+
+
+NS_ :
+	CM_
+	BA_DEF_
+	BA_DEF_DEF_
+	BA_
+	VAL_
+
+BS_:
+
+BU_: ZoneC Door
+
+BO_ 288 WheelSpeed: 8 ZoneC
+ SG_ WheelFL : 0|16@1+ (1,0) [0|0] "" Door
+ SG_ WheelFR : 16|16@1+ (1,0) [0|0] "" Door
+
+BO_ 336 VehSpeed: 8 ZoneC
+ SG_ Speed : 0|16@1+ (1,0) [0|0] "" Door
+
+BO_ 544 DoorState: 2 Door
+ SG_ DoorOpen : 0|1@1+ (1,0) [0|0] "" ZoneC
+
+BO_ 528 LightCmd: 2 ZoneC
+ SG_ Light : 0|2@1+ (1,0) [0|0] "" Door
+
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+BA_DEF_ "Baudrate" INT 0 1000000;
+BA_DEF_ "DBName" STRING ;
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_DEF_DEF_ "Baudrate" 500000;
+BA_DEF_DEF_ "DBName" "";
+BA_ "DBName" "Body";
+BA_ "Baudrate" 500000;

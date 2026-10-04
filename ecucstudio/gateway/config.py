@@ -138,12 +138,13 @@ class GatewayConfig:
     header: HeaderSettings = field(default_factory=HeaderSettings)
     naming: Naming = field(default_factory=Naming)
     options: Options = field(default_factory=Options)
+    topology: str = ""              # topology file this ECU's gateway belongs to (multi-ECU mode)
 
     # ------------------------------------------------------------------ JSON
     def to_dict(self, rel_to: str | None = None) -> dict:
         d = dataclasses.asdict(self)
         if rel_to:
-            for key in ("base", "output", "previous"):
+            for key in ("base", "output", "previous", "topology"):
                 d[key] = _rel(d[key], rel_to)
             for b in d["buses"]:
                 b["dbc"] = _rel(b["dbc"], rel_to)
@@ -170,7 +171,8 @@ class GatewayConfig:
                         for x in eth.get("peers") or [] if isinstance(x, dict)]
         cfg = cls(base=d.get("base", ""), output=d.get("output", ""), ecu=d.get("ecu", ""),
                   system=d.get("system", ""), schema=d.get("schema", "AUTOSAR_00052"),
-                  previous=d.get("previous", ""), can_gateway=dict(d.get("can_gateway") or {}),
+                  previous=d.get("previous", ""), topology=d.get("topology", ""),
+                  can_gateway=dict(d.get("can_gateway") or {}),
                   can_links=list(d.get("can_links") or []),
                   buses=[build(BusInput, b) for b in d.get("buses", [])],
                   ethernet=build(EthernetSettings, eth),
@@ -181,6 +183,7 @@ class GatewayConfig:
             cfg.base = _abs(cfg.base, rel_to)
             cfg.output = _abs(cfg.output, rel_to)
             cfg.previous = _abs(cfg.previous, rel_to)
+            cfg.topology = _abs(cfg.topology, rel_to)
             for b in cfg.buses:
                 b.dbc = _abs(b.dbc, rel_to)
         return cfg

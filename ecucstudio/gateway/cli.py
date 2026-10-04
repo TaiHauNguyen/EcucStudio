@@ -10,6 +10,7 @@
     python -m ecucstudio gateway routes   network.arxml [--csv routes.csv]
     python -m ecucstudio gateway edit     network.arxml --header PDU=0x123 --delete PDU --port SOCKET=50000
     python -m ecucstudio gateway editor   [network.arxml]
+    python -m ecucstudio gateway topology plan|generate|contract topology.json [--ecu ZoneB]
 """
 from __future__ import annotations
 
@@ -271,6 +272,54 @@ def cmd_editor(a):
     return run_window(f"gateway editor file={a.file or '-'}", start)
 
 
+def _topology_plan(path):
+    from .topology import TopologyConfig, make_topology_plan
+    from .topology import report as treport
+    t = time.time()
+    tplan = make_topology_plan(TopologyConfig.load(path))
+    return tplan, treport, time.time() - t
+
+
+def _print_topology(tplan, treport, verbose=True):
+    print(treport.text(tplan, verbose))
+    for kind, items in (("[INFO]   ", tplan.infos), ("[WARNING]", tplan.warnings), ("[ERROR]  ", tplan.errors)):
+        for m in items:
+            print(kind, m)
+
+
+def cmd_topology_plan(a):
+    tplan, treport, dt = _topology_plan(a.topology)
+    _print_topology(tplan, treport)
+    print(f"\n{len(tplan.enabled_cross)} ECU -> ECU route(s), {len(tplan.links)} Ethernet PDU(s), "
+          f"{len(tplan.warnings)} warning(s), {len(tplan.errors)} error(s) ({dt:.1f} s)")
+    return 0 if tplan.ok else 1
+
+
+def cmd_topology_generate(a):
+    from . import report
+    from .topology import generate_topology
+    tplan, treport, dt = _topology_plan(a.topology)
+    _print_topology(tplan, treport, verbose=a.verbose)
+    if not tplan.ok:
+        print("\nNothing written: fix the errors above.")
+        return 1
+    for name, res in generate_topology(tplan, a.ecu or None):
+        print(f"Written {res.output} ({name}: {report.count_text(len(res.routes), len(res.can_routes))})")
+    print("Lock file:", tplan.cfg.lock_path)
+    print("Contract :", tplan.cfg.contract_path)
+    return 0
+
+
+def cmd_topology_contract(a):
+    from .topology import write_contract
+    tplan, treport, dt = _topology_plan(a.topology)
+    if not tplan.ok:
+        _print_topology(tplan, treport, verbose=False)
+        return 1
+    print("Written", write_contract(tplan, a.output))
+    return 0
+
+
 def cmd_gui(a):
     from ..__main__ import run_window
 
@@ -339,6 +388,20 @@ def main(argv=None):
     p.add_argument("--keep-pdus", action="store_true", help="delete only the gateway mapping, keep the Ethernet PDUs")
     p.add_argument("-o", "--output", help="write to another file (default: the file itself, with .bak)")
     p.set_defaults(fn=cmd_edit)
+    p = sub.add_parser("topology", help="several gateway ECUs on one Ethernet network (multi-ECU mode)")
+    tsub = p.add_subparsers(dest="tcmd", required=True)
+    q = tsub.add_parser("plan", help="pair the messages between the ECUs and show the Ethernet PDUs")
+    q.add_argument("topology")
+    q.set_defaults(fn=cmd_topology_plan)
+    q = tsub.add_parser("generate", help="write the gateway file of the ECUs, the lock file and the contract")
+    q.add_argument("topology")
+    q.add_argument("--ecu", action="append", help="only this ECU (repeat; default: every ECU with generate)")
+    q.add_argument("-v", "--verbose", action="store_true")
+    q.set_defaults(fn=cmd_topology_generate)
+    q = tsub.add_parser("contract", help="write the contract (every Ethernet PDU of the network) as CSV")
+    q.add_argument("topology")
+    q.add_argument("-o", "--output")
+    q.set_defaults(fn=cmd_topology_contract)
     p = sub.add_parser("editor", help="open the gateway editor window")
     p.add_argument("file", nargs="?")
     p.set_defaults(fn=cmd_editor)
