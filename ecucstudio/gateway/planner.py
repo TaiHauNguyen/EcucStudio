@@ -981,11 +981,27 @@ class Planner:
             return pair_problem(a, b_)
 
         missing, both = set(), []
+        to_ecu, from_ecu = collections.defaultdict(list), collections.defaultdict(list)
         sent_idx, recv_idx = index(sends), index(receives)
+        # a route that is off only because it is new in a regeneration or because Com sends the CAN PDU is switched
+        # on when another ECU needs / feeds it (that ECU's DBC was added for this); NM, diagnostic, deselected and
+        # CAN -> CAN fed routes stay off
+        revivable = ("not in the previous gateway file", "sent by Com of")
+
+        def switch_on(r, why):
+            r.enabled, r.reason = True, ""
+            r.notes.append(why)
+            if self.previous is not None:
+                r.change = "kept" if r.prev is not None else "new"
+                if r.prev is not None:
+                    self._prev_used.add(id(r.prev))
+
         for r in plan.routes:
-            if not r.enabled or r.can_problem:
+            if r.can_problem:
                 continue
             over = r.bus.cfg.messages.get(r.message.name, {}) if isinstance(r.bus.cfg.messages, dict) else {}
+            if not r.enabled and ("enabled" in over or not r.reason.startswith(revivable)):
+                continue
             if r.direction == CAN_TO_ETH:
                 if "eth_peers" in over:
                     continue                        # chosen by the user
@@ -998,10 +1014,13 @@ class Planner:
                     if ecu not in self._peer_cfg:
                         missing.add(ecu)
                         continue
+                    if not r.enabled:
+                        switch_on(r, f"needed by {ecu}")
                     if ecu not in r.peers:
                         r.peers.append(ecu)
                         r.notes.append(f"also to {ecu} ({db.name}/{rm.name})" + (f"; {notes[0]}" if notes else ""))
-                if len(r.peers) > 1 and plan.default_peer in r.peers:
+                        to_ecu[ecu].append(r)
+                if r.enabled and len(r.peers) > 1 and plan.default_peer in r.peers:
                     both.append(r)
             else:
                 if "eth_peer" in over or "eth_peers" in over:
@@ -1016,11 +1035,28 @@ class Planner:
                     if ecu not in self._peer_cfg:
                         missing.add(ecu)
                     else:
+                        if not r.enabled:
+                            if r.reason.startswith("sent by Com of"):
+                                self.warn(f"{r.key}: comes from {ecu} over Ethernet but Com of {plan.ecu_name} also "
+                                          f"sends it (two sources): remove it from the Com transmit PDUs of the "
+                                          f"project or deselect the route.")
+                            switch_on(r, f"fed by {ecu}")
                         r.peers = [ecu]
                         r.notes.append(f"from {ecu} ({hits[0][1].name}/{hits[0][2].name})")
+                        from_ecu[ecu].append(r)
         for ecu in sorted(missing):
             self.err(f"{ecu}: enter its IP address and ports (Ethernet tab -> Ethernet peers -> Add peer, name {ecu}): "
                      f"messages go to / come from it over Ethernet.")
+        nodes = collections.Counter(b.node for b in self.cfg.buses if b.dbc and b.node and not b.remote_ecu)
+        me = nodes.most_common(1)[0][0] if nodes else plan.ecu_name
+        for ecu, _db, _node in self._remotes:
+            if ecu in missing:
+                continue
+            ta, fr = to_ecu.get(ecu, []), from_ecu.get(ecu, [])
+            self.info(f"{me} -> {ecu} (CAN -> ETH): {len(ta)} message(s)" +
+                      (f": {', '.join(r.key for r in ta[:8])}{' ...' if len(ta) > 8 else ''}" if ta else "") +
+                      f".  {ecu} -> {me} (ETH -> CAN): {len(fr)} message(s)" +
+                      (f": {', '.join(r.key for r in fr[:8])}{' ...' if len(fr) > 8 else ''}" if fr else "") + ".")
         if both:
             names = ", ".join(f"{r.key} ({', '.join(p for p in r.peers if p != plan.default_peer)})" for r in both[:12])
             more = f" and {len(both) - 12} more" if len(both) > 12 else ""

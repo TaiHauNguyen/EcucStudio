@@ -305,6 +305,10 @@ cùng VLAN. Thêm DBC của bus thuộc zone khác vào **CAN buses** và chọn
   - message Z2 gửi trên bus của nó và Z3 nhận trên bus của Z3: ETH → CAN **từ Z3**;
   - khác độ dài / layout signal: không route sang Z3 (WARNING).
 - **WARNING** liệt kê các message vừa lên Central vừa sang zone khác; cột **Peer** của bảng route ghi `Central, Z3`.
+- Dòng **INFO** tóm tắt cả hai chiều: `Z2 -> Z3 (CAN -> ETH): n message(s): …` và `Z3 -> Z2 (ETH -> CAN): m message(s): …`.
+- Route mà Z3 cần / cấp được **bật** cả khi nó đang tắt vì là route mới lúc cập nhật file cũ (*not in the previous
+  gateway file*) hoặc vì Com của ECU cũng gửi PDU đó (DBC import coi ECU là bên gửi; tool cảnh báo hai nguồn). Route
+  bị tắt tay, NM / diagnostic, hoặc đã được cấp CAN → CAN nội bộ thì giữ nguyên.
 - Chọn node peer cho message bằng tay (mục 3.3) thì tool giữ lựa chọn đó.
 
 ## 4. Tab **Options & Naming** (không bắt buộc)

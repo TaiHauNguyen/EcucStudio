@@ -1508,7 +1508,13 @@ class GatewayWindow:
         if not c.options.eth_routes:
             return ""
         miss = []
+        p = self.plan
+        # after an analysis only the directions that really use the default node need its sockets
+        used = ({r.direction for r in p.enabled_routes if p.default_peer in r.peers} if p is not None and not p.errors
+                else {"CAN->ETH", "ETH->CAN"})
         for label, s in (("CAN -> ETH", c.ethernet.can_to_eth), ("ETH -> CAN", c.ethernet.eth_to_can)):
+            if label.replace(" ", "") not in used:
+                continue
             if not s.local_socket and s.local_port is None:
                 miss.append(f"the ECU port for {label}")
             if not s.remote_socket and not ((s.remote_ip or s.remote_endpoint) and s.remote_port is not None):

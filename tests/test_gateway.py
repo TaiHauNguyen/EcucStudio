@@ -1072,6 +1072,43 @@ class GatewayTest(unittest.TestCase):
         self.assertFalse([p for p in idx if "Cabin" in p])
         self.assertIn("/Topology/Clusters/EthCluster/Eth_VLAN10/SA_ZoneB_CanGw_Rx", idx)
 
+    def test_bus_of_another_ecu_in_regeneration(self):
+        """Updating a gateway file with only its messages: the messages another ECU needs / feeds are switched on."""
+        from ecucstudio.gateway.regen import config_from_file
+        cabin = os.path.join(self.tmp, "Cabin.dbc")
+        with open(cabin, "w", encoding="utf-8") as fh:
+            fh.write('VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: ZoneB Seat\n\n'
+                     'BO_ 256 EngineData: 8 ZoneB\n SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Seat\n'
+                     ' SG_ EngineTemp : 16|8@1- (1,-40) [-40|87] "degC" Seat\n\n'
+                     'BO_ 768 GwCommand: 4 Seat\n SG_ Cmd : 0|8@1+ (1,0) [0|255] "" ZoneB\n'
+                     ' SG_ Counter : 8|4@1+ (1,0) [0|15] "" ZoneB\n\n'
+                     'BA_DEF_ "DBName" STRING ;\nBA_DEF_DEF_ "DBName" "";\nBA_ "DBName" "Cabin";\n')
+        cfg = config(self.out)
+        cfg.buses[0].messages = {"EngineData": {"enabled": False}, "GwCommand": {"enabled": False}}
+        generate(make_plan(cfg))                                        # the file made before, without both
+        cfg2, _ = config_from_file(self.out)
+        cfg2.options.only_previous = True                              # keep only the messages of the file ...
+        cfg2.buses[0].messages = {}
+        plan = make_plan(cfg2)
+        r = {x.message.name: x for x in plan.routes}
+        self.assertFalse(r["EngineData"].enabled)
+        self.assertEqual(r["EngineData"].reason, "not in the previous gateway file")
+        cfg2.buses.append(BusInput(dbc=cabin, node="ZoneB", remote_ecu="ZoneB"))    # ... then add ZoneB's bus
+        cfg2.ethernet.peers.append(EthPeer("ZoneB", SocketSide(remote_ip="10.0.10.3", remote_port=50001),
+                                           SocketSide(remote_ip="10.0.10.3", remote_port=50000)))
+        plan = make_plan(cfg2)
+        self.assertEqual(plan.errors, [])
+        r = {x.message.name: x for x in plan.routes}
+        self.assertTrue(r["EngineData"].enabled)
+        self.assertEqual(r["EngineData"].change, "new")
+        self.assertEqual(r["EngineData"].peers[1:], ["ZoneB"])
+        self.assertTrue(r["GwCommand"].enabled)
+        self.assertEqual(r["GwCommand"].peers, ["ZoneB"])
+        self.assertTrue(any("GwEcu -> ZoneB (CAN -> ETH): 1 message(s): Body/EngineData" in i and
+                            "ZoneB -> GwEcu (ETH -> CAN): 1 message(s): Body/GwCommand" in i for i in plan.infos),
+                        plan.infos)
+        self.assertTrue(r["DoorStatus"].change == "kept")
+
     def test_new_vlan_that_already_exists(self):
         plan = make_plan(config(self.out, new_channel=True, vlan_id=10, ecu_ip="10.0.10.5"))
         self.assertTrue(any("already has VLAN 10" in e for e in plan.errors), plan.errors)
