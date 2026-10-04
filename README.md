@@ -142,6 +142,11 @@ SocketRoute (header ID) và CanIf PDU — không phải sửa ECUC bằng tay.
 
 Hướng dẫn sử dụng đầy đủ: [docs/GATEWAY.md](docs/GATEWAY.md).
 
+**Bắt đầu**: `run.bat gateway` mở cửa sổ **Start** hỏi bạn đang có gì: (1) chỉ có file DBC, (2) project DaVinci
+đã import DBC, (3) file gateway đã import cần sửa. Tool tự gợi ý node gateway, tên file, thông số Ethernet; dải
+**Next step** trong cửa sổ chính luôn ghi bước tiếp theo kèm nút làm luôn. Chi tiết: mục *Bắt đầu nhanh* của
+[docs/GATEWAY.md](docs/GATEWAY.md).
+
 **CAN → CAN**: thêm nhiều DBC (mỗi DBC một bus, chọn node của ECU trong từng DBC). Message ECU nhận trên một bus
 và gửi trên bus khác (cùng tên, tên có tiền tố `GW_`/`XGW_`…, hoặc cùng CAN ID và độ dài) được route thẳng giữa
 hai bus nếu độ dài và layout signal khớp; route `ETH->CAN` của message đó tự tắt. Cặp khác độ dài / khác layout

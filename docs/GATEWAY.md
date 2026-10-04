@@ -25,6 +25,27 @@ Tool dùng được cho bốn tình huống:
 
 ---
 
+## Bắt đầu nhanh: cửa sổ **Start**
+
+Mở tool (`run.bat gateway` hoặc menu **Tools**) là cửa sổ **Start** hiện ra (mở lại bằng nút **Start…**). Chọn đúng
+trường hợp của bạn, tool hỏi lần lượt 2–3 trang và tự điền phần còn lại:
+
+| Bạn đang có | Chọn | Các trang | Kết quả |
+|---|---|---|---|
+| **Chỉ có file DBC**, chưa có project DaVinci | *I only have DBC files* | 1. thêm các file DBC (chọn nhiều file một lần); tool tự gợi ý node gateway của từng DBC (node có trong mọi DBC, hoặc tên giống gateway) 2. tên ECU, phiên bản DaVinci (5.24 → AUTOSAR_00049, 5.31+ → AUTOSAR_00052), file ra 3. route gì (CAN↔ETH, CAN→CAN) và thông số Ethernet đã gợi ý sẵn | một file network mới hoàn toàn; import vào project mới **thay cho** các file DBC |
+| **Project DaVinci đã import DBC**, chưa có file gateway | *I have a DaVinci project with the DBC files imported* | 1. chọn `.dpa`; tool liệt kê các kênh CAN của ECU (số message nhận / gửi), tick kênh tham gia gateway 2. route gì và thông số Ethernet (gợi ý từ project: kênh, IP, port có sẵn) | file bổ sung (Ethernet + gateway); thêm vào Input Files **cạnh** các file DBC, rồi Update |
+| **Project đã có file gateway** làm trước đó, cần sửa | *I want to change a gateway file that is already in the project* | 1. chọn file gateway (hoặc chọn `.dpa`, tool tự tìm file gateway của nó) 2. bỏ tick bus để bỏ route của nó, tick kênh mới của project để thêm; chọn giữ đúng các message cũ hay route lại mọi message | ghi đè **chính file đó**; trong DaVinci chỉ chạy Update, không import lại; phần không đổi giữ nguyên cấu hình |
+
+- Chọn trường hợp 2 với một project **đã có** file gateway của tool: tool báo và đề nghị **Update it instead**
+  (chuyển sang trường hợp 3), tránh tạo file gateway thứ hai.
+- Nhấn **Finish**: cửa sổ chính hiện cấu hình và tự **Analyze**. Mọi giá trị vẫn sửa được ở các tab.
+- Nhiều ECU trên một mạng Ethernet: nút *Several ECUs on one Ethernet network* mở cửa sổ topology (mục 13).
+
+**Thanh "Next step"** (dải xanh dưới thanh công cụ) luôn ghi việc cần làm tiếp và có nút làm luôn việc đó, ví dụ:
+*Ethernet settings missing: the IP address / port of the other node* → **Suggest values** / **Ethernet tab**;
+*Ready: 12 route(s): 10 kept, 2 new, 1 removed* → **Generate**; sau khi ghi file: việc cần làm trong DaVinci
+(import file, hay chỉ Update).
+
 ## 0. Chuẩn bị
 
 - Python 3.10+ cùng các gói `lxml` và `cantools` (`py -m pip install -r requirements.txt`).
@@ -46,8 +67,10 @@ Tool dùng được cho bốn tình huống:
 | Chạy riêng | `run.bat gateway` (thêm đường dẫn `gateway.json` để mở cấu hình đã lưu) |
 | Command line | `python -m ecucstudio gateway gui [gateway.json]` |
 
-Thanh công cụ: **New**, **Open…**, **Save**, **Save As…** (cấu hình `.json`), **Analyze**,
-**Generate network ARXML**.
+Không mở cấu hình nào thì cửa sổ **Start** hiện ra (mục *Bắt đầu nhanh* ở trên).
+
+Thanh công cụ: **Start…**, **New**, **Open…**, **Save**, **Save As…** (cấu hình `.json`), **Analyze**,
+**Generate network ARXML**. Dải **Next step** bên dưới ghi bước tiếp theo.
 
 ## 2. Tab **Input**
 

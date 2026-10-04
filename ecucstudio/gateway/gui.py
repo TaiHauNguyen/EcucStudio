@@ -1,6 +1,7 @@
 """Window of the CAN gateway generator: CAN <-> Ethernet and CAN -> CAN (standalone or opened from EcucStudio)."""
 from __future__ import annotations
 
+import copy
 import os
 import queue
 import threading
@@ -10,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from ..gui.theme import COLORS, init_style
 from ..gui.widgets import Tooltip, dialog_header
-from . import dbcread, dvproject, report
+from . import dbcread, dvproject, report, start
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
 from .config import BusInput, EthPeer, GatewayConfig, Naming, SocketSide
 from .planner import CAN_TO_ETH, ETH_TO_CAN, CanRoute, Route, load_base, make_plan, new_ecu_name
@@ -520,8 +521,12 @@ class GatewayWindow:
         self.plan = None
         self._q = queue.Queue()
         self._busy = False
+        self._done_text = ""            # after Generate: what to do next in DaVinci
+        self._project_gw = ""           # gateway file of this tool found in the loaded project
+        self._hint_state = None
         self._build()
         self.win.after(100, self._poll)
+        self.win.after(500, self._hint_tick)
         if config_path:
             self.open_config(config_path)
 
@@ -530,6 +535,10 @@ class GatewayWindow:
         w = self.win
         tb = ttk.Frame(w, padding=(6, 4))
         tb.pack(fill="x")
+        b_start = ttk.Button(tb, text="Start…", command=self.start_wizard)
+        b_start.pack(side="left", padx=(0, 4))
+        Tooltip(b_start, "Guided start: only DBC files / DaVinci project with the DBC files / update a gateway file "
+                         "that is already in the project")
         for text, cmd in (("New", self.new_config), ("Open…", self.open_config_dialog), ("Save", self.save_config),
                           ("Save As…", self.save_config_as)):
             ttk.Button(tb, text=text, command=cmd).pack(side="left", padx=(0, 4))
@@ -546,9 +555,19 @@ class GatewayWindow:
         self.status = ttk.Label(tb, text="Add the DBC files (and the base system description if the project has "
                                          "one).")
         self.status.pack(side="left", padx=12)
+        # "next step" bar: what to do now, with the button that does it
+        self.hint = tk.Frame(w, background="#e8f1fb", highlightthickness=1, highlightbackground="#b7d0ea")
+        self.hint.pack(fill="x", padx=6, pady=(0, 4))
+        tk.Label(self.hint, text="Next step:", background="#e8f1fb", font=("Segoe UI", 9, "bold")).pack(
+            side="left", padx=(8, 4), pady=4)
+        self.hint_text = tk.Label(self.hint, text="", background="#e8f1fb", anchor="w", justify="left")
+        self.hint_text.pack(side="left", fill="x", expand=True, pady=4)
+        self.hint_buttons = ttk.Frame(self.hint)
+        self.hint_buttons.pack(side="right", padx=6, pady=2)
         pw = ttk.PanedWindow(w, orient="vertical")
         pw.pack(fill="both", expand=True)
         nb = ttk.Notebook(pw)
+        self.nb = nb
         pw.add(nb, weight=0)
         self._tab_input(nb)
         self._tab_eth(nb)
@@ -946,7 +965,12 @@ class GatewayWindow:
         def done(res):
             proj, base = res
             self.project, self.base, self._base_key = proj, base, key
+            self._project_gw = ""
             if proj:
+                gws = start.project_gateway_files(proj.path)
+                prev = os.path.normcase(os.path.abspath(self.v_prev.get().strip())) if self.v_prev.get().strip() else ""
+                if gws and prev not in {os.path.normcase(x) for x in gws}:
+                    self._project_gw = gws[0]
                 chans = dvproject.ecu_can_channels(base, proj.ecu_path)
                 self.base_info.config(text=f"DaVinci project {proj.name} ({base.schema}): ECU instance "
                                            f"{proj.ecu_name}, {len(chans)} CAN channel(s). The output is an "
@@ -1170,8 +1194,9 @@ class GatewayWindow:
             self.refresh_buses()
 
     # ------------------------------------------------------------------ config <-> widgets
-    def collect(self) -> GatewayConfig:
-        c = self.cfg
+    def collect(self, into: GatewayConfig | None = None) -> GatewayConfig:
+        """Widgets -> configuration (self.cfg, or a copy given as *into*)."""
+        c = into if into is not None else self.cfg
         c.base = self.v_base.get().strip()
         c.output = self.v_out.get().strip()
         c.ecu = self.c_ecu.get()
@@ -1298,6 +1323,7 @@ class GatewayWindow:
 
             def done(plan):
                 self.plan = plan
+                self._done_text = ""
                 self.fill_routes()
                 self.show_messages(plan.errors, plan.warnings, plan.infos)
                 n = report.count_text(len(plan.enabled_routes), len(plan.enabled_can_routes))
@@ -1345,11 +1371,113 @@ class GatewayWindow:
                     how = "instead of the base file"
                 else:
                     how = f"for the ECU instance {new_ecu_name(cfg)} (do not import the same DBC files again)"
+                self._done_text = (f"Written {os.path.basename(res.output)} ({n}). In DaVinci Configurator: "
+                                   + (f"run Update (the file is already in Input Files)." if regen else
+                                      f"import it (Input Files) {how}."))
+                self.update_hint()
                 messagebox.showinfo(TITLE, f"Written {res.output}\n\n{n}.\n"
                                            f"Import this file into DaVinci Configurator (Input Files) {how}.",
                                     parent=self.win)
             self._run("Generating", work, done)
         self.analyze(then=write)
+
+    # ------------------------------------------------------------------ guided start / next step
+    def start_wizard(self):
+        from .wizard import StartWizard
+
+        def topology():
+            from .topology.gui import open_topology
+            open_topology(self.win)
+        StartWizard(self.win, self.apply_start, on_topology=topology, on_open=self.open_config_dialog,
+                    dbc_cache=self.dbc_cache)
+
+    def apply_start(self, cfg: GatewayConfig, case: str, notes=()):
+        self.cfg, self.cfg_path, self.plan, self._done_text = cfg, None, None, ""
+        regen = case == "update"
+        name = os.path.basename(cfg.output) if cfg.output else "new"
+        self.win.title(f"{TITLE} - {name}" + (" (regenerate)" if regen else ""))
+        self.fill_routes()
+        self.show_messages(infos=list(notes))
+        self.show_config(then=self.analyze)
+
+    def _missing_ethernet(self, c: GatewayConfig) -> str:
+        if not c.options.eth_routes:
+            return ""
+        miss = []
+        for label, s in (("CAN -> ETH", c.ethernet.can_to_eth), ("ETH -> CAN", c.ethernet.eth_to_can)):
+            if not s.local_socket and s.local_port is None:
+                miss.append(f"the ECU port for {label}")
+            if not s.remote_socket and not ((s.remote_ip or s.remote_endpoint) and s.remote_port is not None):
+                miss.append(f"the IP address / port of the other node for {label}")
+        if not c.base and not c.ethernet.ecu_ip and not c.ethernet.local_endpoint:
+            miss.insert(0, "the IP address of the ECU")
+        return ", ".join(miss)
+
+    def next_step(self, c: GatewayConfig | None = None):
+        """(text, [(button, command)]) of the next thing to do."""
+        c, p = c or self.cfg, self.plan
+        if self._done_text:
+            folder = os.path.dirname(os.path.abspath(c.output)) if c.output else ""
+            return self._done_text, ([("Open folder", lambda: os.startfile(folder))] if folder and
+                                     hasattr(os, "startfile") else [])
+        if not c.base and not c.buses:
+            return ("Start here: tell the tool what you have (only DBC files, a DaVinci project with the DBC "
+                    "files, or a gateway file to update).", [("Start…", self.start_wizard)])
+        if self._project_gw:
+            gw = self._project_gw
+            return (f"This project already contains the gateway file {os.path.basename(gw)} made by this tool. To "
+                    f"change it, update that file instead of making a second one.",
+                    [("Update it", lambda: (setattr(self, "_project_gw", ""), self.open_config(gw))),
+                     ("Ignore", lambda: (setattr(self, "_project_gw", ""), self.update_hint()))])
+        if not c.buses:
+            return ("Add the CAN buses: DBC files, or the CAN channels of the project (Input tab).",
+                    [("Add bus…", self.add_bus)])
+        if not c.output:
+            return "Select the output file (Input tab).", [("Browse…", self.browse_out)]
+        miss = self._missing_ethernet(c)
+        if miss:
+            return (f"Ethernet settings missing: {miss}.",
+                    [("Suggest values", self.suggest_eth), ("Ethernet tab", lambda: self.nb.select(1))])
+        if p is None:
+            return "Everything needed is filled in: Analyze shows the routes before anything is written.", [
+                ("Analyze", self.analyze)]
+        if p.errors:
+            return (f"{len(p.errors)} error(s) to fix (see the messages under the table), then Analyze again.",
+                    [("Analyze", self.analyze)])
+        if not p.enabled_routes and not p.enabled_can_routes:
+            return ("No message is routed: check the gateway node / channels of the buses and the Options tab.",
+                    [("Input tab", lambda: self.nb.select(0))])
+        n = report.count_text(len(p.enabled_routes), len(p.enabled_can_routes))
+        if p.previous:
+            every = p.enabled_routes + p.enabled_can_routes
+            kept = sum(1 for r in every if r.change == "kept")
+            new = sum(1 for r in every if r.change == "new")
+            n += f": {kept} kept, {new} new, {len(p.removed)} removed"
+        warn = f", {len(p.warnings)} warning(s) to read" if p.warnings else ""
+        return f"Ready: {n}{warn}. Generate writes {os.path.basename(c.output)}.", [("Generate", self.generate)]
+
+    def update_hint(self):
+        try:
+            snap = copy.deepcopy(self.cfg)
+            if not self._busy:
+                self.collect(into=snap)          # a copy: never changes the configuration itself
+            text, buttons = self.next_step(snap)
+        except Exception:  # noqa: BLE001 - the hint must never break the window
+            return
+        state = (text, tuple(b for b, _ in buttons))
+        if state == self._hint_state:
+            return
+        self._hint_state = state
+        self.hint_text.config(text=text, wraplength=max(self.win.winfo_width() - 360, 400))
+        for w in self.hint_buttons.winfo_children():
+            w.destroy()
+        for label, cmd in buttons:
+            ttk.Button(self.hint_buttons, text=label, command=cmd).pack(side="left", padx=2)
+
+    def _hint_tick(self):
+        if self.win.winfo_exists():
+            self.update_hint()
+            self.win.after(800, self._hint_tick)
 
     def fill_routes(self):
         t = self.t_routes
@@ -1496,20 +1624,24 @@ class GatewayWindow:
         self.analyze()
 
 
-def open_window(master: tk.Misc | None = None, config_path: str | None = None):
-    """Open the generator in a Toplevel of *master* (EcucStudio) or in its own root window."""
+def open_window(master: tk.Misc | None = None, config_path: str | None = None, wizard: bool = True):
+    """Open the generator in a Toplevel of *master* (EcucStudio) or in its own root window. Without a configuration
+    the start wizard opens on top of it."""
     from ..gui.startup import bring_to_front, show_main_window
     if master is None:
         root = tk.Tk()
         init_style(root)
         root.gateway = GatewayWindow(root, config_path)
         show_main_window(root, TITLE, None, "1400x900")
-        return root
-    top = tk.Toplevel(master)
-    top.geometry("1400x900")
-    top.gateway = GatewayWindow(top, config_path)
-    bring_to_front(top)
-    return top
+        win = root
+    else:
+        win = tk.Toplevel(master)
+        win.geometry("1400x900")
+        win.gateway = GatewayWindow(win, config_path)
+        bring_to_front(win)
+    if wizard and not config_path:
+        win.after(400, win.gateway.start_wizard)
+    return win
 
 
 def main(config_path: str | None = None):
