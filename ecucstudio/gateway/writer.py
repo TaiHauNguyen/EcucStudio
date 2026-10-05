@@ -8,6 +8,7 @@ from __future__ import annotations
 import collections
 import copy
 import os
+import shutil
 
 from lxml import etree
 from dataclasses import dataclass, field
@@ -40,6 +41,7 @@ class Result:
     created: collections.Counter = field(default_factory=collections.Counter)
     warnings: list[str] = field(default_factory=list)
     can_routes: list = field(default_factory=list)      # CanRoute (CAN -> CAN)
+    extension: str = ""                                 # .vsde file written next to the output ('' = none)
 
 
 def base_type_name(spec: SignalSpec) -> str:
@@ -132,12 +134,13 @@ class Writer:
             self.side(sp)
         if p.enabled_routes:
             self.id_set()
-        if p.enabled_routes or p.enabled_can_routes:
+        if p.enabled_routes or any(not cr.vsde for cr in p.enabled_can_routes):
             self.gateway()
         for r in p.enabled_routes:
             self.route(r)
         for cr in p.enabled_can_routes:
-            self.can_route(cr)
+            if not cr.vsde:                 # the DBC converter makes the others (extension file)
+                self.can_route(cr)
         self.fibex_refs()
 
     # ------------------------------------------------------------------ CAN bus
@@ -620,4 +623,24 @@ def generate(plan: Plan, base: Base | None = None, output: str | None = None) ->
         write_meta(base.root, *meta)
         base.xf.path = out
         base.xf.save(backup=os.path.exists(out))
-    return Result(out, plan.enabled_routes, w.created, plan.warnings + w.warnings, plan.enabled_can_routes)
+    ext = write_extension(plan, out)
+    return Result(out, plan.enabled_routes, w.created, plan.warnings + w.warnings, plan.enabled_can_routes, ext)
+
+
+def write_extension(plan: Plan, out: str) -> str:
+    """The .vsde file of the CAN -> CAN routes DaVinci makes from the DBC files ('' = none). An existing one is
+    rewritten also without routes (the DaVinci project may list it as input file)."""
+    from . import vsde
+    path = vsde.path_for(out)
+    routes = [cr for cr in plan.enabled_can_routes if cr.vsde]
+    if not routes and not os.path.isfile(path):
+        return ""
+    data = vsde.build(routes)
+    if os.path.isfile(path):
+        with open(path, "rb") as fh:
+            if fh.read() == data:
+                return path
+        shutil.copyfile(path, path + ".bak")
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path

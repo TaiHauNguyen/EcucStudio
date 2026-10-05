@@ -193,6 +193,11 @@ def load_previous(path: str) -> Previous:
         other = r.src if eth is r.dst else r.dst
         prev.routes.append(PrevRoute(direction, eth.name, eth.ids[0].header_id if eth.ids else None, other.pt,
                                      other.frame, other.can_id))
+    # CAN -> CAN routes DaVinci makes from the extension file of the DBC files (see vsde.py)
+    from . import vsde
+    have = {(r.can_pt, r.dst_pt) for r in prev.routes if r.direction == "CAN->CAN"}
+    for src, dst in sorted(vsde.triggerings(vsde.path_for(path)) - have):
+        prev.routes.append(PrevRoute("CAN->CAN", "", None, src, "", None, dst))
     return prev
 
 

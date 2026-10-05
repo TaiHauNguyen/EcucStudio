@@ -58,6 +58,11 @@ class Database:
     fd_bus: bool = False
     nodes: list[str] = field(default_factory=list)
     messages: list[Message] = field(default_factory=list)
+    node_ecus: dict[str, str] = field(default_factory=dict)     # node -> its "ECU" attribute (one ECU, several buses)
+
+    def ecu_of(self, node: str) -> str:
+        """ECU of *node* as the Vector DBC converter names it: the node's "ECU" attribute, else the node."""
+        return self.node_ecus.get(node) or node
 
     def node_messages(self, node: str) -> tuple[list[Message], list[Message]]:
         """(received, transmitted) messages of *node*."""
@@ -145,6 +150,10 @@ def load(path: str) -> Database:
     out = Database(path=os.path.abspath(path), name=str(name), baudrate=baud, fd_baudrate=fd_baud,
                    fd_bus="FD" in bus_type.upper().replace(" ", ""),
                    nodes=[n.name for n in db.nodes if n.name not in DUMMY_NODES])
+    for n in db.nodes:
+        ecu = str(_attr(n, defs, "ECU", "") or "").strip()
+        if ecu and n.name not in DUMMY_NODES:
+            out.node_ecus[n.name] = ecu
     for m in db.messages:
         sigs = []
         for s in m.signals:

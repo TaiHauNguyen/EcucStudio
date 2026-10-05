@@ -709,6 +709,32 @@ Phần tử được tạo cho mỗi cặp: một `I-PDU-MAPPING` trong GATEWAY 
 PDU-TRIGGERING của bus đích. DaVinci tạo PduR routing path CanIf → CanIf. Sinh lại (mục 7.1) giữ các cặp không
 đổi; cặp bị tắt hiện dòng `removed` như route Ethernet.
 
+### 12.1 DBC đã import trong DaVinci: CAN → CAN không lên Com (file `.vsde`)
+
+Khi DBC được import trong project DaVinci (file gateway chỉ chứa phần gateway, mục 2.1 / 2.2), bộ convert DBC của
+Vector cho ECU nhận / gửi mọi signal ghi trong DBC. Một message chỉ được route CAN → CAN vẫn lên Com
+(CanIf → PduR → Com) và Com vẫn gửi nó (Com → PduR → CanIf). File gateway không xoá được các phần tử đó.
+
+Vì vậy tool ghi các cặp CAN → CAN vào file **`<tên file output>.vsde`** (Vector System Description Extension,
+`PDUR-MESSAGE-ROUTING`) cạnh file gateway, và **không** ghi chúng vào file gateway:
+
+1. Thêm file `.vsde` vào **Input Files** của project, cạnh các file DBC (một lần; DaVinci chỉ nhận `.vsde` khi
+   project có DBC).
+2. Chạy **Update**. Bộ convert DBC đọc file này: message được PduR route CanIf → CanIf, ECU **không** nhận / gửi
+   signal nào của nó, nên Com không còn I-PDU của message đó, không còn đường CanIf → Com và Com → CanIf.
+3. Sinh lại sau này: tool ghi lại file `.vsde` (bản cũ giữ ở `.vsde.bak`), giữ các cặp đã có (`kept`). Hết cặp
+   CAN → CAN thì file vẫn được ghi (rỗng) vì project đang dùng nó.
+
+Message vừa CAN → CAN vừa lên Ethernet (1:N) cũng không lên Com: PduR route tới CanIf và SoAd. Message chỉ đi
+CAN → Ethernet giữ nguyên như trước.
+
+Tên ECU trong file `.vsde` là tên ECU của bộ convert: thuộc tính DBC `ECU` của node (ví dụ node `Gw_Chassis` có
+`ECU = "Gw"`), không có thì là tên node. Bộ convert bỏ signal của từng bus theo **tên node** trên bus đó, nên khi
+tên node khác tên ECU, tool ghi thêm một `PDUR-MESSAGE-ROUTING` cho tên node (cùng các message); GATEWAY chỉ được
+tạo một lần (từ routing của tên ECU). Cặp nào không đưa được vào `.vsde` (bus không đến từ DBC, node là hai ECU
+khác nhau trong hai DBC, tên không hợp lệ cho bộ convert) thì vẫn nằm trong file gateway và tool báo WARNING (Com
+giữ message đó).
+
 ## 13. Nhiều ECU trên một mạng Ethernet (topology)
 
 Dùng khi có nhiều ECU gateway (ví dụ các zone ECU) cùng nối vào một mạng Ethernet, mỗi ECU có các bus CAN riêng,

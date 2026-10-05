@@ -691,13 +691,18 @@ class TopologyWindow:
             def done(results):
                 lines = [f"{name}: {os.path.basename(r.output)} "
                          f"({report.count_text(len(r.routes), len(r.can_routes))})" for name, r in results]
+                exts = [r.extension for _n, r in results if r.extension]
                 self.show_messages([], [], [f"Written {r.output}" for _n, r in results] +
+                                   [f"Written {x} (CAN -> CAN, PduR only, no Com)" for x in exts] +
                                    [f"Lock file: {self.cfg.lock_path}", f"Contract: {self.cfg.contract_path}"])
                 self.status.config(text=f"Written {len(results)} gateway file(s)")
                 messagebox.showinfo(TITLE, "Written:\n" + "\n".join(lines) + "\n\nImport each file into the "
                                     "DaVinci project of its ECU (Input Files; a file of a project ECU is an additional "
                                     "input file next to its DBC files) and run Update. Keep the topology file and "
-                                    "its lock file together: other ECUs generated later get the same header ids.",
+                                    "its lock file together: other ECUs generated later get the same header ids." +
+                                    ("\n\nCAN -> CAN routes (PduR only, no Com): add " +
+                                     ", ".join(os.path.basename(x) for x in exts) + " to the Input Files of the "
+                                     "project next to its DBC files (once)." if exts else ""),
                                     parent=self.win)
                 self.analyze()
             self._run("Generating", lambda: generate_topology(tplan), done)

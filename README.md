@@ -153,8 +153,10 @@ kèm bảng message không được route và lý do. Chi tiết: mục 14 của
 và gửi trên bus khác (cùng tên, tên có tiền tố `GW_`/`XGW_`…, hoặc cùng CAN ID và độ dài) được route thẳng giữa
 hai bus nếu độ dài và layout signal khớp; route `ETH->CAN` của message đó tự tắt. Cặp khác độ dài / khác layout
 / nhận trên nhiều bus được liệt kê nhưng không route (ghép tay bằng *Add CAN -> CAN link…*). Chỉ cần CAN → CAN thì
-tắt *CAN <-> Ethernet routes* ở tab Options, không cần thông số Ethernet. Chi tiết: mục 12 của
-[docs/GATEWAY.md](docs/GATEWAY.md).
+tắt *CAN <-> Ethernet routes* ở tab Options, không cần thông số Ethernet. Khi DBC được import trong project
+DaVinci, các cặp CAN → CAN được ghi vào file `<output>.vsde` cạnh file gateway: thêm file này vào Input Files cạnh
+các DBC, DaVinci route message bằng PduR và bỏ nó khỏi Com (không CanIf → Com, không Com → CanIf). Chi tiết: mục 12
+của [docs/GATEWAY.md](docs/GATEWAY.md).
 
 **Nhiều node Ethernet**: ngoài node mặc định (ví dụ máy tính trung tâm), khai báo thêm node ở khung *Ethernet peers*
 của tab Ethernet (ví dụ một zone ECU khác, đi thẳng qua switch), rồi chọn node cho từng message: CAN->ETH gửi được

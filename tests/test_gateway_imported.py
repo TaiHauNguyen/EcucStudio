@@ -87,6 +87,78 @@ class ImportedTest(unittest.TestCase):
         with open(cfg.output, "rb") as fh:
             self.assertEqual(fh.read(), v1)
 
+    def test_can_to_can_in_extension_file(self):
+        """CAN -> CAN routes go into the .vsde file of the DBC converter (PduR only, no Com), not the gateway file."""
+        from ecucstudio.gateway import vsde
+        from ecucstudio.gateway.regen import config_from_file
+        cfg = self.config()
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertTrue(plan.enabled_can_routes)
+        self.assertTrue(all(cr.vsde for cr in plan.enabled_can_routes))
+        self.assertTrue(any("Gw_CanEthGateway.vsde" in i and "Com" in i for i in plan.infos), plan.infos)
+        res = generate(plan)
+        self.assertEqual(res.extension, os.path.join(self.tmp, "Gw_CanEthGateway.vsde"))
+        got = vsde.read(res.extension)
+        want = [("GwEcu", cr.src.bus.name, cr.src.message.name, cr.dst.bus.name, cr.dst.message.name)
+                for cr in plan.enabled_can_routes]
+        self.assertEqual(sorted(got), sorted(want))
+        self.assertIn(("GwEcu", "Body", "EngineData", "Chassis", "EngineData"), got)   # ECU of the DBC node
+        # the gateway file maps no CAN PDU to a CAN PDU (DaVinci makes those from the .vsde file)
+        out = Base(res.output)
+        for m in out.root.iter("{http://autosar.org/schema/r4.0}I-PDU-MAPPING"):
+            src, dst = out.ref(m, "SOURCE-I-PDU-REF"), out.refs(m, "TARGET-I-PDU-REF")[0]
+            self.assertFalse(src.startswith("/Cluster/Body/CHNL/") and dst.startswith("/Cluster/Chassis/CHNL/"),
+                             (src, dst))
+        # regeneration: the routes of the .vsde file are kept, both files stay the same
+        with open(res.output, "rb") as fh:
+            v1 = fh.read()
+        with open(res.extension, "rb") as fh:
+            x1 = fh.read()
+        cfg2, _ = config_from_file(cfg.output)
+        cfg2.options.only_previous = True
+        plan = make_plan(cfg2)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual({cr.change for cr in plan.enabled_can_routes}, {"kept"})
+        self.assertEqual(len(plan.enabled_can_routes), len(want))
+        cfg2.options.only_previous = False
+        generate(make_plan(cfg2))
+        with open(res.output, "rb") as fh:
+            self.assertEqual(fh.read(), v1)
+        with open(res.extension, "rb") as fh:
+            self.assertEqual(fh.read(), x1)
+        # without CAN -> CAN routes the existing .vsde file is emptied (the DaVinci project may list it)
+        cfg2.options.can_routes = False
+        generate(make_plan(cfg2))
+        self.assertEqual(vsde.read(res.extension), [])
+
+    def test_extension_file_uses_the_ecu_attribute(self):
+        """Node named per bus (Gw_BusA, Gw_BusB) with the DBC attribute ECU = Gw: the converter's ECU is Gw."""
+        from ecucstudio.gateway import vsde
+
+        def dbc(bus, node, sender, receiver):
+            text = (f'VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: {node} Other\n\n'
+                    f'BO_ 300 Relay: 4 {sender}\n SG_ RelaySig : 0|8@1+ (1,0) [0|255] "" {receiver}\n\n'
+                    'BA_DEF_ "DBName" STRING ;\nBA_DEF_ BU_ "ECU" STRING ;\nBA_DEF_DEF_ "DBName" "";\n'
+                    f'BA_DEF_DEF_ "ECU" "";\nBA_ "DBName" "{bus}";\nBA_ "ECU" BU_ {node} "Gw";\n')
+            path = os.path.join(self.tmp, f"{bus}.dbc")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return path
+        cfg = self.config()
+        cfg.options.eth_routes = False
+        cfg.buses = [BusInput(dbc=dbc("BusA", "Gw_BusA", "Other", "Gw_BusA"), node="Gw_BusA"),
+                     BusInput(dbc=dbc("BusB", "Gw_BusB", "Gw_BusB", "Other"), node="Gw_BusB")]
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual([cr.vsde for cr in plan.enabled_can_routes], [True])
+        res = generate(plan)
+        self.assertEqual(vsde.read(res.extension), [("Gw", "BusA", "Relay", "BusB", "Relay")])
+        # one routing for the ECU (gateway) + one per node named otherwise (the converter drops that bus's signals)
+        with open(res.extension, encoding="utf-8") as fh:
+            refs = re.findall(r"<ECU-INSTANCE-REF>(\w+)<", fh.read())
+        self.assertEqual(refs, ["Gw", "Gw_BusA", "Gw_BusB"])
+
     def test_one_ecu_of_the_network(self):
         """DBC files of the whole network -> gateway file of one target ECU (gateway only): ECU -> ECU over Ethernet,
         the CAN part referenced; the other ECUs only tell where messages go."""

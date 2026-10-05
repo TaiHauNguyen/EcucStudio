@@ -123,6 +123,7 @@ class CanRoute:
     notes: list[str] = field(default_factory=list)
     change: str = ""
     direction: str = "CAN->CAN"
+    vsde: bool = False          # routed by DaVinci from the extension file (.vsde) of the DBC files: no Com
 
 
 @dataclass
@@ -307,6 +308,11 @@ class Planner:
         self.plan = Plan(cfg)
         self._taken: set[str] = set()          # planned paths (to keep new names unique)
         self._planned: dict = {}               # new sockets / endpoints / connections shared by both directions
+        # CAN -> CAN routes DaVinci already makes from the extension file of this gateway (not "already routed")
+        from . import vsde
+        self._own_vsde = set()
+        for f in {vsde.path_for(x) for x in (cfg.previous, cfg.output) if x}:
+            self._own_vsde |= vsde.triggerings(f)
 
     # ------------------------------------------------------------------ helpers
     def err(self, msg):
@@ -944,6 +950,32 @@ class Planner:
         if plan.can_routes:
             self.info(f"CAN -> CAN: {len(plan.enabled_can_routes)} of {len(plan.can_routes)} paired message(s) "
                       f"routed between the buses.")
+        self._plan_vsde()
+
+    def _plan_vsde(self):
+        """CAN -> CAN routes between buses of DBC files imported in DaVinci go into the extension file (.vsde) of
+        the DBC converter: DaVinci routes them in PduR only, Com neither receives nor sends them."""
+        from . import vsde
+        plan = self.plan
+        if not plan.delta:
+            return
+        name = os.path.basename(vsde.path_for(self.cfg.output or "gateway.arxml"))
+        left = []
+        for cr in plan.enabled_can_routes:
+            why = vsde.problem(cr)
+            if why:
+                left.append(f"{cr.key} ({why})")
+            else:
+                cr.vsde = True
+                cr.notes.append(f"PduR only, no Com ({name})")
+        n = sum(1 for cr in plan.enabled_can_routes if cr.vsde)
+        if n:
+            self.info(f"CAN -> CAN: {n} route(s) are written to {name}: add it to the input files of the DaVinci "
+                      f"project next to the DBC files. DaVinci then routes them in PduR only and removes them from "
+                      f"Com (no CanIf -> Com, no Com -> CanIf).")
+        if left:
+            self.warn(f"CAN -> CAN routes kept in the gateway file (Com keeps them): {', '.join(left[:6])}"
+                      f"{' ...' if len(left) > 6 else ''}.")
 
     # ------------------------------------------------------------------ buses of other ECUs (over Ethernet)
     def _plan_remote_routes(self):
@@ -1073,7 +1105,7 @@ class Planner:
         if reason:
             cr.enabled, cr.reason = False, reason
         src_pt, dst_pt = self._can_pt_path(src), self._can_pt_path(dst)
-        if src.can_pt and dst.can_pt:
+        if src.can_pt and dst.can_pt and (src_pt, dst_pt) not in self._own_vsde:
             for g in b.gateways():
                 for m in b.el(g).iter(q("I-PDU-MAPPING")):
                     if b.ref(m, "SOURCE-I-PDU-REF") == src_pt and dst_pt in b.refs(m, "TARGET-I-PDU-REF"):

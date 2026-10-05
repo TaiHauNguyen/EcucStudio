@@ -178,6 +178,9 @@ def cmd_generate(a):
     print(f"\nWritten {res.output} ({report.count_text(len(res.routes), len(res.can_routes))}, "
           f"{time.time() - t:.1f} s)")
     print("Created:", ", ".join(f"{k} {v}" for k, v in sorted(res.created.items())))
+    if res.extension:
+        print("CAN -> CAN (PduR only, no Com):", res.extension,
+              "- add it to the Input Files of the DaVinci project next to the DBC files")
     print("Route table:", csv_path)
     print("Message paths:", html_path)
     return 0
@@ -310,6 +313,9 @@ def cmd_topology_generate(a):
         return 1
     for name, res in generate_topology(tplan, a.ecu or None):
         print(f"Written {res.output} ({name}: {report.count_text(len(res.routes), len(res.can_routes))})")
+        if res.extension:
+            print(f"Written {res.extension} ({name}: CAN -> CAN, PduR only, no Com - add it to the Input Files "
+                  f"of the DaVinci project next to the DBC files)")
     print("Lock file:", tplan.cfg.lock_path)
     print("Contract :", tplan.cfg.contract_path)
     return 0

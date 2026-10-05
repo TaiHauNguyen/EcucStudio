@@ -1439,8 +1439,14 @@ class GatewayWindow:
 
             def done(r):
                 res, csv_path = r
-                self.show_messages([], res.warnings, [f"Written {res.output}", f"Route table: {csv_path}",
-                                                      f"Message paths: {self._report_files[0]}"])
+                ext = ""
+                if res.extension:
+                    ncan = sum(1 for c in res.can_routes if c.vsde)
+                    ext = (f"CAN -> CAN ({ncan} route(s), PduR only, no Com): add {os.path.basename(res.extension)} "
+                           f"to the Input Files of the DaVinci project next to the DBC files (once), then run Update.")
+                self.show_messages([], res.warnings, [f"Written {res.output}"] +
+                                   ([f"Written {res.extension}", ext] if ext else []) +
+                                   [f"Route table: {csv_path}", f"Message paths: {self._report_files[0]}"])
                 n = report.count_text(len(res.routes), len(res.can_routes))
                 self.status.config(text=f"Written {os.path.basename(res.output)}: {n}")
                 regen = cfg.previous and os.path.abspath(cfg.previous) == os.path.abspath(res.output)
@@ -1459,10 +1465,11 @@ class GatewayWindow:
                     how = f"for the ECU instance {new_ecu_name(cfg)} (do not import the same DBC files again)"
                 self._done_text = (f"Written {os.path.basename(res.output)} ({n}). In DaVinci Configurator: "
                                    + (f"run Update (the file is already in Input Files)." if regen else
-                                      f"import it (Input Files) {how}."))
+                                      f"import it (Input Files) {how}.") + (f" {ext}" if ext else ""))
                 self.update_hint()
                 messagebox.showinfo(TITLE, f"Written {res.output}\n\n{n}.\n"
-                                           f"Import this file into DaVinci Configurator (Input Files) {how}.",
+                                           f"Import this file into DaVinci Configurator (Input Files) {how}." +
+                                           (f"\n\n{ext}" if ext else ""),
                                     parent=self.win)
             self._run("Generating", work, done)
         self.analyze(then=write)
