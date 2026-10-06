@@ -102,6 +102,7 @@ class Route:
     peers: list[str] = field(default_factory=list)  # Ethernet nodes: CAN->ETH destinations / ETH->CAN source
     fanout_of: "Route | None" = None    # ETH->CAN 1:N: this bus gets the Ethernet PDU of that route (no own PDU)
     no_com: bool = False        # ETH->CAN: Com of the ECU does not send the CAN PDU (.vsde file of the DBC files)
+    fanout_reason: str = ""     # ETH->CAN: why it does not share the Ethernet PDU of the same CAN id on another bus
 
     @property
     def can_side_new(self) -> bool:
@@ -1027,7 +1028,7 @@ class Planner:
         the others map it to their CAN PDU (fanout_of)."""
         plan = self.plan
         for r in plan.routes:
-            r.fanout_of = None
+            r.fanout_of, r.fanout_reason = None, ""
         groups = collections.OrderedDict()
         for r in plan.enabled_routes:
             if r.direction != ETH_TO_CAN or r.can_problem:
@@ -1048,12 +1049,8 @@ class Planner:
             for r in rs[1:]:
                 if r.bus is first.bus:
                     continue
-                reason, _notes = pair_problem(first, r)
-                if reason:
-                    self.warn(f"{r.key}: not forwarded from the Ethernet PDU of {first.key} ({reason}); it gets its "
-                              f"own Ethernet PDU.")
-                    continue
-                members.append(r)
+                if not pair_problem(first, r)[0]:
+                    members.append(r)
             if not members:
                 continue
             for r in members:
@@ -1062,6 +1059,27 @@ class Planner:
                 r.notes.append(f"1:N: Ethernet PDU of {first.key}")
             first.notes.append("1:N: forwarded to " + ", ".join(r.bus.name for r in [first] + members))
             n += 1
+        # the same CAN id on other buses that keeps an own Ethernet PDU (own header id): tell why
+        by_id = collections.OrderedDict()
+        for key, rs in groups.items():
+            for r in rs:
+                if r.fanout_of is None:
+                    by_id.setdefault(key[:2], []).append((key, r))
+        for owners in by_id.values():
+            (key0, first), others = owners[0], owners[1:]
+            for key, r in others:
+                if r.bus is first.bus:
+                    continue
+                if key[2] != key0[2] or pair_problem(first, r)[0]:
+                    why = pair_problem(first, r)[0]
+                elif key[3] != key0[3]:
+                    why = f"Ethernet source differs ({', '.join(first.peers)} / {', '.join(r.peers)})"
+                else:
+                    why = "own Ethernet PDU / header id chosen"
+                r.fanout_reason = f"not 1:N with {first.key}: {why}"
+                r.notes.append(r.fanout_reason)
+                self.warn(f"{r.key}: same CAN id as {first.key} but not one Ethernet PDU ({why}): it gets its own "
+                          f"Ethernet PDU and header id.")
         if n:
             self.info(f"ETH -> CAN 1:N: {n} Ethernet PDU(s) forwarded to several CAN buses (one PDU, one header id).")
 
@@ -1492,6 +1510,8 @@ class Planner:
                 if k:
                     owner = next(used[key][base_id] for key in keys if base_id in used[key])
                     r.header_note = f"flag {k} added (0x{base_id:08X} used by {owner})"
+                    if r.fanout_reason:
+                        r.header_note += f"; {r.fanout_reason}"
                     self.warn(f"Header id 0x{base_id:08X} of {r.key} is already used by {owner} on the same "
                               f"socket; using 0x{cand:08X} (flag {k} in bits {hcfg.flag_shift}..31).")
                 r.header_id = cand

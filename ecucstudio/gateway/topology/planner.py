@@ -481,6 +481,8 @@ class TopologyPlanner:
                 if k:
                     owner = next(used[x][base_id] for x in keys if base_id in used[x])
                     note = f"flag {k} added (0x{base_id:08X} used by {owner})"
+                    if r.fanout_reason:
+                        note += f"; {r.fanout_reason}"
                     self.warn(f"Header id 0x{base_id:08X} of {key} is already used by {owner}; using 0x{cand:08X} "
                               f"(flag {k} in bits {shift}..31).")
                 fixed = cand

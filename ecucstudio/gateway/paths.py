@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from .planner import CAN_TO_ETH, Plan
 
-COLUMNS = ("CAN ID", "Message", "From", "Via", "To", "Gateways", "Length", "Cycle ms")
+COLUMNS = ("CAN ID", "Message", "From", "Via", "To", "Gateways", "Header ID", "Length", "Cycle ms")
 NOT_ROUTED_COLUMNS = ("CAN ID", "Message", "Gateway", "Bus / route", "Reason")
 _ARROW = " → "
 
@@ -32,9 +32,14 @@ class MessagePath:
     sort_key: tuple = ()
 
     @property
+    def header_ids(self) -> list[str]:
+        """Header ids of the Ethernet hops of the path (from the [ETH 0x...] labels of Via)."""
+        return list(dict.fromkeys(v[5:-1] for v in self.via if v.startswith("[ETH 0x")))
+
+    @property
     def row(self) -> tuple:
         return (self.can_id, self.names, self.origin, _ARROW.join(self.via), self.destination,
-                ", ".join(self.gateways), self.length, self.cycle_ms or "")
+                ", ".join(self.gateways), ", ".join(self.header_ids), self.length, self.cycle_ms or "")
 
 
 @dataclass
@@ -299,7 +304,7 @@ def write_html(rep: PathReport, path: str) -> str:
         rows.append(f'<tr class="g{band}"><td class="id">{html.escape(p.can_id)}</td><td>{html.escape(p.names)}</td>'
                     f'<td>{html.escape(p.origin)}</td><td class="via">{_via_html(p.via, gws)}</td>'
                     f'<td>{html.escape(p.destination)}</td><td>{html.escape(", ".join(p.gateways))}</td>'
-                    f'<td>{p.length}</td><td>{p.cycle_ms or ""}</td></tr>')
+                    f'<td class="id">{html.escape(", ".join(p.header_ids))}</td><td>{p.length}</td><td>{p.cycle_ms or ""}</td></tr>')
     nr = "".join(f'<tr><td class="id">{html.escape(str(a))}</td><td>{html.escape(str(b))}</td>'
                  f'<td>{html.escape(str(c))}</td><td>{html.escape(str(d))}</td>'
                  f'<td class="reason">{html.escape(str(e))}</td></tr>' for a, b, c, d, e in rep.not_routed)

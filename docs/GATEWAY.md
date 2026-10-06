@@ -322,8 +322,10 @@ Ví dụ HPC gửi `HpcCmd` (CAN ID 0x12C) cho zone ECU; zone ECU gửi message 
   PduR routing path SoAd → CanIf (BusA) + CanIf (BusB);
 - bảng route: dòng bus đầu ghi *1:N: forwarded to BusA, BusB*, dòng còn lại ghi *1:N: Ethernet PDU of BusA/HpcCmd*,
   cùng PDU Ethernet và header ID;
-- khác layout signal: bus đó có PDU Ethernet riêng, tool báo WARNING; message được chọn tên PDU Ethernet / header ID
-  bằng tay chỉ gộp với bus có cùng lựa chọn;
+- cùng CAN ID nhưng khác độ dài, khác layout signal, khác nguồn Ethernet, hoặc được chọn tên PDU Ethernet / header ID
+  riêng bằng tay: bus đó có PDU Ethernet và header ID riêng (thường thêm flag, ví dụ `0x200000D9`). Tool báo WARNING
+  và ghi lý do vào cột **Header note** / **Remark**, ví dụ `flag 1 added (0x000000D9 used by …); not 1:N with
+  BusA/X: length differs (BusA 8, BusB 12)`;
 - mạng nhiều ECU (mục 13): zone ECU nhận message từ ECU khác và forward ra hai bus của nó cũng dùng một PDU, header
   ID theo ECU gửi;
 - sinh lại giữ nguyên tên PDU và header ID. Bỏ chọn **ETH -> CAN 1:N** ở tab Options thì mỗi bus một PDU Ethernet
@@ -912,6 +914,7 @@ File report cho biết **mỗi message xuất phát từ đâu, đi qua những 
   | Via | các ECU gateway theo thứ tự, chặng Ethernet ghi header ID: `ZoneB → [ETH 0x00000120] → ZoneC`; đi qua một bus giữa hai gateway ghi `bus X` |
   | To | bus đích và các node nhận (`Body → Door`), hoặc node Ethernet |
   | Gateways | danh sách ECU gateway trên đường đi |
+  | Header ID | header ID của các chặng Ethernet trên đường đi (trống nếu chỉ đi CAN) |
 
 - Message đi tới nhiều nơi (1:N) có nhiều dòng. Node Ethernet là điểm cuối / điểm đầu: tool không biết node đó có
   chuyển tiếp message hay không, nên không nối hai chiều qua nó.

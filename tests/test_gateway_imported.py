@@ -196,9 +196,10 @@ class ImportedTest(unittest.TestCase):
         """The central node sends one Ethernet PDU, the zone ECU forwards it to two CAN buses (ETH -> CAN 1:N)."""
         from ecucstudio.gateway.regen import config_from_file
 
-        def dbc(bus, start):
+        def dbc(bus, start, length=8):
             text = (f'VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: Zone Rcv\n\n'
                     f'BO_ 300 HpcCmd: 8 Zone\n SG_ Cmd : {start}|8@1+ (1,0) [0|255] "" Rcv\n\n'
+                    f'BO_ 303 LenCmd: {length} Zone\n SG_ Len : 0|8@1+ (1,0) [0|255] "" Rcv\n\n'
                     f'BO_ 301 OwnCmd: 8 Zone\n SG_ Own : 0|8@1+ (1,0) [0|255] "" Rcv\n\n'
                     f'BO_ 302 NoIl: 8 Zone\n SG_ NoIlSig : 0|8@1+ (1,0) [0|255] "" Rcv\n\n'
                     f'BA_DEF_ "DBName" STRING ;\nBA_DEF_ BO_ "GenMsgILSupport" ENUM "No","Yes";\n'
@@ -211,7 +212,7 @@ class ImportedTest(unittest.TestCase):
         cfg = self.config()
         cfg.options.can_routes = False
         cfg.buses = [BusInput(dbc=dbc("BusA", 0), node="Zone"), BusInput(dbc=dbc("BusB", 0), node="Zone"),
-                     BusInput(dbc=dbc("BusC", 8), node="Zone")]          # BusC: other signal layout
+                     BusInput(dbc=dbc("BusC", 8, 12), node="Zone")]      # BusC: other signal layout / length
         cfg.buses[1].messages = {"OwnCmd": {"eth_pdu": "OwnCmd_B"}}       # own PDU chosen by the user
         plan = make_plan(cfg)
         self.assertEqual(plan.errors, [])
@@ -220,7 +221,13 @@ class ImportedTest(unittest.TestCase):
         self.assertIsNone(a.fanout_of)
         self.assertIs(b.fanout_of, a)
         self.assertIsNone(c.fanout_of)                                   # layout differs: own PDU
-        self.assertTrue(any("BusC/HpcCmd: not forwarded" in w for w in plan.warnings), plan.warnings)
+        self.assertTrue(any(w.startswith("BusC/HpcCmd: same CAN id as BusA/HpcCmd but not one Ethernet PDU (signal "
+                                         "layout differs") for w in plan.warnings), plan.warnings)
+        # other length: own Ethernet PDU, the header note tells why the flag was added
+        ln = r["BusC/LenCmd"]
+        self.assertIsNone(ln.fanout_of)
+        self.assertIn("not 1:N with BusA/LenCmd: length differs (BusA 8, BusC 12)", ln.header_note)
+        self.assertTrue(ln.header_note.startswith("flag 1 added"))
         self.assertEqual((b.eth_pdu, b.header_id), (a.eth_pdu, a.header_id))
         self.assertNotEqual(c.eth_pdu, a.eth_pdu)
         self.assertIsNone(r["BusB/OwnCmd"].fanout_of)

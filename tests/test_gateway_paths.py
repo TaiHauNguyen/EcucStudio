@@ -52,6 +52,8 @@ class PathReportTest(unittest.TestCase):
         eth = r[("EngineData", "Engine @ Body", "default (Ethernet)")]
         self.assertEqual(eth.via[0], "GwEcu")
         self.assertTrue(eth.via[1].startswith("[ETH 0x"))
+        self.assertEqual(eth.header_ids, [eth.via[1][5:-1]])         # own column: Header ID
+        self.assertEqual(r[("EngineData", "Engine @ Body", "Chassis → Steering")].header_ids, [])
         self.assertEqual(eth.can_id, "0x100")
         # the extended id 0x100 is another message; its two flows through the ECU are not mixed
         ext = [p for p in rep.paths if p.names == "ExtSameId"]
@@ -69,7 +71,7 @@ class PathReportTest(unittest.TestCase):
         self.assertIn("EngineData", text)
         self.assertIn('id="filter"', text)
         with open(csv_path, encoding="utf-8-sig") as fh:
-            self.assertTrue(fh.readline().startswith("CAN ID;Message;From;Via;To;Gateways"))
+            self.assertTrue(fh.readline().startswith("CAN ID;Message;From;Via;To;Gateways;Header ID"))
 
     def test_two_gateways_on_one_bus(self):
         """GwEcu forwards EngineData from Body to Chassis; a second gateway (Steering) takes it from Chassis to
