@@ -72,6 +72,7 @@ class Writer:
         self.created = collections.Counter()
         self.added: list = []          # every new element / entry, in creation order (for the delta file)
         self._can_pts: dict = {}       # id(route) -> CAN PDU triggering path (CAN side created once)
+        self._eth_pts: dict = {}       # id(route) -> Ethernet PDU triggering path (ETH -> CAN 1:N)
         self.fibex: list[tuple[str, str]] = []
         self.warnings: list[str] = []
         self._sys_signals: set[str] = set()
@@ -137,7 +138,11 @@ class Writer:
         if p.enabled_routes or any(not cr.vsde for cr in p.enabled_can_routes):
             self.gateway()
         for r in p.enabled_routes:
-            self.route(r)
+            if r.fanout_of is None:
+                self.route(r)
+        for r in p.enabled_routes:
+            if r.fanout_of is not None:
+                self.fanout(r)
         for cr in p.enabled_can_routes:
             if not cr.vsde:                 # the DBC converter makes the others (extension file)
                 self.can_route(cr)
@@ -464,6 +469,14 @@ class Writer:
         self.attach_ref(self.lst(self.p.gateway, "I-PDU-MAPPINGS"), mapping)
         self.created["I-PDU-MAPPING"] += 1
 
+    def fanout(self, r: Route):
+        """ETH->CAN 1:N: the Ethernet PDU of r.fanout_of is also sent on r's bus (one more I-PDU-MAPPING)."""
+        can_pt = self.can_side(r)
+        mapping = E("I-PDU-MAPPING", R("SOURCE-I-PDU-REF", "PDU-TRIGGERING", self._eth_pts[id(r.fanout_of)]),
+                    E("TARGET-I-PDU", R("TARGET-I-PDU-REF", "PDU-TRIGGERING", can_pt)))
+        self.attach_ref(self.lst(self.p.gateway, "I-PDU-MAPPINGS"), mapping)
+        self.created["I-PDU-MAPPING"] += 1
+
     def route(self, r: Route):
         p, naming = self.p, self.cfg.naming
         eth_dir = "OUT" if r.direction == CAN_TO_ETH else "IN"
@@ -488,6 +501,7 @@ class Writer:
                           fmt(naming.pdu_port, pdu=r.eth_pdu, ecu=p.ecu_name,
                               connector=p.eth_connector.rsplit("/", 1)[-1]), eth_dir)
         eth_pt = self.triggerings(p.eth_channel, eth_pdu, r.eth_pt_name, eth_sigs, eport)
+        self._eth_pts[id(r)] = eth_pt
         id_path = f"{p.id_set}/{r.eth_id_name}"
         ident = self.ident("SO-CON-I-PDU-IDENTIFIER", id_path, T("HEADER-ID", r.header_id),
                            R("PDU-TRIGGERING-REF", "PDU-TRIGGERING", eth_pt))

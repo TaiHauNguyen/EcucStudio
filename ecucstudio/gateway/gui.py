@@ -848,6 +848,11 @@ class GatewayWindow:
                                 "on another)", variable=self.v_canroutes).pack(anchor="w")
         ttk.Checkbutton(o, text="CAN -> CAN: also pair renamed messages (same CAN id and length)",
                         variable=self.v_canmatchid).pack(anchor="w", padx=(18, 0), pady=(0, 6))
+        self.v_fanout = tk.BooleanVar(value=True)
+        ttk.Checkbutton(o, text="ETH -> CAN 1:N: a message sent on several buses (same CAN id, length and layout)
+"
+                                "is one Ethernet PDU forwarded to every bus",
+                        variable=self.v_fanout).pack(anchor="w", pady=(0, 6))
         self.v_extflag = tk.BooleanVar()
         self.v_sigs = tk.StringVar(value="copy")
         self.v_timing = tk.StringVar(value="event")
@@ -1312,6 +1317,7 @@ class GatewayWindow:
         c.options.eth_routes = self.v_ethroutes.get()
         c.options.can_routes = self.v_canroutes.get()
         c.options.can_match_id = self.v_canmatchid.get()
+        c.options.eth_fanout = self.v_fanout.get()
         c.previous = self.v_prev.get().strip()
         for k, v in self.v_naming.items():
             setattr(c.naming, k, v.get().strip() or getattr(Naming(), k))
@@ -1339,6 +1345,7 @@ class GatewayWindow:
         self.v_ethroutes.set(c.options.eth_routes)
         self.v_canroutes.set(c.options.can_routes)
         self.v_canmatchid.set(c.options.can_match_id)
+        self.v_fanout.set(c.options.eth_fanout)
         self.v_prev.set(c.previous)
         for k, v in self.v_naming.items():
             v.set(getattr(c.naming, k))

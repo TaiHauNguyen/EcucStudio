@@ -433,8 +433,8 @@ class TopologyPlanner:
         for ecu, pl in second.items():
             hcfg = pl.cfg.header
             for r in pl.plan.enabled_routes:
-                if not any((r.direction, p) in pl.plan.sides for p in r.peers):
-                    continue
+                if not any((r.direction, p) in pl.plan.sides for p in r.peers) or r.fanout_of is not None:
+                    continue                        # 1:N: the other buses get the id of the PDU's route
                 if r.direction == CAN_TO_ETH:
                     key, sender, keys = f"{ecu}/{r.key}", ecu, [("tx", ecu)] + [("rx", p) for p in r.peers]
                 else:

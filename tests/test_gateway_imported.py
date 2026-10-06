@@ -159,6 +159,67 @@ class ImportedTest(unittest.TestCase):
             refs = re.findall(r"<ECU-INSTANCE-REF>(\w+)<", fh.read())
         self.assertEqual(refs, ["Gw", "Gw_BusA", "Gw_BusB"])
 
+    def test_eth_to_can_fanout(self):
+        """The central node sends one Ethernet PDU, the zone ECU forwards it to two CAN buses (ETH -> CAN 1:N)."""
+        from ecucstudio.gateway.regen import config_from_file
+
+        def dbc(bus, start):
+            text = (f'VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: Zone Rcv\n\n'
+                    f'BO_ 300 HpcCmd: 8 Zone\n SG_ Cmd : {start}|8@1+ (1,0) [0|255] "" Rcv\n\n'
+                    f'BO_ 301 OwnCmd: 8 Zone\n SG_ Own : 0|8@1+ (1,0) [0|255] "" Rcv\n\n'
+                    f'BO_ 302 NoIl: 8 Zone\n SG_ NoIlSig : 0|8@1+ (1,0) [0|255] "" Rcv\n\n'
+                    f'BA_DEF_ "DBName" STRING ;\nBA_DEF_ BO_ "GenMsgILSupport" ENUM "No","Yes";\n'
+                    f'BA_DEF_DEF_ "DBName" "";\nBA_DEF_DEF_ "GenMsgILSupport" "Yes";\nBA_ "DBName" "{bus}";\n'
+                    f'BA_ "GenMsgILSupport" BO_ 302 0;\n')
+            path = os.path.join(self.tmp, f"{bus}.dbc")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return path
+        cfg = self.config()
+        cfg.options.can_routes = False
+        cfg.buses = [BusInput(dbc=dbc("BusA", 0), node="Zone"), BusInput(dbc=dbc("BusB", 0), node="Zone"),
+                     BusInput(dbc=dbc("BusC", 8), node="Zone")]          # BusC: other signal layout
+        cfg.buses[1].messages = {"OwnCmd": {"eth_pdu": "OwnCmd_B"}}       # own PDU chosen by the user
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        r = {x.key: x for x in plan.routes}
+        a, b, c = r["BusA/HpcCmd"], r["BusB/HpcCmd"], r["BusC/HpcCmd"]
+        self.assertIsNone(a.fanout_of)
+        self.assertIs(b.fanout_of, a)
+        self.assertIsNone(c.fanout_of)                                   # layout differs: own PDU
+        self.assertTrue(any("BusC/HpcCmd: not forwarded" in w for w in plan.warnings), plan.warnings)
+        self.assertEqual((b.eth_pdu, b.header_id), (a.eth_pdu, a.header_id))
+        self.assertNotEqual(c.eth_pdu, a.eth_pdu)
+        self.assertIsNone(r["BusB/OwnCmd"].fanout_of)
+        self.assertIs(r["BusC/OwnCmd"].fanout_of, r["BusA/OwnCmd"])
+        # GenMsgILSupport = No: DaVinci imports it without PDU triggering -> not routed
+        self.assertFalse(r["BusA/NoIl"].enabled)
+        self.assertIn("GenMsgILSupport", r["BusA/NoIl"].reason)
+        res = generate(plan)
+        out = Base(res.output)
+        maps = [(out.ref(m, "SOURCE-I-PDU-REF"), out.refs(m, "TARGET-I-PDU-REF")[0])
+                for m in out.root.iter("{http://autosar.org/schema/r4.0}I-PDU-MAPPING")]
+        src = [s for s, d in maps if d in ("/Cluster/BusA/CHNL/PT_HpcCmd", "/Cluster/BusB/CHNL/PT_HpcCmd")]
+        self.assertEqual(len(src), 2)
+        self.assertEqual(len(set(src)), 1)                               # one Ethernet PDU, two CAN buses
+        with open(res.output, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count(f"<SHORT-NAME>{a.eth_pdu}</SHORT-NAME>"), 1)
+        self.assertNotIn(f"<SHORT-NAME>HpcCmd_oBusB_Eth</SHORT-NAME>", text)
+        # regeneration: same file, no warning
+        cfg2, _ = config_from_file(cfg.output)
+        plan = make_plan(cfg2)
+        self.assertEqual([w for w in plan.warnings if "already exists" in w], [])
+        self.assertEqual({x.change for x in plan.enabled_routes}, {"kept"})
+        generate(plan)
+        with open(res.output, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), text)
+        # option off: an Ethernet PDU per bus
+        cfg2.options.eth_fanout = False
+        plan = make_plan(cfg2)
+        self.assertTrue(all(x.fanout_of is None for x in plan.routes))
+        self.assertNotEqual(r["BusA/HpcCmd"].eth_pdu, {x.key: x for x in plan.routes}["BusB/HpcCmd"].eth_pdu)
+
     def test_one_ecu_of_the_network(self):
         """DBC files of the whole network -> gateway file of one target ECU (gateway only): ECU -> ECU over Ethernet,
         the CAN part referenced; the other ECUs only tell where messages go."""
@@ -201,6 +262,36 @@ class ImportedTest(unittest.TestCase):
         with open(out, "rb") as fh:
             self.assertEqual(fh.read(), v1)
 
+    def test_topology_eth_to_can_fanout(self):
+        """ZC1 sends a message over Ethernet, ZC2 forwards that one PDU to two of its buses (no header id clash)."""
+        from ecucstudio.gateway import start
+        from ecucstudio.gateway.topology import generate_topology, make_topology_plan
+
+        def dbc(name, nodes, sender, receiver):
+            text = ('VERSION ""\n\nNS_ :\n\nBS_:\n\nBU_: ' + " ".join(nodes) + "\n\n"
+                    f'BO_ 513 LockCmd: 2 {sender}\n SG_ LockSig : 0|8@1+ (1,0) [0|255] "" {receiver}\n\n'
+                    f'BA_DEF_ "DBName" STRING ;\nBA_DEF_DEF_ "DBName" "";\nBA_ "DBName" "{name}";\n')
+            path = os.path.join(self.tmp, f"{name}.dbc")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            return path
+        groups = {"ZC1": [(dbc("PowerBus", ["ZC1", "Engine"], "Engine", "ZC1"), "ZC1")],
+                  "ZC2": [(dbc("BodyBus", ["ZC2", "Key"], "ZC2", "Key"), "ZC2"),
+                          (dbc("DoorBus", ["ZC2", "Door"], "ZC2", "Door"), "ZC2")]}
+        t = start.topology_for_dbcs(groups, self.tmp, "AUTOSAR_00052", {"ZC1": "10.0.5.11", "ZC2": "10.0.5.12"},
+                                    generate={"ZC1": True, "ZC2": True}, vlan=5, gateway_only=True)
+        t.save(os.path.join(self.tmp, "gateway_network.json"))
+        tp = make_topology_plan(t)
+        self.assertEqual(tp.errors, [])
+        r = {x.key: x for x in tp.plans["ZC2"].enabled_routes}
+        self.assertIs(r["DoorBus/LockCmd"].fanout_of, r["BodyBus/LockCmd"])
+        self.assertEqual(r["DoorBus/LockCmd"].header_id, tp.plans["ZC1"].enabled_routes[0].header_id)
+        out = dict(generate_topology(tp))["ZC2"].output
+        with open(out, encoding="utf-8") as fh:
+            text = fh.read()
+        src = re.findall(r'<SOURCE-I-PDU-REF DEST="PDU-TRIGGERING">([^<]+)<', text)
+        self.assertEqual(len(src), 2)
+        self.assertEqual(len(set(src)), 1)
 
 if __name__ == "__main__":
     unittest.main()

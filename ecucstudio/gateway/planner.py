@@ -100,6 +100,7 @@ class Route:
     header_note: str = ""
     notes: list[str] = field(default_factory=list)
     peers: list[str] = field(default_factory=list)  # Ethernet nodes: CAN->ETH destinations / ETH->CAN source
+    fanout_of: "Route | None" = None    # ETH->CAN 1:N: this bus gets the Ethernet PDU of that route (no own PDU)
 
     @property
     def can_side_new(self) -> bool:
@@ -334,9 +335,9 @@ class Planner:
         hits = [p for p in cands if p.rsplit("/", 1)[-1] == value]
         return hits[0] if len(hits) == 1 else None
 
-    def _unique(self, parent: str, name: str, what: str) -> str:
+    def _unique(self, parent: str, name: str, what: str, quiet: bool = False) -> str:
         free = self.base.free_name(parent, name, self._taken)
-        if free != name:
+        if free != name and not quiet:
             self.warn(f"{what} '{name}' already exists in {parent}; using '{free}'")
         self._taken.add(f"{parent}/{free}")
         return free
@@ -414,6 +415,8 @@ class Planner:
             self._plan_can_routes()
         if eth and self._remotes:
             self._plan_remote_routes()
+        if eth and cfg.options.eth_fanout:
+            self._plan_eth_fanout()
         if plan.errors:
             return False
         if eth and plan.enabled_routes:
@@ -724,6 +727,10 @@ class Planner:
                 r.notes.append("multiplexed message: PDUs are routed without signals")
             else:
                 r.can_signals = self._signals(m, naming.can_signal, naming.system_signal, fields, bp.channel)
+        if self.imported and not m.il_support:
+            # the DBC converter makes a USER-DEFINED-PDU without PDU triggering: nothing to reference
+            r.enabled = False
+            r.can_problem = r.reason = "GenMsgILSupport = No in the DBC: DaVinci imports it without PDU triggering"
         # ---------------------------------------------------------- Ethernet side
         if not opts.eth_routes:
             r.enabled, r.reason, r.header_id = False, "CAN <-> Ethernet routing is off", -1
@@ -757,7 +764,10 @@ class Planner:
         if r.can_pt:
             self._gateway_notes(r)
             self._com_usage(r)
-        r.eth_pdu = self._unique(pdu_pkg, eth_name, "Ethernet PDU")
+        # ETH->CAN 1:N in the previous file: the other buses had the same Ethernet PDU (they share it again)
+        shared = (prev is not None and any(x.prev is not None and x.prev.eth_pdu == prev.eth_pdu for x in plan.routes)
+                  or bool(over.get("eth_pdu")) and any(x.eth_pdu == eth_name for x in plan.routes))
+        r.eth_pdu = self._unique(pdu_pkg, eth_name, "Ethernet PDU", quiet=shared)
         r.eth_pt_name = self._unique(plan.eth_channel, fmt(naming.pdu_triggering, pdu=r.eth_pdu, **fields),
                                      "PDU triggering")
         if opts.eth_signals == "copy":
@@ -976,6 +986,51 @@ class Planner:
         if left:
             self.warn(f"CAN -> CAN routes kept in the gateway file (Com keeps them): {', '.join(left[:6])}"
                       f"{' ...' if len(left) > 6 else ''}.")
+
+    # ------------------------------------------------------------------ ETH -> CAN 1:N
+    def _plan_eth_fanout(self):
+        """A message the node sends on several buses (same CAN id, length and signal layout, from the same Ethernet
+        node) comes as one Ethernet PDU (one header id) and is forwarded to every bus: the first bus keeps the PDU,
+        the others map it to their CAN PDU (fanout_of)."""
+        plan = self.plan
+        for r in plan.routes:
+            r.fanout_of = None
+        groups = collections.OrderedDict()
+        for r in plan.enabled_routes:
+            if r.direction != ETH_TO_CAN or r.can_problem:
+                continue
+            over = r.bus.cfg.messages.get(r.message.name, {}) if isinstance(r.bus.cfg.messages, dict) else {}
+            # an Ethernet PDU / header id chosen by the user (or by the topology: the sender's) is shared only with
+            # the buses that have the same choice
+            chosen = (over.get("eth_pdu") or "", str(over.get("header_id") if over.get("header_id") is not None
+                                                     else ""))
+            m = r.message
+            groups.setdefault((m.can_id, m.extended, r.length, tuple(r.peers)) + chosen, []).append(r)
+        n = 0
+        for rs in groups.values():
+            if len({r.bus.name for r in rs}) < 2:
+                continue
+            first = rs[0]
+            members = []
+            for r in rs[1:]:
+                if r.bus is first.bus:
+                    continue
+                reason, _notes = pair_problem(first, r)
+                if reason:
+                    self.warn(f"{r.key}: not forwarded from the Ethernet PDU of {first.key} ({reason}); it gets its "
+                              f"own Ethernet PDU.")
+                    continue
+                members.append(r)
+            if not members:
+                continue
+            for r in members:
+                r.fanout_of = first
+                r.eth_pdu, r.eth_pt_name, r.eth_signals = first.eth_pdu, first.eth_pt_name, []
+                r.notes.append(f"1:N: Ethernet PDU of {first.key}")
+            first.notes.append("1:N: forwarded to " + ", ".join(r.bus.name for r in [first] + members))
+            n += 1
+        if n:
+            self.info(f"ETH -> CAN 1:N: {n} Ethernet PDU(s) forwarded to several CAN buses (one PDU, one header id).")
 
     # ------------------------------------------------------------------ buses of other ECUs (over Ethernet)
     def _plan_remote_routes(self):
@@ -1363,8 +1418,9 @@ class Planner:
     def _assign_header_ids(self):
         plan, hcfg = self.plan, self.cfg.header
         used = self._scopes()
-        routes = [r for r in plan.enabled_routes if r.header_id >= 0] + \
-                 [r for r in plan.enabled_routes if r.header_id < 0]     # fixed ids (user / kept) first
+        own = [r for r in plan.enabled_routes if r.fanout_of is None]
+        routes = [r for r in own if r.header_id >= 0] + \
+                 [r for r in own if r.header_id < 0]     # fixed ids (user / kept) first
         for r in routes:
             sps = [plan.sides[(r.direction, p)] for p in r.peers if (r.direction, p) in plan.sides]
             if not sps:
@@ -1408,6 +1464,7 @@ class Planner:
             r.eth_id_name = self._unique(plan.id_set, fmt(self.cfg.naming.header_id, eth_pdu=r.eth_pdu,
                                                           pdu=r.eth_pdu, msg=r.message.name, bus=r.bus.name,
                                                           ecu=plan.ecu_name), "Header id")
+        copy_fanout_ids(plan)
 
     def _resolve_gateway(self):
         b, plan = self.base, self.plan
@@ -1418,6 +1475,15 @@ class Planner:
             pkg = self._package("GATEWAY")
             name = self._unique(pkg, fmt(self.cfg.naming.gateway, ecu=plan.ecu_name), "Gateway")
             plan.gateway, plan.gateway_new = f"{pkg}/{name}", True
+
+
+def copy_fanout_ids(plan: Plan):
+    """ETH->CAN 1:N: the other buses use the header id and identifier of the route that owns the Ethernet PDU."""
+    for r in plan.routes:
+        f = r.fanout_of
+        if f is not None:
+            r.header_id, r.eth_id_name, r.locked = f.header_id, f.eth_id_name, f.locked
+            r.header_note = f"same as {f.key} (1:N)"
 
 
 def pair_problem(src: Route, dst: Route, src_label: str = "", dst_label: str = "") -> tuple[str, list[str]]:

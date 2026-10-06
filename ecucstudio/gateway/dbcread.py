@@ -39,6 +39,7 @@ class Message:
     nm: bool = False
     diag: bool = False
     comment: str | None = None
+    il_support: bool = True     # GenMsgILSupport: No -> the Vector converter imports it without PDU triggering
 
     @property
     def multiplexed(self) -> bool:
@@ -177,7 +178,8 @@ def load(path: str) -> Database:
             nm=_yes(_attr(m, defs, "NmAsrMessage", "No")) or _yes(_attr(m, defs, "NmMessage", "No")),
             diag=any(_yes(_attr(m, defs, a, "No")) for a in ("DiagRequest", "DiagResponse", "DiagState",
                                                               "DiagUudtResponse", "DiagUUDTResponse")),
-            comment=_comment(m.comment)))
+            comment=_comment(m.comment),
+            il_support=str(_attr(m, defs, "GenMsgILSupport", "Yes")).strip().lower() not in ("no", "0", "false")))
     out.messages.sort(key=lambda x: (x.extended, x.can_id))
     return out
 

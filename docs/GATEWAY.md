@@ -311,12 +311,32 @@ cùng VLAN. Thêm DBC của bus thuộc zone khác vào **CAN buses** và chọn
   bị tắt tay, NM / diagnostic, hoặc đã được cấp CAN → CAN nội bộ thì giữ nguyên.
 - Chọn node peer cho message bằng tay (mục 3.3) thì tool giữ lựa chọn đó.
 
+### 3.5 Một message Ethernet ra nhiều bus CAN (ETH → CAN 1:N)
+
+Ví dụ HPC gửi `HpcCmd` (CAN ID 0x12C) cho zone ECU; zone ECU gửi message này trên cả BusA và BusB (cùng CAN ID, cùng
+độ dài, cùng layout signal trong hai DBC):
+
+- tool tạo **một** PDU Ethernet và **một** header ID (tên theo bus đầu tiên, ví dụ `HpcCmd_oBusA_Eth`, header
+  `0x0000012C`); HPC chỉ gửi một lần;
+- GATEWAY có hai `I-PDU-MAPPING` từ PDU-TRIGGERING Ethernet đó tới PDU-TRIGGERING của BusA và BusB; DaVinci tạo một
+  PduR routing path SoAd → CanIf (BusA) + CanIf (BusB);
+- bảng route: dòng bus đầu ghi *1:N: forwarded to BusA, BusB*, dòng còn lại ghi *1:N: Ethernet PDU of BusA/HpcCmd*,
+  cùng PDU Ethernet và header ID;
+- khác layout signal: bus đó có PDU Ethernet riêng, tool báo WARNING; message được chọn tên PDU Ethernet / header ID
+  bằng tay chỉ gộp với bus có cùng lựa chọn;
+- mạng nhiều ECU (mục 13): zone ECU nhận message từ ECU khác và forward ra hai bus của nó cũng dùng một PDU, header
+  ID theo ECU gửi;
+- sinh lại giữ nguyên tên PDU và header ID. Bỏ chọn **ETH -> CAN 1:N** ở tab Options thì mỗi bus một PDU Ethernet
+  như trước.
+
 ## 4. Tab **Options & Naming** (không bắt buộc)
 
 - **CAN <-> Ethernet routes**: tạo route CAN ↔ Ethernet (mặc định bật). Tắt đi khi chỉ cần CAN → CAN: không cần
   điền tab Ethernet và file không có phần Ethernet nào.
 - **CAN -> CAN routes**: ghép message giữa các bus (mục 12, mặc định bật).
   - **also pair renamed messages**: ghép cả message bị đổi tên nhưng cùng CAN ID và độ dài (mặc định bật).
+- **ETH -> CAN 1:N**: message ECU gửi trên nhiều bus (cùng CAN ID, độ dài, layout signal) là **một** PDU Ethernet,
+  được forward ra mọi bus đó (mục 3.5, mặc định bật).
 - **Set bit 31 for extended CAN ids**: luôn đặt bit 31 cho CAN ID extended (kiểu `Can_IdType`).
   Mặc định tắt, tức header = CAN ID đệm 0.
 - **Ethernet PDU content**:
