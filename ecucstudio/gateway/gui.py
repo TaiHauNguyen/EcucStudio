@@ -364,6 +364,59 @@ class PeerPickDialog(tk.Toplevel):
         self.destroy()
 
 
+class FanoutDialog(tk.Toplevel):
+    """ETH -> CAN routes of one CAN id on several buses: compare their signal layouts, then forward them from one
+    Ethernet PDU (1:N, also when the layout differs), give each bus its own PDU, or let the tool decide."""
+
+    def __init__(self, master, routes, current=None):
+        super().__init__(master)
+        self.title("ETH -> CAN 1:N")
+        self.transient(master)
+        self.result, self.done = None, False
+        m0 = routes[0].message
+        dialog_header(self, f"CAN id {m0.id_text} on {len(routes)} buses",
+                      "One Ethernet PDU forwarded to every bus (one header id), or an own Ethernet PDU per bus. PduR "
+                      "forwards the whole PDU unchanged: with another signal layout the receivers of the other bus "
+                      "read the bytes with their own layout.")
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill="both", expand=True)
+        text = tk.Text(f, height=min(24, 4 + sum(len(r.message.signals) + 2 for r in routes)), width=96,
+                       font=("Consolas", 9), wrap="none")
+        text.pack(fill="both", expand=True)
+        text.tag_configure("diff", foreground="#b03a00")
+        text.tag_configure("head", font=("Consolas", 9, "bold"))
+        layouts = [{s.name: (s.start, s.length, s.little_endian) for s in r.message.signals} for r in routes]
+        common = set.intersection(*(set(x.values()) for x in layouts)) if layouts else set()
+        for r, lay in zip(routes, layouts):
+            text.insert("end", f"{r.bus.name} / {r.message.name}  (length {r.length}, header "
+                               f"{r.header_text if r.header_id >= 0 else '-'})\n", "head")
+            for name, (start, length, le) in sorted(lay.items(), key=lambda x: x[1][0]):
+                line = f"   {name:<40} start {start:>4}  length {length:>3}  {'Intel' if le else 'Motorola'}\n"
+                text.insert("end", line, () if (start, length, le) in common else ("diff",))
+            text.insert("end", "\n")
+        text.configure(state="disabled")
+        self.choice = tk.StringVar(value={True: "on", False: "off"}.get(current, "auto"))
+        for value, label in (("on", "One Ethernet PDU for all these buses (1:N), also when the signal layout differs"),
+                             ("off", "An own Ethernet PDU and header id per bus"),
+                             ("auto", "Automatic: 1:N only when length and signal layout are the same")):
+            ttk.Radiobutton(f, text=label, value=value, variable=self.choice).pack(anchor="w")
+        lengths = {r.length for r in routes}
+        if len(lengths) > 1:
+            ttk.Label(f, text="The lengths differ: 1:N is not possible (" +
+                      ", ".join(f"{r.bus.name} {r.length}" for r in routes) + ").",
+                      foreground="#b03a00").pack(anchor="w", pady=(6, 0))
+        bb = ttk.Frame(self, padding=(10, 0, 10, 10))
+        bb.pack(fill="x")
+        ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bb, text="OK", command=self.ok).pack(side="right", padx=6)
+        self.grab_set()
+
+    def ok(self):
+        self.result = {"on": True, "off": False, "auto": None}[self.choice.get()]
+        self.done = True
+        self.destroy()
+
+
 class PeerDialog(tk.Toplevel):
     """Another Ethernet node: its sockets for both directions (the local sockets are shared by default)."""
 
@@ -1669,6 +1722,9 @@ class GatewayWindow:
         d = RouteDialog(self.win, r, self.peer_names())
         self.win.wait_window(d)
         if d.result is not None:
+            old = r.bus.cfg.messages.get(r.message.name, {}) or {}
+            if "fanout" in old:                         # set in the 1:N dialog, not in this one
+                d.result["fanout"] = old["fanout"]
             r.bus.cfg.messages[r.message.name] = d.result
             self.analyze()
 
@@ -1694,6 +1750,8 @@ class GatewayWindow:
         m.add_command(label="Edit…", command=self.edit_route)
         if self.cfg.ethernet.peers:
             m.add_command(label="Ethernet peers…", command=self.set_peers)
+        if self._fanout_routes():
+            m.add_command(label="1:N with the same CAN id…", command=self.set_fanout)
         m.add_separator()
         m.add_command(label="Add CAN -> CAN link…", command=self.add_link)
         sel = self._selected_routes()
@@ -1702,6 +1760,33 @@ class GatewayWindow:
         m.add_separator()
         m.add_command(label="Reset overrides of selected", command=self.reset_routes)
         m.tk_popup(e.x_root, e.y_root)
+
+    def _fanout_routes(self) -> list:
+        """Enabled ETH -> CAN routes of the CAN id of the selected route on other buses (with it), or []."""
+        sel = [r for r in self._selected_routes() if isinstance(r, Route) and r.direction == ETH_TO_CAN]
+        if not sel or not self.plan:
+            return []
+        m = sel[0].message
+        same = [r for r in self.plan.enabled_routes if r.direction == ETH_TO_CAN and not r.can_problem
+                and (r.message.can_id, r.message.extended) == (m.can_id, m.extended)]
+        return same if len({r.bus.name for r in same}) > 1 else []
+
+    def set_fanout(self):
+        routes = self._fanout_routes()
+        if not routes:
+            return
+        cur = {(r.bus.cfg.messages.get(r.message.name, {}) or {}).get("fanout") for r in routes}
+        d = FanoutDialog(self.win, routes, cur.pop() if len(cur) == 1 else None)
+        self.win.wait_window(d)
+        if not d.done:
+            return
+        for r in routes:
+            over = dict(r.bus.cfg.messages.get(r.message.name, {}))
+            over.pop("fanout", None)
+            if d.result is not None:
+                over["fanout"] = d.result
+            r.bus.cfg.messages[r.message.name] = over
+        self.analyze()
 
     def reset_routes(self):
         for r in self._selected_routes():

@@ -326,6 +326,15 @@ Ví dụ HPC gửi `HpcCmd` (CAN ID 0x12C) cho zone ECU; zone ECU gửi message 
   riêng bằng tay: bus đó có PDU Ethernet và header ID riêng (thường thêm flag, ví dụ `0x200000D9`). Tool báo WARNING
   và ghi lý do vào cột **Header note** / **Remark**, ví dụ `flag 1 added (0x000000D9 used by …); not 1:N with
   BusA/X: length differs (BusA 8, BusB 12)`;
+- tự chọn cho từng CAN ID: chuột phải một dòng ETH->CAN → **1:N with the same CAN id…**. Hộp thoại liệt kê signal
+  của message trên từng bus (start bit, độ dài, byte order), signal khác layout tô màu cam. Chọn:
+  - **One Ethernet PDU for all these buses (1:N)**: gộp cả khi khác layout signal (độ dài phải bằng nhau). PduR
+    chuyển nguyên PDU, PDU Ethernet theo layout của bus đầu tiên, node nhận trên bus kia đọc byte theo layout của
+    nó. WARNING vẫn hiện để nhắc;
+  - **An own Ethernet PDU and header id per bus**: không gộp, kể cả khi giống hệt;
+  - **Automatic**: như mặc định (chỉ gộp khi cùng độ dài và layout).
+
+  Lựa chọn lưu trong cấu hình (`messages.<tên>.fanout` = `true` / `false`), sinh lại vẫn giữ;
 - mạng nhiều ECU (mục 13): zone ECU nhận message từ ECU khác và forward ra hai bus của nó cũng dùng một PDU, header
   ID theo ECU gửi;
 - sinh lại giữ nguyên tên PDU và header ID. Bỏ chọn **ETH -> CAN 1:N** ở tab Options thì mỗi bus một PDU Ethernet

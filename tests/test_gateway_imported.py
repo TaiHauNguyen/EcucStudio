@@ -223,6 +223,24 @@ class ImportedTest(unittest.TestCase):
         self.assertIsNone(c.fanout_of)                                   # layout differs: own PDU
         self.assertTrue(any(w.startswith("BusC/HpcCmd: same CAN id as BusA/HpcCmd but not one Ethernet PDU (signal "
                                          "layout differs") for w in plan.warnings), plan.warnings)
+        self.assertTrue(any("right click -> 1:N with the same CAN id" in w for w in plan.warnings))
+        # the user forwards HpcCmd of BusC from the same Ethernet PDU anyway (same length, other layout): warning stays
+        cfg_f = self.config()
+        cfg_f.options.can_routes = False
+        cfg_f.buses = [BusInput(dbc=b.dbc, node="Zone") for b in cfg.buses]
+        cfg_f.buses[2].messages = {"HpcCmd": {"fanout": True}, "LenCmd": {"fanout": True}}
+        cfg_f.buses[1].messages = {"OwnCmd": {"fanout": False}}
+        pf = make_plan(cfg_f)
+        self.assertEqual(pf.errors, [])
+        rf = {x.key: x for x in pf.routes}
+        self.assertIs(rf["BusC/HpcCmd"].fanout_of, rf["BusA/HpcCmd"])
+        self.assertIs(rf["BusB/HpcCmd"].fanout_of, rf["BusA/HpcCmd"])
+        self.assertTrue(any(w.startswith("BusC/HpcCmd: gets the Ethernet PDU of BusA/HpcCmd although the signal "
+                                         "layout differs") for w in pf.warnings), pf.warnings)
+        self.assertIsNone(rf["BusC/LenCmd"].fanout_of)                  # other length: never
+        self.assertIsNone(rf["BusB/OwnCmd"].fanout_of)                  # 1:N off for it
+        self.assertIn("own Ethernet PDU chosen (1:N off)", rf["BusB/OwnCmd"].fanout_reason)
+        self.assertIs(rf["BusC/OwnCmd"].fanout_of, rf["BusA/OwnCmd"])
         # other length: own Ethernet PDU, the header note tells why the flag was added
         ln = r["BusC/LenCmd"]
         self.assertIsNone(ln.fanout_of)

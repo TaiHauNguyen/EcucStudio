@@ -1025,10 +1025,15 @@ class Planner:
     def _plan_eth_fanout(self):
         """A message the node sends on several buses (same CAN id, length and signal layout, from the same Ethernet
         node) comes as one Ethernet PDU (one header id) and is forwarded to every bus: the first bus keeps the PDU,
-        the others map it to their CAN PDU (fanout_of)."""
+        the others map it to their CAN PDU (fanout_of). Per message the user can force it although the signal layout
+        differs (override "fanout": true, same length needed) or keep an own Ethernet PDU ("fanout": false)."""
         plan = self.plan
         for r in plan.routes:
             r.fanout_of, r.fanout_reason = None, ""
+
+        def choice(r):
+            over = r.bus.cfg.messages.get(r.message.name, {}) if isinstance(r.bus.cfg.messages, dict) else {}
+            return over.get("fanout")
         groups = collections.OrderedDict()
         for r in plan.enabled_routes:
             if r.direction != ETH_TO_CAN or r.can_problem:
@@ -1037,7 +1042,7 @@ class Planner:
             # an Ethernet PDU / header id chosen by the user (or by the topology: the sender's) is shared only with
             # the buses that have the same choice
             chosen = (over.get("eth_pdu") or "", str(over.get("header_id") if over.get("header_id") is not None
-                                                     else ""))
+                                                     else ""), r.key if over.get("fanout") is False else "")
             m = r.message
             groups.setdefault((m.can_id, m.extended, r.length, tuple(r.peers)) + chosen, []).append(r)
         n = 0
@@ -1049,8 +1054,15 @@ class Planner:
             for r in rs[1:]:
                 if r.bus is first.bus:
                     continue
-                if not pair_problem(first, r)[0]:
+                reason = pair_problem(first, r)[0]
+                if not reason:
                     members.append(r)
+                elif reason.startswith("signal layout differs") and True in (choice(first), choice(r)):
+                    members.append(r)               # chosen by the user: the bytes are forwarded unchanged
+                    r.notes.append("1:N chosen although the signal layout differs")
+                    self.warn(f"{r.key}: gets the Ethernet PDU of {first.key} although the signal layout differs "
+                              f"(chosen by the user): the PDU is forwarded unchanged, the layout of {first.bus.name} "
+                              f"is put on {r.bus.name}.")
             if not members:
                 continue
             for r in members:
@@ -1070,7 +1082,9 @@ class Planner:
             for key, r in others:
                 if r.bus is first.bus:
                     continue
-                if key[2] != key0[2] or pair_problem(first, r)[0]:
+                if key[6] or key0[6]:
+                    why = "own Ethernet PDU chosen (1:N off)"
+                elif key[2] != key0[2] or pair_problem(first, r)[0]:
                     why = pair_problem(first, r)[0]
                 elif key[3] != key0[3]:
                     why = f"Ethernet source differs ({', '.join(first.peers)} / {', '.join(r.peers)})"
@@ -1078,8 +1092,10 @@ class Planner:
                     why = "own Ethernet PDU / header id chosen"
                 r.fanout_reason = f"not 1:N with {first.key}: {why}"
                 r.notes.append(r.fanout_reason)
+                hint = (" To forward it from the same Ethernet PDU anyway: route table, right click -> 1:N with the "
+                        "same CAN id..." if why.startswith("signal layout differs") else "")
                 self.warn(f"{r.key}: same CAN id as {first.key} but not one Ethernet PDU ({why}): it gets its own "
-                          f"Ethernet PDU and header id.")
+                          f"Ethernet PDU and header id.{hint}")
         if n:
             self.info(f"ETH -> CAN 1:N: {n} Ethernet PDU(s) forwarded to several CAN buses (one PDU, one header id).")
 
