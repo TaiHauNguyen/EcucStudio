@@ -132,6 +132,39 @@ class ImportedTest(unittest.TestCase):
         generate(make_plan(cfg2))
         self.assertEqual(vsde.read(res.extension), [])
 
+    def test_eth_to_can_not_sent_by_com(self):
+        """CAN PDUs fed from Ethernet: the .vsde file routes each to itself for the node, so Com does not send it."""
+        from ecucstudio.gateway import vsde
+        cfg = self.config()
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        tx = [r for r in plan.enabled_routes if r.direction == "ETH->CAN"]
+        self.assertTrue(tx)
+        self.assertTrue(all(r.no_com for r in tx))
+        fed = [cr.dst for cr in plan.enabled_can_routes]                 # fed from CAN: no Ethernet route
+        self.assertTrue(fed and not any(r.no_com for r in fed))
+        # every PDU the node sends on Chassis comes from Ethernet / Body: its Com Tx I-PDU group goes away (BswM)
+        self.assertTrue(any(w.startswith("Chassis: Com of GwInst no longer sends any PDU") for w in plan.warnings),
+                        plan.warnings)
+        res = generate(plan)
+        got = vsde.read(res.extension, tx=True)
+        self.assertEqual(sorted(got), sorted(("GwEcu", r.bus.name, r.message.name, r.bus.name, r.message.name)
+                                             for r in tx))
+        self.assertEqual(len(vsde.read(res.extension)), len(plan.enabled_can_routes))   # CAN -> CAN unchanged
+        # regeneration: same .vsde file; option off: no PDU routed to itself
+        with open(res.extension, "rb") as fh:
+            x1 = fh.read()
+        from ecucstudio.gateway.regen import config_from_file
+        cfg2, _ = config_from_file(cfg.output)
+        generate(make_plan(cfg2))
+        with open(res.extension, "rb") as fh:
+            self.assertEqual(fh.read(), x1)
+        cfg2.options.eth_no_com = False
+        plan = make_plan(cfg2)
+        self.assertFalse(any(r.no_com for r in plan.routes))
+        generate(plan)
+        self.assertEqual(vsde.read(res.extension, tx=True), [])
+
     def test_extension_file_uses_the_ecu_attribute(self):
         """Node named per bus (Gw_BusA, Gw_BusB) with the DBC attribute ECU = Gw: the converter's ECU is Gw."""
         from ecucstudio.gateway import vsde

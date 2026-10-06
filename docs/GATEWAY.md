@@ -337,6 +337,8 @@ Ví dụ HPC gửi `HpcCmd` (CAN ID 0x12C) cho zone ECU; zone ECU gửi message 
   - **also pair renamed messages**: ghép cả message bị đổi tên nhưng cùng CAN ID và độ dài (mặc định bật).
 - **ETH -> CAN 1:N**: message ECU gửi trên nhiều bus (cùng CAN ID, độ dài, layout signal) là **một** PDU Ethernet,
   được forward ra mọi bus đó (mục 3.5, mặc định bật).
+- **ETH -> CAN: Com does not send…**: DBC import trong DaVinci, Com không gửi các message nhận từ Ethernet
+  (file `.vsde`, mục 12.2, mặc định bật).
 - **Set bit 31 for extended CAN ids**: luôn đặt bit 31 cho CAN ID extended (kiểu `Can_IdType`).
   Mặc định tắt, tức header = CAN ID đệm 0.
 - **Ethernet PDU content**:
@@ -754,6 +756,35 @@ tên node khác tên ECU, tool ghi thêm một `PDUR-MESSAGE-ROUTING` cho tên n
 tạo một lần (từ routing của tên ECU). Cặp nào không đưa được vào `.vsde` (bus không đến từ DBC, node là hai ECU
 khác nhau trong hai DBC, tên không hợp lệ cho bộ convert) thì vẫn nằm trong file gateway và tool báo WARNING (Com
 giữ message đó).
+
+Khi thêm file `.vsde` vào Input Files, DaVinci tự ghi loại file là `legacy_communication_modification_script` trong
+file `.dpa`.
+
+### 12.2 ETH → CAN: Com không gửi message nhận từ Ethernet
+
+DBC ghi ECU là sender của message, nên Com cũng gửi nó. Khi message đó được route từ Ethernet, CAN PDU có **hai
+nguồn** (PduR N:1). DaVinci báo lỗi khi validate: PDUR 13008 "Inconsistent Parameters for same Destination Pdu on
+N:1 Routing", COM 02202, COM 02702.
+
+Tool ghi thêm vào cùng file `.vsde` (mục 12.1), với mỗi message ETH → CAN, một `PDUR-MESSAGE-ROUTING` từ PDU tới
+chính nó trên cùng bus, `ECU-INSTANCE-REF` là node của ECU trên bus đó. Bộ convert khi đó coi node không gửi signal
+nào của PDU, nên Com không còn Tx I-PDU của message; đường SoAd → CanIf của gateway giữ nguyên. Đã kiểm chứng với
+DaVinci 5.24: hết lỗi N:1 và các lỗi COM ở trên.
+
+**Lỗi trong log là dự kiến**: khi node có tên trùng tên ECU, bộ convert ghi một lỗi cho mỗi message, ví dụ
+`ECU Gw does not receive source pdu BusB.HpcCmd`, và cuối bước convert có dòng "Legacy Converter finished with
+errors". Đây là cách dùng định dạng `.vsde` ngoài tài liệu của Vector (định dạng không có nguồn Ethernet). Bộ convert
+vẫn ghi kết quả và Update chạy xong (DVCfgCmd trả về 0). Không muốn có các lỗi này thì bỏ chọn **ETH -> CAN: Com does
+not send…** ở tab Options; khi đó Com lại gửi các message đó (N:1 như trước).
+
+Sau Update, các CanIf Tx PDU chỉ còn nguồn gateway báo CANIF 10034 (Tx-confirmation), sửa bằng **Solve** như mọi
+đích CanIf của gateway (mục 7). Nếu **mọi** message ECU gửi trên một bus đều lấy từ Ethernet / bus khác, Com không
+còn Tx PDU nào trên bus đó và DaVinci xoá Com Tx I-PDU group của bus. Các action BswM bật / tắt group đó
+(`BswMPduGroupSwitch`, ví dụ `CC_EnablePDUGroup_<ECU>_o<Bus>_Tx`) khi đó báo BSWM 01008 / Cfg 00024 (reference
+không có đích). Tool báo WARNING trước cho từng bus như vậy. Xoá các action đó hoặc chạy lại BswM auto configuration.
+
+Ở chế độ project DaVinci (.dpa) tool vẫn tắt route ETH → CAN của message mà Com đang gửi (ECU tự gửi). Bật route đó
+bằng tay thì file `.vsde` bỏ Com Tx của nó, không còn cảnh báo N:1.
 
 ## 13. Nhiều ECU trên một mạng Ethernet (topology)
 

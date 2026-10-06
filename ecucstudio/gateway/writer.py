@@ -642,14 +642,15 @@ def generate(plan: Plan, base: Base | None = None, output: str | None = None) ->
 
 
 def write_extension(plan: Plan, out: str) -> str:
-    """The .vsde file of the CAN -> CAN routes DaVinci makes from the DBC files ('' = none). An existing one is
-    rewritten also without routes (the DaVinci project may list it as input file)."""
+    """The .vsde file for the DBC converter ('' = none): CAN -> CAN routes DaVinci makes, CAN PDUs fed from Ethernet
+    that Com does not send. An existing one is rewritten also without routes (the project may list it)."""
     from . import vsde
     path = vsde.path_for(out)
     routes = [cr for cr in plan.enabled_can_routes if cr.vsde]
-    if not routes and not os.path.isfile(path):
+    tx = [r for r in plan.enabled_routes if r.no_com]
+    if not routes and not tx and not os.path.isfile(path):
         return ""
-    data = vsde.build(routes)
+    data = vsde.build(routes, tx)
     if os.path.isfile(path):
         with open(path, "rb") as fh:
             if fh.read() == data:

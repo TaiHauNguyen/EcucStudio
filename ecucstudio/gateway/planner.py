@@ -101,6 +101,7 @@ class Route:
     notes: list[str] = field(default_factory=list)
     peers: list[str] = field(default_factory=list)  # Ethernet nodes: CAN->ETH destinations / ETH->CAN source
     fanout_of: "Route | None" = None    # ETH->CAN 1:N: this bus gets the Ethernet PDU of that route (no own PDU)
+    no_com: bool = False        # ETH->CAN: Com of the ECU does not send the CAN PDU (.vsde file of the DBC files)
 
     @property
     def can_side_new(self) -> bool:
@@ -417,6 +418,8 @@ class Planner:
             self._plan_remote_routes()
         if eth and cfg.options.eth_fanout:
             self._plan_eth_fanout()
+        if eth:
+            self._plan_vsde_tx()
         if plan.errors:
             return False
         if eth and plan.enabled_routes:
@@ -987,6 +990,36 @@ class Planner:
             self.warn(f"CAN -> CAN routes kept in the gateway file (Com keeps them): {', '.join(left[:6])}"
                       f"{' ...' if len(left) > 6 else ''}.")
 
+    def _plan_vsde_tx(self):
+        """ETH -> CAN routes on buses of DBC files imported in DaVinci: the extension file (.vsde) tells the DBC
+        converter that the ECU does not send the PDU's signals, so Com does not send it too (one source: Ethernet)."""
+        from . import vsde
+        plan = self.plan
+        for r in plan.routes:
+            r.no_com = False
+        if not plan.delta or not self.cfg.options.eth_no_com:
+            return
+        name = os.path.basename(vsde.path_for(self.cfg.output or "gateway.arxml"))
+        n = 0
+        for r in plan.enabled_routes:
+            if r.direction == ETH_TO_CAN and not r.can_problem and not vsde.tx_problem(r):
+                r.no_com = True
+                r.notes.append(f"Com does not send it ({name})")
+                n += 1
+        # a bus on which Com no longer sends anything: its Com Tx I-PDU group disappears in DaVinci
+        fed = {id(cr.dst) for cr in plan.enabled_can_routes if cr.vsde}
+        for bp in plan.buses:
+            tx = [r for r in plan.routes if r.bus is bp and r.direction == ETH_TO_CAN
+                  and not r.message.nm and not r.message.diag]
+            if tx and all(r.no_com or id(r) in fed for r in tx):
+                self.warn(f"{bp.name}: Com of {plan.ecu_name} no longer sends any PDU on this bus, so DaVinci removes "
+                          f"its Com Tx I-PDU group: delete the BswM actions that switch it (BswMPduGroupSwitch, "
+                          f"e.g. CC_Enable/DisablePDUGroup_..._o{bp.name}_Tx) or run the BswM auto configuration.")
+        if n:
+            self.info(f"ETH -> CAN: Com of {plan.ecu_name} does not send the {n} CAN PDU(s) fed from Ethernet "
+                      f"({name}, add it to the input files of the DaVinci project next to the DBC files). The DBC "
+                      f"converter logs 'ECU ... does not receive source pdu ...' for them: expected.")
+
     # ------------------------------------------------------------------ ETH -> CAN 1:N
     def _plan_eth_fanout(self):
         """A message the node sends on several buses (same CAN id, length and signal layout, from the same Ethernet
@@ -1208,7 +1241,10 @@ class Planner:
             r.notes.append("also received by Com (CanIf -> Com + Ethernet, 1:N)")
         elif com == "OUT" and r.direction == ETH_TO_CAN:
             over = bp.cfg.messages.get(r.message.name, {}) if isinstance(bp.cfg.messages, dict) else {}
-            if over.get("enabled"):
+            from . import vsde
+            if over.get("enabled") and self.plan.delta and self.cfg.options.eth_no_com and not vsde.tx_problem(r):
+                r.notes.append("Com sends it today: the .vsde file stops that")
+            elif over.get("enabled"):
                 self.warn(f"{r.key}: the PDU is also sent by Com of {self.plan.ecu_name}; routing it from Ethernet "
                           f"gives the CAN PDU two sources (N:1).")
                 r.notes.append("also sent by Com (N:1)")

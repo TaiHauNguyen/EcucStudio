@@ -849,10 +849,13 @@ class GatewayWindow:
         ttk.Checkbutton(o, text="CAN -> CAN: also pair renamed messages (same CAN id and length)",
                         variable=self.v_canmatchid).pack(anchor="w", padx=(18, 0), pady=(0, 6))
         self.v_fanout = tk.BooleanVar(value=True)
-        ttk.Checkbutton(o, text="ETH -> CAN 1:N: a message sent on several buses (same CAN id, length and layout)
-"
+        ttk.Checkbutton(o, text="ETH -> CAN 1:N: a message sent on several buses (same CAN id, length and layout)\n"
                                 "is one Ethernet PDU forwarded to every bus",
                         variable=self.v_fanout).pack(anchor="w", pady=(0, 6))
+        self.v_nocom = tk.BooleanVar(value=True)
+        ttk.Checkbutton(o, text="ETH -> CAN: Com does not send the CAN PDUs fed from Ethernet (DBC files imported\n"
+                                "in DaVinci: written to the .vsde file)",
+                        variable=self.v_nocom).pack(anchor="w", pady=(0, 6))
         self.v_extflag = tk.BooleanVar()
         self.v_sigs = tk.StringVar(value="copy")
         self.v_timing = tk.StringVar(value="event")
@@ -1318,6 +1321,7 @@ class GatewayWindow:
         c.options.can_routes = self.v_canroutes.get()
         c.options.can_match_id = self.v_canmatchid.get()
         c.options.eth_fanout = self.v_fanout.get()
+        c.options.eth_no_com = self.v_nocom.get()
         c.previous = self.v_prev.get().strip()
         for k, v in self.v_naming.items():
             setattr(c.naming, k, v.get().strip() or getattr(Naming(), k))
@@ -1346,6 +1350,7 @@ class GatewayWindow:
         self.v_canroutes.set(c.options.can_routes)
         self.v_canmatchid.set(c.options.can_match_id)
         self.v_fanout.set(c.options.eth_fanout)
+        self.v_nocom.set(c.options.eth_no_com)
         self.v_prev.set(c.previous)
         for k, v in self.v_naming.items():
             v.set(getattr(c.naming, k))
@@ -1449,8 +1454,11 @@ class GatewayWindow:
                 ext = ""
                 if res.extension:
                     ncan = sum(1 for c in res.can_routes if c.vsde)
-                    ext = (f"CAN -> CAN ({ncan} route(s), PduR only, no Com): add {os.path.basename(res.extension)} "
-                           f"to the Input Files of the DaVinci project next to the DBC files (once), then run Update.")
+                    ntx = sum(1 for r in res.routes if r.no_com)
+                    ext = (f"{os.path.basename(res.extension)}: CAN -> CAN {ncan} route(s) in PduR only, ETH -> CAN "
+                           f"{ntx} CAN PDU(s) not sent by Com. Add it to the Input Files of the DaVinci project next "
+                           f"to the DBC files (once), then run Update. The DBC converter then logs 'ECU ... does not "
+                           f"receive source pdu ...' for the ETH -> CAN PDUs: expected.")
                 self.show_messages([], res.warnings, [f"Written {res.output}"] +
                                    ([f"Written {res.extension}", ext] if ext else []) +
                                    [f"Route table: {csv_path}", f"Message paths: {self._report_files[0]}"])

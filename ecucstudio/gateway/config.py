@@ -124,6 +124,8 @@ class Options:
     can_match_id: bool = True       # CAN <-> CAN: also pair renamed messages (same CAN id, length and layout)
     eth_fanout: bool = True         # ETH -> CAN: a message the node sends on several buses (same CAN id, length and
                                     # layout) is one Ethernet PDU forwarded to every bus (1:N)
+    eth_no_com: bool = True         # DBC files imported in DaVinci: Com does not send the CAN PDUs fed from Ethernet
+                                    # (written to the .vsde file of the DBC converter, see vsde.py)
     dbc_imported: bool = False      # no base file: the DBC files are imported in the DaVinci project of the ECU, the
                                     # output holds only Ethernet + gateway (the CAN part is referenced, see imported)
 

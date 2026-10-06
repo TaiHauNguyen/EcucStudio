@@ -22,6 +22,13 @@ which the node is named like the ECU; a routing whose ECU-INSTANCE-REF is a node
 bus only. So a group gets one routing for the ECU plus one for each node named otherwise.
 
 The gateway file therefore leaves those CAN -> CAN mappings out; the .vsde file is written next to it.
+
+CAN PDUs fed from Ethernet (ETH -> CAN): the ECU is their sender in the DBC, so Com sends them too and the CAN PDU has
+two sources (PduR N:1, DaVinci validation errors PDUR13008 / COM02202). There is no Ethernet source in the extension
+format; a routing from the PDU to itself (source = target cluster and PDU) with ECU-INSTANCE-REF = the node of that bus
+drops the node's signals of the PDU, so Com does not send it, and creates no mapping. Checked with DaVinci 5.24: no Com
+Tx I-PDU, the Ethernet -> CanIf routing path stays, the N:1 errors are gone. The converter logs "ECU <node> does not
+receive source pdu <cluster>.<PDU>" (an error it ignores: the update finishes) when the node is named like the ECU.
 """
 from __future__ import annotations
 
@@ -66,8 +73,20 @@ def problem(cr) -> str:
     return ""
 
 
-def build(routes: list) -> bytes:
-    """Extension file routing *routes* (CanRoute) through PduR of their gateway ECU."""
+def tx_problem(r) -> str:
+    """Why Com cannot be kept from sending the CAN PDU of ETH -> CAN route *r* ('' = it can)."""
+    cluster = dbc_cluster(r.bus)
+    if not cluster:
+        return "the bus is not imported from a DBC file"
+    for n in (r.bus.cfg.node, cluster, r.message.name):
+        if not _REF.match(n or ""):
+            return f"'{n}' is not a valid name for the DBC converter"
+    return ""
+
+
+def build(routes: list, tx: list = ()) -> bytes:
+    """Extension file routing *routes* (CanRoute) through PduR of their gateway ECU; Com does not send the CAN PDUs
+    of the ETH -> CAN routes *tx*."""
     groups = collections.OrderedDict()
     for cr in routes:
         groups.setdefault((converter_ecu(cr.src.bus), dbc_cluster(cr.src.bus), dbc_cluster(cr.dst.bus)),
@@ -80,7 +99,10 @@ def build(routes: list) -> bytes:
             el.text = text
         return el
 
-    if groups:
+    own = collections.OrderedDict()
+    for r in tx:
+        own.setdefault((r.bus.cfg.node, dbc_cluster(r.bus)), []).append(r)
+    if groups or own:
         gw = sub(root, "GATEWAY-ROUTING")
         for (ecu, src, dst), crs in groups.items():
             nodes = [n for n in dict.fromkeys((crs[0].src.bus.cfg.node, crs[0].dst.bus.cfg.node)) if n != ecu]
@@ -94,13 +116,24 @@ def build(routes: list) -> bytes:
                     m = sub(maps, "I-PDU-MAPPING")
                     sub(m, "SOURCE-I-PDU-REF", cr.src.message.name)
                     sub(m, "TARGET-I-PDU-REF", cr.dst.message.name)
+        for (node, cluster), rs in own.items():         # PDU -> itself: the node does not send its signals
+            r = sub(gw, "PDUR-MESSAGE-ROUTING")
+            sub(r, "ECU-INSTANCE-REF", node)
+            sub(r, "SOURCE-CAN-CLUSTER-REF", cluster)
+            sub(r, "TARGET-CAN-CLUSTER-REF", cluster)
+            maps = sub(r, "I-PDU-MAPPINGS")
+            for x in rs:
+                m = sub(maps, "I-PDU-MAPPING")
+                sub(m, "SOURCE-I-PDU-REF", x.message.name)
+                sub(m, "TARGET-I-PDU-REF", x.message.name)
     etree.indent(root, space="  ")
     return b'<?xml version="1.0" encoding="UTF-8"?>\n' + etree.tostring(root, encoding="UTF-8") + b"\n"
 
 
-def read(path: str) -> list[tuple[str, str, str, str, str]]:
+def read(path: str, tx: bool = False) -> list[tuple[str, str, str, str, str]]:
     """[(ECU, source cluster, source PDU, target cluster, target PDU)] of the PduR message routings of *path* (a route
-    once, with the ECU-INSTANCE-REF of its first routing)."""
+    once, with the ECU-INSTANCE-REF of its first routing): the CAN -> CAN routes, or with *tx* the PDUs routed to
+    themselves (ETH -> CAN PDUs that Com does not send)."""
     if not path or not os.path.isfile(path):
         return []
     try:
@@ -115,7 +148,8 @@ def read(path: str) -> list[tuple[str, str, str, str, str]]:
         for m in r.iter(f"{{{NS}}}I-PDU-MAPPING"):
             key = (src, m.findtext(f"{{{NS}}}SOURCE-I-PDU-REF") or "", dst,
                    m.findtext(f"{{{NS}}}TARGET-I-PDU-REF") or "")
-            out.setdefault(key, (ecu,) + key)
+            if (key[:2] == key[2:]) == tx:
+                out.setdefault(key, (ecu,) + key)
     return list(out.values())
 
 
