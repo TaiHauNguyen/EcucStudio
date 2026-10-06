@@ -924,10 +924,14 @@ File report cho biết **mỗi message xuất phát từ đâu, đi qua những 
   | To | bus đích và các node nhận (`Body → Door`), hoặc node Ethernet |
   | Gateways | danh sách ECU gateway trên đường đi |
   | Header ID | header ID của các chặng Ethernet trên đường đi (trống nếu chỉ đi CAN) |
+  | ETH send | khi bật gom PDU (mục 16): chặng CAN → ETH được gom (`collect <= 5 ms`) hay gửi ngay (`immediate`) |
 
 - Message đi tới nhiều nơi (1:N) có nhiều dòng. Node Ethernet là điểm cuối / điểm đầu: tool không biết node đó có
   chuyển tiếp message hay không, nên không nối hai chiều qua nó.
 - Bảng **Not routed**: message có thể route nhưng không route, kèm lý do (bị tắt, khác layout, N:1 …).
+- Khi bật gom PDU (mục 16) có thêm hai bảng: **Ethernet load** (số gói/s và Mbit/s gửi 1:1 so với khi gom, cho
+  từng node Ethernet) và **ETH -> CAN bursts** (số frame CAN dồn cùng lúc trên mỗi bus nếu node Ethernet cũng gom,
+  thời gian chiếm bus).
 
 Cách tạo:
 
@@ -959,9 +963,64 @@ Trong CANoe:
 3. Phím: `a` gửi tất cả một lần, `n` gửi PDU tiếp theo (ghi tên + frame mong đợi ra Write window), `c` bật / tắt gửi
    theo chu kỳ (cycle time trong DBC, không có thì 100 ms), `p` đổi payload sang bộ đếm (mỗi byte = giá trị đếm, để
    thấy dữ liệu thay đổi trên CAN), `l` liệt kê PDU.
+4. Thử nhận gói gom (mục 16): `b` gửi mọi PDU trong ít UDP datagram nhất (mỗi gói tối đa bằng buffer gom, không có
+   thì 1472 byte), `v` bật / tắt gửi theo chu kỳ kiểu gom: mỗi `timeout` ms các PDU đến hạn đi chung một datagram.
+   Trên Trace CAN phải thấy đủ các frame, dồn cục cùng lúc.
 
 IP / port không xác định được từ file gateway thì để `0.0.0.0` / `0` kèm dòng `// !!` ở đầu file: sửa trong khối
 `variables`. Socket TCP chưa hỗ trợ (script gửi UDP).
+
+## 16. Gom nhiều PDU trong một gói UDP (PDU collection, SoAd nPdu)
+
+Mặc định mỗi frame CAN nhận được là một UDP datagram gửi ngay (1:1). Bật gom thì SoAd chép PDU vào buffer của
+socket connection và gửi chung một datagram khi hết thời gian chờ. Mỗi PDU vẫn có header ID riêng, frame CAN nào
+đến cũng được gửi đúng một lần, không có frame mới thì không gửi gì.
+
+```
+UDP payload: [header ID 1][len 1][data 1][header ID 2][len 2][data 2] ...   (thứ tự theo lúc nhận)
+```
+
+Tab **Ethernet**, khung **PDU collection**:
+
+| Ô | Ý nghĩa | Mặc định |
+|---|---|---|
+| Collect | bật gom (chiều CAN → ETH) | tắt |
+| timeout ms | PDU được gom chờ tối đa bao lâu. SoAd kiểm tra trong main function nên dùng chu kỳ `SoAdMainFunctionPeriod` hoặc bội của nó | 5 |
+| buffer bytes | kích thước tối đa một datagram (gồm header 8 byte mỗi PDU). Đầy thì gửi rồi bắt đầu buffer mới; ≤ 1472 để không bị phân mảnh IP | 1400 |
+| collect every PDU / send at once … ≤ X ms | gom tất cả, hoặc gửi ngay message event và message có chu kỳ ≤ X ms (còn lại gom) | gom tất cả |
+
+Từng message: bảng route, chuột phải → **ETH send (PDU collection)** → Collect / Send immediately / Automatic.
+Cột **ETH send** của bảng route ghi kết quả (`collect <= 5 ms`, `immediate (cycle 10 ms <= 20 ms)`, …).
+
+File gateway được ghi thêm:
+
+| Thuộc tính | Ở đâu | DaVinci sinh |
+|---|---|---|
+| `PDU-COLLECTION-MAX-BUFFER-SIZE` | socket local CAN → ETH | `SoAdSocketnPduUdpTxBufferMin` |
+| `PDU-COLLECTION-TIMEOUT` | socket local CAN → ETH | `SoAdSocketUdpTriggerTimeout` |
+| `PDU-COLLECTION-TRIGGER` = `NEVER` / `ALWAYS` | `SO-CON-I-PDU-IDENTIFIER` của route CAN → ETH | `SoAdTxUdpTriggerMode` = `TRIGGER_NEVER` / `TRIGGER_ALWAYS` |
+| `PDU-COLLECTION-PDU-TIMEOUT` | identifier của PDU được gom | `SoAdTxUdpTriggerTimeout` |
+| `PDU-COLLECTION-SEMANTICS` = `QUEUED` | identifier | `SoAdTxIfTriggerTransmit = false` |
+
+`QUEUED`: SoAd chép data lúc nhận, mọi frame đều vào gói (cùng CAN ID đến 2 lần trong một cửa sổ thì có cả 2). Tool
+không dùng `LAST-IS-BEST`: SoAd khi đó lấy data qua TriggerTransmit lúc gửi, mỗi PDU chỉ một lần (frame trước bị
+bỏ, E2E counter nhảy), PduR phải có data provision TRIGGER_TRANSMIT + Single Buffer cấu hình tay, DaVinci báo
+SOAD 01701. Đã kiểm chứng với DaVinci 5.24 và mã nguồn SoAd.
+
+Chiều ETH → CAN không cần cấu hình: SoAd tự tách datagram có nhiều PDU. Nhưng nếu node Ethernet (máy tính trung
+tâm) cũng gom, các PDU của một datagram ra CAN cùng lúc: tool ước lượng số frame dồn cục và thời gian chiếm bus
+(baudrate trong DBC, không có thì 500 kbit/s) và báo WARNING khi quá 50 % cửa sổ. Cần buffer Tx của CanIf đủ lớn.
+
+Analyze báo ước lượng tải cho từng node Ethernet (`PDU collection to Central: 48 collected, 1 immediate …: 1:1 ~ 1665
+pkt/s … -> collected ~ 300 pkt/s …`); report đường đi có bảng **Ethernet load** và **ETH -> CAN bursts** (mục 14).
+
+Lưu ý:
+
+- Socket local có sẵn trong project (tool không tạo): file bổ sung không sửa được nó. Tool báo WARNING; đặt
+  `SoAdSocketnPduUdpTxBufferMin` / `SoAdSocketUdpTriggerTimeout` trong DaVinci. Trigger của từng PDU vẫn nằm trong
+  file.
+- Phía nhận (máy tính trung tâm) phải đọc được nhiều PDU trong một datagram.
+- Mạng nhiều ECU: cài đặt gom nằm trong cấu hình gateway của từng ECU (`ethernet.collection`).
 
 ## Giới hạn hiện tại
 

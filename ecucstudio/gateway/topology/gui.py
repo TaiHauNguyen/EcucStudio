@@ -189,12 +189,12 @@ class TopologyWindow:
         self.t_cross = self._table(self.tabs, "  ECU -> ECU  ", treport.CROSS_COLUMNS,
                                    (55, 60, 260, 260, 110, 55, 230, 95, 420))
         self.t_routes = self._table(self.tabs, "  Routes of the selected ECU  ", report.COLUMNS,
-                                    (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 110, 95, 220, 380))
+                                    (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 110, 130, 95, 220, 380))
         self.t_contract = self._table(self.tabs, "  Contract (Ethernet PDUs)  ", CONTRACT_COLUMNS,
                                       (80, 80, 160, 90, 55, 230, 95, 130, 80, 130, 160, 300))
         from ..paths import COLUMNS as PATH_COLUMNS
         self.t_paths = self._table(self.tabs, "  Message paths  ", PATH_COLUMNS,
-                                   (95, 200, 200, 330, 220, 150, 55, 65))
+                                   (95, 200, 200, 330, 220, 150, 110, 130, 55, 65))
         self.t_cross.bind("<Double-1>", lambda _e: self.edit_cross())
         self.t_cross.bind("<space>", lambda _e: self.toggle_cross())
         self.t_cross.bind("<Button-3>", self.cross_menu)

@@ -158,6 +158,12 @@ DaVinci, các cặp CAN → CAN được ghi vào file `<output>.vsde` cạnh fi
 các DBC, DaVinci route message bằng PduR và bỏ nó khỏi Com (không CanIf → Com, không Com → CanIf). Chi tiết: mục 12
 của [docs/GATEWAY.md](docs/GATEWAY.md).
 
+**Gom PDU (CAN → ETH)**: khung *PDU collection* của tab Ethernet cho SoAd gom nhiều PDU (mỗi PDU vẫn có header ID
+riêng) vào một UDP datagram, gửi khi hết timeout (ví dụ 5 ms) hoặc khi gặp message đặt *gửi ngay*. Tool ghi các
+thuộc tính `PDU-COLLECTION-*` vào file gateway, DaVinci sinh cấu hình nPdu của SoAd (QUEUED: không mất frame nào).
+Analyze và report ước lượng số gói/s trước và sau khi gom, và số frame CAN dồn cục nếu node Ethernet cũng gom.
+Chi tiết: mục 16 của [docs/GATEWAY.md](docs/GATEWAY.md).
+
 **Nhiều node Ethernet**: ngoài node mặc định (ví dụ máy tính trung tâm), khai báo thêm node ở khung *Ethernet peers*
 của tab Ethernet (ví dụ một zone ECU khác, đi thẳng qua switch), rồi chọn node cho từng message: CAN->ETH gửi được
 tới nhiều node cùng lúc (một PDU, một header ID), ETH->CAN nhận từ một node. Chi tiết: mục 3.3 của

@@ -4,10 +4,10 @@ from __future__ import annotations
 import csv
 
 from .base import Base
-from .planner import Plan
+from .planner import Plan, eth_send_label
 
 COLUMNS = ("Enabled", "Change", "Direction", "Bus", "Message", "CAN ID", "Frame", "Length", "Cycle ms", "CAN PDU",
-           "Ethernet PDU", "Peer", "Header ID", "Header note", "Remark")
+           "Ethernet PDU", "Peer", "ETH send", "Header ID", "Header note", "Remark")
 
 
 def route_rows(plan: Plan, removed: bool = True) -> list[tuple]:
@@ -27,6 +27,7 @@ def route_items(plan: Plan, removed: bool = True) -> list[tuple]:
             "yes" if r.enabled else "no", r.change if r.enabled else "", r.direction, r.bus.name, m.name, m.id_text,
             ("EXT" if m.extended else "STD") + (" FD" if m.fd else ""), r.length, m.cycle_ms or "",
             (r.can_pdu or "").rsplit("/", 1)[-1] or r.can_pdu, r.eth_pdu, ", ".join(r.peers) if r.enabled else "",
+            eth_send_label(r, plan) if r.enabled else "",
             r.header_text if r.header_id >= 0 and r.enabled else "", r.header_note if r.enabled else "",
             "; ".join(([r.reason] if r.reason else []) + r.notes))))
     for c in plan.can_routes:
@@ -38,13 +39,13 @@ def route_items(plan: Plan, removed: bool = True) -> list[tuple]:
             "yes" if c.enabled else "no", c.change if c.enabled else "", "CAN->CAN",
             f"{c.src.bus.name} -> {c.dst.bus.name}", msg, cid,
             ("EXT" if d.extended else "STD") + (" FD" if d.fd else ""), c.dst.length, s.cycle_ms or "", pdus,
-            "", "", "", "", "; ".join(([c.reason] if c.reason else []) + c.notes))))
+            "", "", "", "", "", "; ".join(([c.reason] if c.reason else []) + c.notes))))
     if removed:
         for p in plan.removed:
             can_id = "" if p.can_id is None else f"0x{p.can_id:X}"
             target = p.eth_pdu or p.dst_pt.rsplit("/", 1)[-1]
             rows.append((p, ("-", "removed", p.direction, "", p.can_frame or p.can_pt.rsplit("/", 1)[-1], can_id, "",
-                             "", "", p.can_pt.rsplit("/", 1)[-1], target, "",
+                             "", "", p.can_pt.rsplit("/", 1)[-1], target, "", "",
                              "" if p.header_id is None else f"0x{p.header_id:08X}", "",
                              "in the previous file, not generated any more")))
     return rows
@@ -59,7 +60,8 @@ def write_csv(plan: Plan, path: str):
 
 def text_table(plan: Plan) -> str:
     peers = len(plan.cfg.ethernet.peers) if plan.cfg is not None else 0
-    cols = (0, 1, 2, 3, 4, 5, 6, 7, 10) + ((11,) if peers else ()) + (12, 13)
+    collect = plan.cfg is not None and plan.cfg.ethernet.collection.enabled
+    cols = (0, 1, 2, 3, 4, 5, 6, 7, 10) + ((11,) if peers else ()) + ((12,) if collect else ()) + (13, 14)
     rows = [tuple(str(x) for x in r) for r in route_rows(plan)]
     head = tuple(COLUMNS[i] for i in cols)
     data = [tuple(r[i] for i in cols) for r in rows]

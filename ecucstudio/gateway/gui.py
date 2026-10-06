@@ -13,7 +13,7 @@ from ..gui.theme import COLORS, init_style
 from ..gui.widgets import Tooltip, dialog_header
 from . import dbcread, dvproject, paths, report, start
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
-from .config import BusInput, EthPeer, GatewayConfig, Naming, SocketSide
+from .config import BusInput, EthPeer, GatewayConfig, Naming, PduCollection, SocketSide
 from .planner import CAN_TO_ETH, ETH_TO_CAN, CanRoute, Route, load_base, make_plan, new_ecu_name
 from .regen import config_from_file
 from .suggest import apply as apply_suggestions
@@ -26,6 +26,13 @@ NEW_CLUSTER = "<new CAN cluster from DBC>"
 NEW_CHANNEL = "<create new channel (VLAN)>"
 NEW_VALUE = "*new*"
 TITLE = "CAN Gateway Generator"
+
+
+def _float_or(text, default):
+    try:
+        return float(str(text).strip().replace(",", "."))
+    except ValueError:
+        return default
 
 
 def _int_or_none(text):
@@ -776,6 +783,37 @@ class GatewayWindow:
         self.side_rx = SideFrame(sides, "ETH -> CAN  (gateway ECU receives from Ethernet)", self)
         self.side_tx.pack(side="left", fill="both", expand=True, padx=(0, 4))
         self.side_rx.pack(side="left", fill="both", expand=True, padx=(4, 0))
+        # PDU collection: several CAN -> ETH PDUs in one UDP datagram (SoAd nPdu)
+        cf = ttk.LabelFrame(f, text="PDU collection (CAN -> ETH: several PDUs in one UDP datagram, SoAd nPdu)",
+                            padding=6)
+        cf.pack(fill="x", pady=(8, 0))
+        self.v_col_on = tk.BooleanVar(value=False)
+        cb = ttk.Checkbutton(cf, text="Collect", variable=self.v_col_on)
+        cb.pack(side="left")
+        Tooltip(cb, "The PDUs wait in the SoAd buffer of the socket connection and leave together in one UDP datagram "
+                    "(each PDU keeps its header id). Every received CAN frame is sent once (QUEUED); nothing is sent "
+                    "when nothing was received. DaVinci derives SoAdSocketnPduUdpTxBufferMin, "
+                    "SoAdSocketUdpTriggerTimeout and SoAdTxUdpTriggerMode / Timeout.")
+        ttk.Label(cf, text="timeout ms:").pack(side="left", padx=(12, 2))
+        self.v_col_timeout = tk.StringVar(value="5")
+        e_t = ttk.Entry(cf, textvariable=self.v_col_timeout, width=6)
+        e_t.pack(side="left")
+        Tooltip(e_t, "A collected PDU is sent at the latest after this time (SoAd checks it in its main function: "
+                     "use the SoAd main function period or a multiple of it).")
+        ttk.Label(cf, text="buffer bytes:").pack(side="left", padx=(12, 2))
+        self.v_col_buffer = tk.StringVar(value="1400")
+        e_b = ttk.Entry(cf, textvariable=self.v_col_buffer, width=6)
+        e_b.pack(side="left")
+        Tooltip(e_b, "Maximum UDP payload (PDU headers included); a full buffer is sent and a new one started. "
+                     "<= 1472 avoids IP fragmentation.")
+        self.v_col_mode = tk.StringVar(value="all")
+        ttk.Radiobutton(cf, text="collect every PDU", value="all", variable=self.v_col_mode).pack(side="left",
+                                                                                                   padx=(12, 0))
+        ttk.Radiobutton(cf, text="send at once: event messages and cycle <=", value="cycle",
+                        variable=self.v_col_mode).pack(side="left", padx=(8, 2))
+        self.v_col_cycle = tk.StringVar(value="20")
+        ttk.Entry(cf, textvariable=self.v_col_cycle, width=5).pack(side="left")
+        ttk.Label(cf, text="ms   (per message: route table, right click)").pack(side="left", padx=(2, 0))
         # in the free space under the channel settings (the tab does not get taller)
         pl = ttk.LabelFrame(top, text="Ethernet peers (nodes the PDUs are sent to / received from)", padding=6)
         pl.grid(row=5, column=0, columnspan=3, sticky="we", pady=(10, 0))
@@ -961,7 +999,7 @@ class GatewayWindow:
         top.pack(fill="both", expand=True)
         cols = report.COLUMNS
         self.t_routes = ttk.Treeview(top, columns=cols, show="headings", selectmode="extended", height=8)
-        widths = (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 90, 95, 220, 380)
+        widths = (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 90, 130, 95, 220, 380)
         for c, wd in zip(cols, widths):
             self.t_routes.heading(c, text=c, anchor="w")
             self.t_routes.column(c, width=wd, anchor="w", stretch=c == "Remark")
@@ -1370,6 +1408,10 @@ class GatewayWindow:
         self.side_tx.store(e.can_to_eth)
         self.side_rx.store(e.eth_to_can)
         e.default_peer = self.v_defpeer.get().strip()
+        e.collection = PduCollection(
+            enabled=self.v_col_on.get(), timeout_ms=_float_or(self.v_col_timeout.get(), 5),
+            buffer=_int_or_none(self.v_col_buffer.get()) or 1400, mode=self.v_col_mode.get(),
+            immediate_cycle_ms=_int_or_none(self.v_col_cycle.get()) or 20)
         c.header.extended_flag = self.v_extflag.get()
         c.options.eth_signals = self.v_sigs.get()
         c.options.can_tx_timing = self.v_timing.get()
@@ -1398,6 +1440,12 @@ class GatewayWindow:
         self.v_mac.set(c.ethernet.mac)
         self.v_role.set(c.ethernet.tcp_role or "CONNECT")
         self.v_defpeer.set(c.ethernet.default_peer)
+        col = c.ethernet.collection
+        self.v_col_on.set(col.enabled)
+        self.v_col_timeout.set(f"{col.timeout_ms:g}")
+        self.v_col_buffer.set(str(col.buffer))
+        self.v_col_mode.set(col.mode if col.mode in ("all", "cycle") else "all")
+        self.v_col_cycle.set(str(col.immediate_cycle_ms))
         self.refresh_peers()
         self.v_extflag.set(c.header.extended_flag)
         self.v_sigs.set(c.options.eth_signals)
@@ -1749,8 +1797,9 @@ class GatewayWindow:
         self.win.wait_window(d)
         if d.result is not None:
             old = r.bus.cfg.messages.get(r.message.name, {}) or {}
-            if "fanout" in old:                         # set in the 1:N dialog, not in this one
-                d.result["fanout"] = old["fanout"]
+            for key in ("fanout", "eth_send"):          # set in other dialogs / menus, not in this one
+                if key in old:
+                    d.result[key] = old[key]
             r.bus.cfg.messages[r.message.name] = d.result
             self.analyze()
 
@@ -1778,6 +1827,13 @@ class GatewayWindow:
             m.add_command(label="Ethernet peers…", command=self.set_peers)
         if self._fanout_routes():
             m.add_command(label="1:N with the same CAN id…", command=self.set_fanout)
+        if self.cfg.ethernet.collection.enabled and any(
+                isinstance(r, Route) and r.direction == CAN_TO_ETH for r in self._selected_routes()):
+            sm = tk.Menu(m, tearoff=False)
+            sm.add_command(label="Collect (wait for the collection timeout)", command=lambda: self.set_eth_send("collect"))
+            sm.add_command(label="Send immediately (flush the datagram)", command=lambda: self.set_eth_send("immediate"))
+            sm.add_command(label="Automatic (collection settings)", command=lambda: self.set_eth_send(None))
+            m.add_cascade(label="ETH send (PDU collection)", menu=sm)
         m.add_separator()
         m.add_command(label="Add CAN -> CAN link…", command=self.add_link)
         sel = self._selected_routes()
@@ -1786,6 +1842,18 @@ class GatewayWindow:
         m.add_separator()
         m.add_command(label="Reset overrides of selected", command=self.reset_routes)
         m.tk_popup(e.x_root, e.y_root)
+
+    def set_eth_send(self, value):
+        """PDU collection of the selected CAN -> ETH messages: 'collect', 'immediate' or None (automatic)."""
+        for r in self._selected_routes():
+            if not isinstance(r, Route) or r.direction != CAN_TO_ETH:
+                continue
+            over = dict(r.bus.cfg.messages.get(r.message.name, {}))
+            over.pop("eth_send", None)
+            if value:
+                over["eth_send"] = value
+            r.bus.cfg.messages[r.message.name] = over
+        self.analyze()
 
     def _fanout_routes(self) -> list:
         """Enabled ETH -> CAN routes of the CAN id of the selected route on other buses (with it), or []."""

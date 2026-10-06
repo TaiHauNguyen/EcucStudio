@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import collections
 import dataclasses
+import math
 import os
 import re
 from dataclasses import dataclass, field
@@ -103,6 +104,8 @@ class Route:
     fanout_of: "Route | None" = None    # ETH->CAN 1:N: this bus gets the Ethernet PDU of that route (no own PDU)
     no_com: bool = False        # ETH->CAN: Com of the ECU does not send the CAN PDU (.vsde file of the DBC files)
     fanout_reason: str = ""     # ETH->CAN: why it does not share the Ethernet PDU of the same CAN id on another bus
+    eth_send: str = ""          # CAN->ETH with PDU collection: "immediate" (TRIGGER_ALWAYS) | "collect" ("" = off)
+    eth_send_why: str = ""
 
     @property
     def can_side_new(self) -> bool:
@@ -199,6 +202,8 @@ class Plan:
     removed: list = field(default_factory=list)        # PrevRoute of the previous file that are not generated
 
     can_routes: list = field(default_factory=list)     # CanRoute
+    load: list = field(default_factory=list)           # LoadRow: CAN -> ETH packets with / without PDU collection
+    burst: list = field(default_factory=list)          # BurstRow: ETH -> CAN frames per collection window per bus
 
     @property
     def enabled_routes(self) -> list[Route]:
@@ -426,6 +431,8 @@ class Planner:
         if eth and plan.enabled_routes:
             self._resolve_sides()
             self._resolve_id_set()
+        if eth and plan.enabled_routes and not plan.errors:
+            self._plan_collection()
         return True
 
     def assign_header_ids(self):
@@ -1021,6 +1028,107 @@ class Planner:
                       f"({name}, add it to the input files of the DaVinci project next to the DBC files). The DBC "
                       f"converter logs 'ECU ... does not receive source pdu ...' for them: expected.")
 
+    # ------------------------------------------------------------------ PDU collection (SoAd nPdu)
+    def _plan_collection(self):
+        """CAN -> ETH with PDU collection: which PDUs wait for the collection timeout and which are sent at once,
+        checks of the buffer, and the estimated Ethernet load (and the CAN bursts when the Ethernet node collects the
+        ETH -> CAN PDUs the same way)."""
+        plan, col = self.plan, self.cfg.ethernet.collection
+        plan.load, plan.burst = [], []
+        for r in plan.routes:
+            r.eth_send, r.eth_send_why = "", ""
+        if not col.enabled:
+            return
+        if not col.timeout_ms or col.timeout_ms <= 0:
+            self.err("PDU collection: enter the collection timeout (ms), e.g. the SoAd main function period.")
+            return
+        tx = [r for r in plan.enabled_routes if r.direction == CAN_TO_ETH]
+        for r in tx:
+            over = r.bus.cfg.messages.get(r.message.name, {}) if isinstance(r.bus.cfg.messages, dict) else {}
+            choice, cycle = over.get("eth_send"), r.message.cycle_ms
+            if choice in ("immediate", "collect"):
+                r.eth_send, r.eth_send_why = choice, "chosen"
+            elif col.mode == "cycle" and not cycle:
+                r.eth_send, r.eth_send_why = "immediate", "event message"
+            elif col.mode == "cycle" and cycle <= col.immediate_cycle_ms:
+                r.eth_send, r.eth_send_why = "immediate", f"cycle {cycle} ms <= {col.immediate_cycle_ms} ms"
+            else:
+                r.eth_send, r.eth_send_why = "collect", ""
+        if not tx:
+            return
+        biggest = max(r.length for r in tx) + PDU_HEADER_LEN
+        if col.buffer < biggest:
+            self.err(f"PDU collection: the buffer ({col.buffer} bytes) is smaller than the largest PDU with its header "
+                     f"({biggest} bytes).")
+        elif col.buffer > MAX_UDP_PAYLOAD:
+            self.warn(f"PDU collection: a buffer of {col.buffer} bytes gives UDP datagrams above {MAX_UDP_PAYLOAD} "
+                      f"bytes, which are IP fragmented on a 1500 byte MTU.")
+        if all(r.eth_send == "immediate" for r in tx):
+            self.info("PDU collection: every CAN -> ETH PDU is sent immediately, nothing is collected.")
+        for (d, peer), sp in plan.sides.items():
+            if d == CAN_TO_ETH and not sp.local_new:
+                self.warn(f"PDU collection: socket {sp.local.rsplit('/', 1)[-1]} is not created by this file: set "
+                          f"SoAdSocketnPduUdpTxBufferMin = {col.buffer} and SoAdSocketUdpTriggerTimeout = "
+                          f"{_seconds(col.timeout_ms)} of its socket connection group in DaVinci (the trigger mode "
+                          f"of every PDU is in the file).")
+        self._estimate_load(tx)
+
+    def _estimate_load(self, tx):
+        plan, col = self.plan, self.cfg.ethernet.collection
+        t = float(col.timeout_ms)
+        ovh = ETH_OVERHEAD + (4 if plan.eth_vlan is not None else 0)
+
+        def rate(r):
+            return 1000.0 / r.message.cycle_ms
+
+        def wire_bits(payload):
+            return (max(64, ovh + payload) + ETH_WIRE_EXTRA) * 8
+        for (d, peer), sp in plan.sides.items():
+            if d != CAN_TO_ETH:
+                continue
+            rs = [r for r in tx if peer in r.peers]
+            if not rs:
+                continue
+            cyc = [r for r in rs if r.message.cycle_ms]
+            imm = [r for r in cyc if r.eth_send == "immediate"]
+            coll = [r for r in cyc if r.eth_send == "collect"]
+            pkts1 = sum(rate(r) for r in cyc)
+            bits1 = sum(rate(r) * wire_bits(PDU_HEADER_LEN + r.length) for r in cyc)
+            # worst window: every collected PDU that can come within the timeout (a 10 ms PDU twice in 15 ms ...)
+            worst = sum(math.ceil(t / r.message.cycle_ms) * (PDU_HEADER_LEN + r.length) for r in coll)
+            per_window = max(1, math.ceil(worst / col.buffer)) if coll else 0
+            pkts2 = sum(rate(r) for r in imm) + min(sum(rate(r) for r in coll), per_window * 1000.0 / t)
+            payload = sum(rate(r) * (PDU_HEADER_LEN + r.length) for r in cyc)
+            bits2 = payload * 8 + pkts2 * (ovh + ETH_WIRE_EXTRA) * 8
+            n_imm = sum(1 for r in rs if r.eth_send == "immediate")
+            row = LoadRow(peer, sp.local.rsplit("/", 1)[-1], len(rs), n_imm, len(rs) - n_imm, len(rs) - len(cyc),
+                          pkts1, bits1, pkts2, bits2, worst, per_window)
+            plan.load.append(row)
+            self.info(f"PDU collection to {peer}: {row.text}")
+            if per_window > 1:
+                self.warn(f"PDU collection to {peer}: up to {worst} bytes per {t:g} ms window do not fit into one "
+                          f"datagram of {col.buffer} bytes: {per_window} datagrams per window.")
+        # ETH -> CAN: when the Ethernet node collects the same way, a datagram puts its PDUs on CAN at once
+        for bp in plan.buses:
+            rs = [r for r in plan.enabled_routes if r.direction == ETH_TO_CAN and r.bus is bp]
+            if not rs:
+                continue
+            baud = bp.baudrate or 500000
+            data_baud = bp.fd_baudrate or baud
+            frames = 0
+            busy_us = 0.0
+            for r in rs:
+                n = math.ceil(t / r.message.cycle_ms) if r.message.cycle_ms else 1
+                frames += n
+                busy_us += n * can_frame_us(r.length, r.message.extended, r.message.fd, baud, data_baud)
+            share = busy_us / (t * 1000.0)
+            row = BurstRow(bp.name, len(rs), frames, busy_us, t, share, bp.baudrate is None)
+            plan.burst.append(row)
+            if share > BURST_WARN:
+                self.warn(f"ETH -> CAN on {bp.name}: if the Ethernet node collects its PDUs every {t:g} ms too, up to "
+                          f"{frames} frames come at once and keep the bus busy {busy_us / 1000:.1f} ms of {t:g} ms "
+                          f"({share:.0%}): check the CanIf transmit buffers and the bus load.")
+
     # ------------------------------------------------------------------ ETH -> CAN 1:N
     def _plan_eth_fanout(self):
         """A message the node sends on several buses (same CAN id, length and signal layout, from the same Ethernet
@@ -1556,6 +1664,78 @@ def copy_fanout_ids(plan: Plan):
         if f is not None:
             r.header_id, r.eth_id_name, r.locked = f.header_id, f.eth_id_name, f.locked
             r.header_note = f"same as {f.key} (1:N)"
+
+
+PDU_HEADER_LEN = 8                  # SoAd PDU header: id + length
+MAX_UDP_PAYLOAD = 1472              # 1500 byte MTU - IPv4 - UDP
+ETH_OVERHEAD = 14 + 20 + 8 + 4      # Ethernet header, IPv4, UDP, FCS (+ 4 with a VLAN tag)
+ETH_WIRE_EXTRA = 8 + 12             # preamble + inter frame gap
+BURST_WARN = 0.5                    # share of the collection window a CAN burst may take
+
+
+def _seconds(ms: float) -> str:
+    """AUTOSAR time value (seconds) of *ms*: 5 -> '0.005'."""
+    return f"{ms / 1000.0:.6g}"
+
+
+def eth_send_label(r: Route, plan: Plan) -> str:
+    """'collect <= 5 ms' / 'immediate (event message)' / '' (no PDU collection or not CAN -> ETH)."""
+    if r.eth_send == "collect":
+        t = plan.cfg.ethernet.collection.timeout_ms if plan.cfg is not None else 0
+        return f"collect <= {t:g} ms" + (" (chosen)" if r.eth_send_why == "chosen" else "")
+    if r.eth_send == "immediate":
+        return "immediate" + (f" ({r.eth_send_why})" if r.eth_send_why else "")
+    return ""
+
+
+def can_frame_us(length: int, extended: bool, fd: bool, baud: int, data_baud: int) -> float:
+    """Approximate duration of a CAN frame on the bus in microseconds (with ~20 % bit stuffing)."""
+    head = 29 if extended else 11
+    if not fd:
+        bits = (head + 34 + 8 * length) * 1.2 + 10           # SOF..CRC, ACK, EOF, IFS
+        return bits * 1e6 / baud
+    arb = (head + 21) * 1.2                                   # SOF, id, control up to BRS, ACK, EOF, IFS
+    data = (8 * length + (21 if length <= 16 else 25) + 8) * 1.2
+    return arb * 1e6 / baud + data * 1e6 / data_baud
+
+
+@dataclass
+class LoadRow:
+    """CAN -> ETH to one Ethernet node: estimated packets and bit rate with one UDP datagram per PDU (1:1) and with
+    PDU collection (from the DBC cycle times; event messages are not counted)."""
+    peer: str
+    socket: str
+    pdus: int
+    immediate: int
+    collected: int
+    events: int
+    pkts_1to1: float
+    bits_1to1: float
+    pkts_collected: float
+    bits_collected: float
+    worst_window: int               # bytes (PDU headers included) that can be collected in one timeout
+    per_window: int                 # datagrams needed for that
+
+    @property
+    def text(self) -> str:
+        return (f"{self.collected} collected, {self.immediate} immediate"
+                + (f", {self.events} event (not counted)" if self.events else "")
+                + f": 1:1 ~ {self.pkts_1to1:.0f} pkt/s, {self.bits_1to1 / 1e6:.2f} Mbit/s -> collected ~ "
+                  f"{self.pkts_collected:.0f} pkt/s, {self.bits_collected / 1e6:.2f} Mbit/s "
+                  f"(worst window {self.worst_window} bytes).")
+
+
+@dataclass
+class BurstRow:
+    """ETH -> CAN on one bus when the Ethernet node collects its PDUs with the same timeout: frames put on CAN at
+    once and how long they keep the bus busy."""
+    bus: str
+    pdus: int
+    frames: int
+    busy_us: float
+    window_ms: float
+    share: float
+    baud_assumed: bool              # no baudrate in the DBC: 500 kbit/s assumed
 
 
 def pair_problem(src: Route, dst: Route, src_label: str = "", dst_label: str = "") -> tuple[str, list[str]]:

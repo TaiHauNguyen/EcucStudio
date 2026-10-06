@@ -17,7 +17,7 @@ from .. import arxml
 from ..arxml import local, q
 from . import xmlorder
 from .base import Base
-from .planner import CAN_TO_ETH, Plan, Route, SignalSpec, choose_package, fmt, load_base
+from .planner import CAN_TO_ETH, Plan, Route, SignalSpec, _seconds, choose_package, fmt, load_base
 from .regen import owned_items, write_meta
 from .xmlorder import E, R, T
 
@@ -243,6 +243,9 @@ class Writer:
         b, p, eth = self.b, self.p, self.cfg.ethernet
         ch = p.eth_channel
         proto = (eth.protocol or "UDP").upper()
+        col = eth.collection
+        # PDU collection: the local socket CAN -> ETH PDUs are sent from (SoAd nPdu buffer and its timeout)
+        collect = col.enabled and any(d == CAN_TO_ETH and s.local == sp.local for (d, _p), s in p.sides.items()) and             any(r.eth_send for r in p.enabled_routes)
 
         def tp(port):
             if proto == "TCP":
@@ -271,7 +274,9 @@ class Writer:
                             self.ident("APPLICATION-ENDPOINT", f"{sp.local}/{aep_name(name)}",
                                        R("NETWORK-ENDPOINT-REF", "NETWORK-ENDPOINT", p.local_endpoint),
                                        tp(sp.local_port)),
-                            R("CONNECTOR-REF", "ETHERNET-COMMUNICATION-CONNECTOR", p.eth_connector))
+                            R("CONNECTOR-REF", "ETHERNET-COMMUNICATION-CONNECTOR", p.eth_connector),
+                            T("PDU-COLLECTION-MAX-BUFFER-SIZE", col.buffer) if collect else None,
+                            T("PDU-COLLECTION-TIMEOUT", _seconds(col.timeout_ms)) if collect else None)
             self.attach(self.lst(ch, "SO-AD-CONFIG", "SOCKET-ADDRESSS"), sa, ch)
         if sp.connection_new and sp.connection not in b.by_path:
             conn = self.ident("STATIC-SOCKET-CONNECTION", sp.connection,
@@ -503,7 +508,14 @@ class Writer:
         eth_pt = self.triggerings(p.eth_channel, eth_pdu, r.eth_pt_name, eth_sigs, eport)
         self._eth_pts[id(r)] = eth_pt
         id_path = f"{p.id_set}/{r.eth_id_name}"
+        # PDU collection (CAN -> ETH): QUEUED = SoAd copies every instance into the nPdu buffer (no TriggerTransmit)
+        col = self.cfg.ethernet.collection
         ident = self.ident("SO-CON-I-PDU-IDENTIFIER", id_path, T("HEADER-ID", r.header_id),
+                           T("PDU-COLLECTION-PDU-TIMEOUT", _seconds(col.timeout_ms)) if r.eth_send == "collect"
+                           else None,
+                           T("PDU-COLLECTION-SEMANTICS", "QUEUED") if r.eth_send else None,
+                           T("PDU-COLLECTION-TRIGGER", "NEVER" if r.eth_send == "collect" else "ALWAYS")
+                           if r.eth_send else None,
                            R("PDU-TRIGGERING-REF", "PDU-TRIGGERING", eth_pt))
         self.attach(self.lst(p.id_set, "I-PDU-IDENTIFIERS"), ident, p.id_set)
         # one identifier, referenced by the socket connection of every peer (CAN -> ETH to several nodes: 1:N)

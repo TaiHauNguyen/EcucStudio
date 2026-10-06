@@ -44,6 +44,8 @@ class CaplNode:
     protocol: str
     pdus: list[CaplPdu] = field(default_factory=list)
     problems: list[str] = field(default_factory=list)
+    tick_ms: int = 10           # cyclic sending tick = collection window in batch mode
+    datagram_max: int = 1472    # bytes of one collected UDP datagram (PDU headers included)
 
 
 # ---------------------------------------------------------------------------- payload
@@ -106,8 +108,12 @@ def eth_to_can_nodes(plan: Plan, base=None) -> list[CaplNode]:
                 peer_ip, peer_port = peer_ip or known[sp.remote][0] or "", known[sp.remote][1]
             if sp and ecu_port is None and isinstance(known.get(sp.local), tuple):
                 ecu_port = known[sp.local][1]
+            col = plan.cfg.ethernet.collection
             node = nodes[peer] = CaplNode(peer, peer_ip, peer_port, plan.ecu_name, ecu_ip, ecu_port, plan.eth_vlan,
                                           plan.cfg.ethernet.protocol)
+            if col.enabled:             # the Ethernet node collects like the gateway ECU does
+                node.tick_ms = max(1, int(round(col.timeout_ms)))
+                node.datagram_max = max(HEADER_LEN + 64, min(int(col.buffer), 1472))
             for what, value in (("IP address of " + peer, peer_ip), ("IP address of " + plan.ecu_name, ecu_ip),
                                 ("UDP port of " + peer, peer_port), ("UDP port of " + plan.ecu_name, ecu_port)):
                 if value in (None, ""):
@@ -159,6 +165,9 @@ def capl_text(node: CaplNode, source: str = "") -> str:
 //   'c'  cyclic sending on / off (DBC cycle time, {DEFAULT_CYCLE_MS} ms when none)
 //   'p'  payload: DBC initial values / running counter in every byte (to see the data change on CAN)
 //   'l'  list the PDUs in the Write window
+//   'b'  send every PDU once, collected: as few UDP datagrams as possible ({node.datagram_max} bytes each)
+//   'v'  cyclic sending collected on / off: every {node.tick_ms} ms the PDUs that are due leave in one datagram
+//        (like an Ethernet node with PDU collection: the gateway then puts them on CAN at once)
 //
 // UDP datagram = SoAd PDU header (header id 4 bytes + length 4 bytes, big endian) + PDU payload.
 //
@@ -202,6 +211,12 @@ variables
   byte    gCounter = 0;
   dword   gDue[{n}];
   msTimer tCycle;
+  const dword kTickMs = {node.tick_ms};
+  const dword kDgramMax = {node.datagram_max};
+  int     gBatch = 0;
+  byte    gDgram[{node.datagram_max}];
+  dword   gDgramLen = 0;
+  int     gDgramPdus = 0;
 }}
 
 on start
@@ -216,7 +231,7 @@ on start
     write("ETH->CAN test: cannot open UDP %s:%d (%s). Check the TCP/IP stack of this node.", kPeerIp, kPeerPort, err);
     return;
   }}
-  write("ETH->CAN test: %d PDU(s) from %s:%d to {node.ecu} %s:%d. Keys: a n c p l", kCount, kPeerIp, kPeerPort,
+  write("ETH->CAN test: %d PDU(s) from %s:%d to {node.ecu} %s:%d. Keys: a n c p l b v", kCount, kPeerIp, kPeerPort,
         kEcuIp, kEcuPort);
 }}
 
@@ -227,31 +242,62 @@ on stopMeasurement
     UdpClose(gSocket);
 }}
 
+// SoAd header + payload of PDU i at buf[off]; returns the bytes written
+dword PutPdu(int i, byte buf[], dword off)
+{{
+  dword len, k;
+  len = gLength[i];
+  buf[off + 0] = (gHeaderId[i] >> 24) & 0xFF;
+  buf[off + 1] = (gHeaderId[i] >> 16) & 0xFF;
+  buf[off + 2] = (gHeaderId[i] >> 8) & 0xFF;
+  buf[off + 3] = gHeaderId[i] & 0xFF;
+  buf[off + 4] = (len >> 24) & 0xFF;
+  buf[off + 5] = (len >> 16) & 0xFF;
+  buf[off + 6] = (len >> 8) & 0xFF;
+  buf[off + 7] = len & 0xFF;
+  for (k = 0; k < len; k++)
+  {{
+    if (gCounterMode) buf[off + {HEADER_LEN} + k] = gCounter;
+    else buf[off + {HEADER_LEN} + k] = gPayload[i][k];
+  }}
+  return {HEADER_LEN} + len;
+}}
+
+void SendBuffer(byte buf[], dword len)
+{{
+  long rc;
+  rc = UdpSendTo(gSocket, IpGetAddressAsNumber(kEcuIp), kEcuPort, buf, len);
+  if (rc != 0 && IpGetLastError() != 0)
+    write("ETH->CAN test: send failed (%d)", IpGetLastError());
+}}
+
 // one UDP datagram: SoAd header + payload of PDU i
 void SendPdu(int i)
 {{
   byte buf[{HEADER_LEN + max_len}];
-  dword len, k;
-  long rc;
+  dword len;
   if (gSocket == 0xFFFFFFFF || i < 0 || i >= kCount)
     return;
-  len = gLength[i];
-  buf[0] = (gHeaderId[i] >> 24) & 0xFF;
-  buf[1] = (gHeaderId[i] >> 16) & 0xFF;
-  buf[2] = (gHeaderId[i] >> 8) & 0xFF;
-  buf[3] = gHeaderId[i] & 0xFF;
-  buf[4] = (len >> 24) & 0xFF;
-  buf[5] = (len >> 16) & 0xFF;
-  buf[6] = (len >> 8) & 0xFF;
-  buf[7] = len & 0xFF;
-  for (k = 0; k < len; k++)
-  {{
-    if (gCounterMode) buf[{HEADER_LEN} + k] = gCounter;
-    else buf[{HEADER_LEN} + k] = gPayload[i][k];
-  }}
-  rc = UdpSendTo(gSocket, IpGetAddressAsNumber(kEcuIp), kEcuPort, buf, {HEADER_LEN} + len);
-  if (rc != 0 && IpGetLastError() != 0)
-    write("ETH->CAN test: send %s failed (%d)", gName[i], IpGetLastError());
+  len = PutPdu(i, buf, 0);
+  SendBuffer(buf, len);
+}}
+
+// collected datagram: PDUs are appended, a full datagram is sent before the next PDU
+void DgramFlush()
+{{
+  if (gDgramLen == 0 || gSocket == 0xFFFFFFFF)
+    return;
+  SendBuffer(gDgram, gDgramLen);
+  gDgramLen = 0;
+  gDgramPdus = 0;
+}}
+
+void DgramAdd(int i)
+{{
+  if (gDgramLen + {HEADER_LEN} + gLength[i] > kDgramMax)
+    DgramFlush();
+  gDgramLen += PutPdu(i, gDgram, gDgramLen);
+  gDgramPdus++;
 }}
 
 void SendAll()
@@ -284,7 +330,8 @@ on key 'c'
   {{
     for (i = 0; i < kCount; i++)
       gDue[i] = 0;
-    setTimer(tCycle, 10);
+    gBatch = 0;
+    setTimer(tCycle, kTickMs);
   }}
   else
     cancelTimer(tCycle);
@@ -297,6 +344,33 @@ on key 'p'
   gCounterMode = !gCounterMode;
   if (gCounterMode) write("ETH->CAN test: payload = running counter in every byte");
   else write("ETH->CAN test: payload = DBC initial values");
+}}
+
+on key 'b'
+{{
+  int i;
+  if (gCounterMode) gCounter++;
+  for (i = 0; i < kCount; i++)
+    DgramAdd(i);
+  DgramFlush();
+  write("ETH->CAN test: sent %d PDU(s) collected (datagrams of max %d bytes)", kCount, kDgramMax);
+}}
+
+on key 'v'
+{{
+  int i;
+  gBatch = !gBatch;
+  gCyclic = gBatch;
+  cancelTimer(tCycle);
+  if (gBatch)
+  {{
+    for (i = 0; i < kCount; i++)
+      gDue[i] = 0;
+    setTimer(tCycle, kTickMs);
+    write("ETH->CAN test: cyclic sending collected on (one datagram every %d ms)", kTickMs);
+  }}
+  else
+    write("ETH->CAN test: cyclic sending collected off");
 }}
 
 on key 'l'
@@ -313,15 +387,17 @@ on timer tCycle
   if (gCounterMode) gCounter++;
   for (i = 0; i < kCount; i++)
   {{
-    if (gDue[i] <= 10)
+    if (gDue[i] <= kTickMs)
     {{
-      SendPdu(i);
+      if (gBatch) DgramAdd(i);
+      else SendPdu(i);
       gDue[i] = gCycleMs[i];
     }}
     else
-      gDue[i] -= 10;
+      gDue[i] -= kTickMs;
   }}
-  setTimer(tCycle, 10);
+  if (gBatch) DgramFlush();
+  setTimer(tCycle, kTickMs);
 }}
 """
 

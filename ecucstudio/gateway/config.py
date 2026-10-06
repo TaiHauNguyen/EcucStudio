@@ -62,6 +62,18 @@ class EthPeer:
 
 
 @dataclass
+class PduCollection:
+    """CAN -> ETH: several PDUs in one UDP datagram (SoAd nPdu). Written to the gateway file as PDU-COLLECTION-*
+    attributes of the local socket and of every SO-CON-I-PDU-IDENTIFIER; DaVinci derives SoAdSocketnPduUdpTxBufferMin,
+    SoAdSocketUdpTriggerTimeout, SoAdTxUdpTriggerMode / Timeout and SoAdTxIfTriggerTransmit = false (QUEUED)."""
+    enabled: bool = False
+    timeout_ms: float = 5           # a collected PDU is sent at the latest after this time (SoAd main function period)
+    buffer: int = 1400              # bytes per UDP datagram (PDU headers included); <= 1472 avoids IP fragmentation
+    mode: str = "all"               # all: every PDU is collected | cycle: immediate when cycle <= immediate_cycle_ms
+    immediate_cycle_ms: int = 20    # (mode cycle) and for event messages (no cycle time)
+
+
+@dataclass
 class EthernetSettings:
     channel: str = ""               # ETHERNET-PHYSICAL-CHANNEL (path, short name or VLANnn; empty = the only one)
     connector: str = ""             # ECU's ETHERNET-COMMUNICATION-CONNECTOR on that channel (empty = auto / new)
@@ -83,6 +95,7 @@ class EthernetSettings:
     id_set: str = ""                # SOCKET-CONNECTION-IPDU-IDENTIFIER-SET (path or new name; empty = auto)
     default_peer: str = ""          # name of the node of can_to_eth / eth_to_can (empty = "default")
     peers: list[EthPeer] = field(default_factory=list)  # more nodes; a message picks them by name
+    collection: PduCollection = field(default_factory=PduCollection)   # CAN -> ETH: PDUs per UDP datagram
 
 
 @dataclass
@@ -176,6 +189,7 @@ class GatewayConfig:
         eth = dict(d.get("ethernet") or {})
         eth["can_to_eth"] = build(SocketSide, eth.get("can_to_eth"))
         eth["eth_to_can"] = build(SocketSide, eth.get("eth_to_can"))
+        eth["collection"] = build(PduCollection, eth.get("collection"))
         eth["peers"] = [EthPeer(name=x.get("name", ""), can_to_eth=build(SocketSide, x.get("can_to_eth")),
                                 eth_to_can=build(SocketSide, x.get("eth_to_can")))
                         for x in eth.get("peers") or [] if isinstance(x, dict)]

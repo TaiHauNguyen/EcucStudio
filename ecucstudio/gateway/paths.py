@@ -12,10 +12,15 @@ import datetime
 import html
 from dataclasses import dataclass, field
 
-from .planner import CAN_TO_ETH, Plan
+from .planner import CAN_TO_ETH, Plan, eth_send_label
 
-COLUMNS = ("CAN ID", "Message", "From", "Via", "To", "Gateways", "Header ID", "Length", "Cycle ms")
+COLUMNS = ("CAN ID", "Message", "From", "Via", "To", "Gateways", "Header ID", "ETH send", "Length", "Cycle ms")
 NOT_ROUTED_COLUMNS = ("CAN ID", "Message", "Gateway", "Bus / route", "Reason")
+LOAD_COLUMNS = ("Gateway", "To Ethernet node", "Socket", "PDUs", "Collected", "Immediate", "Event (not counted)",
+                "1:1 pkt/s", "1:1 Mbit/s", "Collected pkt/s", "Collected Mbit/s", "Worst window bytes",
+                "Datagrams / window")
+BURST_COLUMNS = ("Gateway", "CAN bus", "ETH -> CAN PDUs", "Frames / window", "Bus busy ms", "Window ms", "Busy %",
+                 "Note")
 _ARROW = " → "
 
 
@@ -30,6 +35,7 @@ class MessagePath:
     length: int = 0
     cycle_ms: int | None = None
     sort_key: tuple = ()
+    eth_send: str = ""          # PDU collection of the CAN -> ETH hops ("collect <= 5 ms", "immediate")
 
     @property
     def header_ids(self) -> list[str]:
@@ -39,7 +45,8 @@ class MessagePath:
     @property
     def row(self) -> tuple:
         return (self.can_id, self.names, self.origin, _ARROW.join(self.via), self.destination,
-                ", ".join(self.gateways), ", ".join(self.header_ids), self.length, self.cycle_ms or "")
+                ", ".join(self.gateways), ", ".join(self.header_ids), self.eth_send, self.length,
+                self.cycle_ms or "")
 
 
 @dataclass
@@ -48,6 +55,8 @@ class PathReport:
     paths: list[MessagePath] = field(default_factory=list)
     not_routed: list[tuple] = field(default_factory=list)
     gateways: list[str] = field(default_factory=list)
+    load: list[tuple] = field(default_factory=list)       # LOAD_COLUMNS rows (PDU collection)
+    burst: list[tuple] = field(default_factory=list)      # BURST_COLUMNS rows
 
     @property
     def messages(self) -> int:
@@ -109,6 +118,20 @@ def build_report(plans: dict, cross=(), title: str = "") -> PathReport:
     # only continues through the route that really carries the message (one ECU can carry two flows of a CAN id)
     def hop(ecu, direction, key):
         return ("gw", ecu, direction, key)
+
+    # PDU collection of the CAN -> ETH hops: (ecu, direction, route key) -> (route, plan)
+    route_of = {(ecu, r.direction, r.key): (r, plan) for ecu, plan in plans.items() for r in plan.enabled_routes}
+
+    def eth_send_of(trail) -> str:
+        out = []
+        for n in trail:
+            if n[0] != "gw" or n[2] != CAN_TO_ETH or (n[1], n[2], n[3]) not in route_of:
+                continue
+            r, plan = route_of[(n[1], n[2], n[3])]
+            text = eth_send_label(r, plan)
+            if text:
+                out.append(f"{n[1]}: {text}" if len(plans) > 1 else text)
+        return "; ".join(out)
 
     for ecu, plan in plans.items():
         for r in plan.enabled_routes:
@@ -199,9 +222,19 @@ def build_report(plans: dict, cross=(), title: str = "") -> PathReport:
                 gws = list(dict.fromkeys(n[1] for n in trail if n[0] == "gw"))
                 report.paths.append(MessagePath(ids, names, label_of(trail[0], "from"), via,
                                                 label_of(trail[-1], "to"), gws, length, cycle,
-                                                (mids[0], label_of(trail[0], "from"), label_of(trail[-1], "to"))))
+                                                (mids[0], label_of(trail[0], "from"), label_of(trail[-1], "to")),
+                                                eth_send_of(trail)))
     report.paths.sort(key=lambda p: p.sort_key)
     report.not_routed = _not_routed(plans, cross, set(info))
+    for ecu, plan in plans.items():
+        for x in plan.load:
+            report.load.append((ecu, x.peer, x.socket, x.pdus, x.collected, x.immediate, x.events,
+                                round(x.pkts_1to1), f"{x.bits_1to1 / 1e6:.2f}", round(x.pkts_collected),
+                                f"{x.bits_collected / 1e6:.2f}", x.worst_window, x.per_window))
+        for b in plan.burst:
+            report.burst.append((ecu, b.bus, b.pdus, b.frames, f"{b.busy_us / 1000:.2f}", f"{b.window_ms:g}",
+                                 f"{b.share:.0%}", ("500 kbit/s assumed; " if b.baud_assumed else "") +
+                                 ("check CanIf Tx buffers / bus load" if b.share > 0.5 else "")))
     return report
 
 
@@ -249,6 +282,16 @@ def write_csv(rep: PathReport, path: str) -> str:
             w.writerow(("Not routed",))
             w.writerow(NOT_ROUTED_COLUMNS)
             w.writerows(rep.not_routed)
+        if rep.load:
+            w.writerow(())
+            w.writerow(("Ethernet load, CAN -> ETH (PDU collection, from the DBC cycle times)",))
+            w.writerow(LOAD_COLUMNS)
+            w.writerows(rep.load)
+        if rep.burst:
+            w.writerow(())
+            w.writerow(("ETH -> CAN bursts if the Ethernet node collects with the same timeout",))
+            w.writerow(BURST_COLUMNS)
+            w.writerows(rep.burst)
     return path
 
 
@@ -280,7 +323,7 @@ input { padding:6px 8px; width:min(420px, 100%); border:1px solid var(--line); b
 _JS = """
 const f = document.getElementById('filter');
 f.addEventListener('input', () => { const q = f.value.toLowerCase();
-  document.querySelectorAll('tbody tr').forEach(tr => {
+  document.querySelectorAll('#paths tbody tr').forEach(tr => {
     tr.hidden = q && !tr.textContent.toLowerCase().includes(q); }); });
 """
 
@@ -304,12 +347,29 @@ def write_html(rep: PathReport, path: str) -> str:
         rows.append(f'<tr class="g{band}"><td class="id">{html.escape(p.can_id)}</td><td>{html.escape(p.names)}</td>'
                     f'<td>{html.escape(p.origin)}</td><td class="via">{_via_html(p.via, gws)}</td>'
                     f'<td>{html.escape(p.destination)}</td><td>{html.escape(", ".join(p.gateways))}</td>'
-                    f'<td class="id">{html.escape(", ".join(p.header_ids))}</td><td>{p.length}</td><td>{p.cycle_ms or ""}</td></tr>')
+                    f'<td class="id">{html.escape(", ".join(p.header_ids))}</td><td>{html.escape(p.eth_send)}</td>'
+                    f'<td>{p.length}</td><td>{p.cycle_ms or ""}</td></tr>')
     nr = "".join(f'<tr><td class="id">{html.escape(str(a))}</td><td>{html.escape(str(b))}</td>'
                  f'<td>{html.escape(str(c))}</td><td>{html.escape(str(d))}</td>'
                  f'<td class="reason">{html.escape(str(e))}</td></tr>' for a, b, c, d, e in rep.not_routed)
     head = "".join(f"<th>{c}</th>" for c in COLUMNS)
     nr_head = "".join(f"<th>{c}</th>" for c in NOT_ROUTED_COLUMNS)
+
+    def table(cols, data, note):
+        if not data:
+            return ""
+        h = "".join(f"<th>{c}</th>" for c in cols)
+        body = "".join("<tr>" + "".join(f"<td>{html.escape(str(v))}</td>" for v in row) + "</tr>" for row in data)
+        return (f'<div class="meta">{html.escape(note)}</div>'
+                f'<div class="wrap"><table><thead><tr>{h}</tr></thead><tbody>{body}</tbody></table></div>')
+    load = table(LOAD_COLUMNS, rep.load,
+                 "CAN -> ETH with PDU collection (SoAd nPdu): estimated from the DBC cycle times, one UDP datagram per "
+                 "PDU (1:1) against collected datagrams; event messages are not counted. Bit rates include the "
+                 "Ethernet / IPv4 / UDP overhead, preamble and inter frame gap.")
+    burst = table(BURST_COLUMNS, rep.burst,
+                  "ETH -> CAN: if the Ethernet node collects its PDUs with the same timeout, one datagram puts these "
+                  "frames on the CAN bus at once (estimate with ~20 % bit stuffing).")
+    extra = (f"<h2>Ethernet load (PDU collection)</h2>{load}" if load else "") +         (f"<h2>ETH -> CAN bursts</h2>{burst}" if burst else "")
     when = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     doc = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -322,9 +382,10 @@ and Ethernet hops (header id), "To" the bus and its receivers (or an Ethernet no
 <div class="cards"><div class="card"><b>{rep.messages}</b>message(s)</div><div class="card"><b>{len(rep.paths)}</b>path(s)</div>
 <div class="card"><b>{len(rep.gateways)}</b>gateway ECU(s)</div><div class="card"><b>{len(rep.not_routed)}</b>not routed</div></div>
 <input id="filter" type="search" placeholder="Filter: CAN id, message, bus, ECU ...">
-<div class="wrap"><table><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>
+<div class="wrap"><table id="paths"><thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody></table></div>
 <h2>Not routed</h2>
 <div class="wrap"><table><thead><tr>{nr_head}</tr></thead><tbody>{nr or '<tr><td colspan="5">-</td></tr>'}</tbody></table></div>
+{extra}
 </main><script>{_JS}</script></body></html>
 """
     with open(path, "w", encoding="utf-8") as fh:
