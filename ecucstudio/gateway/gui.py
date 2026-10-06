@@ -641,6 +641,11 @@ class GatewayWindow:
         b_rep.pack(side="left", padx=(4, 0))
         Tooltip(b_rep, "Write and open the message path report: for every message (by CAN id) where it comes from, "
                        "which gateway it passes and where it goes (HTML + CSV next to the output file)")
+        b_capl = ttk.Button(tb, text="CAPL Test (ETH->CAN)", command=self.capl_test)
+        b_capl.pack(side="left", padx=(4, 0))
+        Tooltip(b_capl, "Write a CANoe CAPL node (.can) per Ethernet source node that sends the Ethernet PDUs of the "
+                        "ETH -> CAN routes to the gateway ECU (SoAd header + DBC initial values), next to the output "
+                        "file: check the CAN frames in the Trace window")
         ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
         b_edit = ttk.Button(tb, text="Edit Existing Gateway…", command=self.open_editor)
         b_edit.pack(side="left")
@@ -1555,6 +1560,27 @@ class GatewayWindow:
             self.show_messages(infos=[f"Message paths: {files[0]}", f"Message paths (CSV): {files[1]}"])
             if hasattr(os, "startfile"):
                 os.startfile(files[0])
+        self.analyze(then=write)
+
+    def capl_test(self):
+        """CANoe CAPL node(s) sending the Ethernet PDUs of the ETH -> CAN routes (analyzed first)."""
+        def write(plan):
+            from . import capl
+            stem = os.path.splitext(plan.cfg.output or os.path.join(os.getcwd(), "gateway"))[0]
+            try:
+                files, problems = capl.write_eth_to_can(plan, stem, self.base)
+            except OSError as exc:
+                messagebox.showerror(TITLE, f"Cannot write the CAPL file:\n{exc}", parent=self.win)
+                return
+            if not files:
+                messagebox.showinfo(TITLE, "There is no enabled ETH -> CAN route.", parent=self.win)
+                return
+            self.show_messages([], problems, [f"CAPL test node: {f}" for f in files] +
+                               ["Add it as a simulation node on the Ethernet network in CANoe (TCP/IP stack of the "
+                                "node = the address of the Ethernet node it plays), start the measurement and press "
+                                "'a' (send all), 'n' (next), 'c' (cyclic), 'p' (counter payload), 'l' (list)."])
+            messagebox.showinfo(TITLE, "Written:\n" + "\n".join(files) + "\n\nSee the file header for the CANoe "
+                                "setup and the keys.", parent=self.win)
         self.analyze(then=write)
 
     # ------------------------------------------------------------------ guided start / next step

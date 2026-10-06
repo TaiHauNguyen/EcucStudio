@@ -939,6 +939,30 @@ Cách tạo:
 
 File HTML mở bằng trình duyệt, có ô lọc (CAN ID, tên message, bus, ECU). File CSV (dấu `;`) mở bằng Excel.
 
+## 15. CAPL test cho đường ETH → CAN (CANoe)
+
+Nút **CAPL Test (ETH->CAN)** trên thanh công cụ (hoặc `python -m ecucstudio gateway capl <gateway.json | file
+gateway .arxml>`) sinh file `<tên file output>_eth_to_can_<node>.can`, mỗi node Ethernet nguồn của các route
+ETH → CAN một file (thường là node mặc định, ví dụ máy tính trung tâm).
+
+- Node CAPL đóng vai node Ethernet đó: mở UDP socket tại IP / port của node (theo file gateway), gửi tới IP / port
+  ETH → CAN của ECU gateway.
+- Mỗi PDU Ethernet là một UDP datagram: SoAd PDU header (header ID 4 byte + length 4 byte, big endian) + payload.
+  Payload là giá trị khởi tạo của signal trong DBC (`GenSigStartValue`, đúng start bit / byte order).
+- PDU 1:N (mục 3.5) chỉ gửi một lần; đầu file liệt kê các frame CAN mà gateway phải gửi ra cho từng PDU.
+
+Trong CANoe:
+
+1. Thêm file `.can` làm simulation node trên mạng Ethernet. TCP/IP stack của node: IP của node nó đóng vai (ghi ở
+   đầu file), VLAN như kênh Ethernet.
+2. Chạy measurement, mở Trace của các kênh CAN của ECU gateway.
+3. Phím: `a` gửi tất cả một lần, `n` gửi PDU tiếp theo (ghi tên + frame mong đợi ra Write window), `c` bật / tắt gửi
+   theo chu kỳ (cycle time trong DBC, không có thì 100 ms), `p` đổi payload sang bộ đếm (mỗi byte = giá trị đếm, để
+   thấy dữ liệu thay đổi trên CAN), `l` liệt kê PDU.
+
+IP / port không xác định được từ file gateway thì để `0.0.0.0` / `0` kèm dòng `// !!` ở đầu file: sửa trong khối
+`variables`. Socket TCP chưa hỗ trợ (script gửi UDP).
+
 ## Giới hạn hiện tại
 
 - Route nguyên PDU. PDU CAN đã có route trong base thì được thêm đích Ethernet (thành 1:N). CAN → CAN có 1:N

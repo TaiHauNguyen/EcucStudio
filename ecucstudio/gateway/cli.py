@@ -370,6 +370,28 @@ def cmd_report(a):
     return 1 if errors else 0
 
 
+def cmd_capl(a):
+    """CANoe CAPL node(s) that send the Ethernet PDUs of the ETH -> CAN routes."""
+    from . import capl
+    from .planner import load_base, make_plan
+    cfg = _load(a.config)
+    base = load_base(cfg)
+    plan = make_plan(cfg, base)
+    for e in plan.errors:
+        print("[ERROR]  ", e)
+    if plan.errors:
+        return 1
+    stem = os.path.splitext(a.output)[0] if a.output else os.path.splitext(cfg.output or os.path.abspath(a.config))[0]
+    files, problems = capl.write_eth_to_can(plan, stem, base)
+    for p in problems:
+        print("[WARNING]", p)
+    for f in files:
+        print("Written", f)
+    if not files:
+        print("No enabled ETH -> CAN route.")
+    return 0
+
+
 def cmd_gui(a):
     from ..__main__ import run_window
 
@@ -460,6 +482,10 @@ def main(argv=None):
     p.add_argument("config", help="gateway.json, a generated gateway .arxml or a topology .json")
     p.add_argument("-o", "--output", help="file name stem / .html of the report (default: next to the input)")
     p.set_defaults(fn=cmd_report)
+    p = sub.add_parser("capl", help="CANoe CAPL test node(s): send the Ethernet PDUs of the ETH -> CAN routes")
+    p.add_argument("config", help="gateway.json or a generated gateway .arxml")
+    p.add_argument("-o", "--output", help="file name stem (default: next to the gateway file)")
+    p.set_defaults(fn=cmd_capl)
     p = sub.add_parser("editor", help="open the gateway editor window")
     p.add_argument("file", nargs="?")
     p.set_defaults(fn=cmd_editor)
