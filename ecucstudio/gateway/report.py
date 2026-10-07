@@ -17,8 +17,8 @@ def route_rows(plan: Plan, removed: bool = True) -> list[tuple]:
 
 
 def route_items(plan: Plan, removed: bool = True) -> list[tuple]:
-    """(Route | CanRoute | PrevRoute, row): CAN <-> Ethernet routes (not listed when that routing is off),
-    CAN -> CAN routes, then the removed routes of the previous file."""
+    """(Route | CanRoute | SignalRoute | PrevRoute, row): CAN <-> Ethernet routes (not listed when that routing is
+    off), CAN -> CAN routes, signal routes (routing table), then the removed routes of the previous file."""
     rows = []
     eth = plan.cfg.options.eth_routes if plan.cfg is not None else True
     for r in plan.routes if eth else ():
@@ -40,6 +40,15 @@ def route_items(plan: Plan, removed: bool = True) -> list[tuple]:
             f"{c.src.bus.name} -> {c.dst.bus.name}", msg, cid,
             ("EXT" if d.extended else "STD") + (" FD" if d.fd else ""), c.dst.length, s.cycle_ms or "", pdus,
             "", "", "", "", "", "; ".join(([c.reason] if c.reason else []) + c.notes))))
+    for sr in plan.signal_routes:
+        s, d = sr.src.message, sr.dst.message
+        rows.append((sr, (
+            "yes" if sr.enabled else "no", sr.change if sr.enabled else "", "SIGNAL",
+            f"{sr.src.bus.name} -> {sr.dst.bus.name}",
+            f"{s.name}.{sr.src_signal.name} -> {d.name}.{sr.dst_signal.name}",
+            f"{s.id_text} -> {d.id_text}", ("EXT" if d.extended else "STD") + (" FD" if d.fd else ""),
+            f"{sr.dst_signal.length} bit", d.cycle_ms or "", "", "", "", "", "", "",
+            "; ".join(([sr.reason] if sr.reason else []) + [f"routing table {sr.row}"] + sr.notes))))
     if removed:
         for p in plan.removed:
             can_id = "" if p.can_id is None else f"0x{p.can_id:X}"
@@ -90,14 +99,20 @@ def summary(plan: Plan) -> str:
     lines.append(f"Routes           : {n} enabled of {len(plan.routes)}")
     if plan.can_routes:
         lines.append(f"CAN -> CAN       : {len(plan.enabled_can_routes)} enabled of {len(plan.can_routes)}")
+    if plan.signal_routes:
+        lines.append(f"Signal routes    : {len(plan.enabled_signal_routes)} enabled of {len(plan.signal_routes)}")
+    if plan.table_file:
+        lines.append(f"Routing table    : {plan.table_file} ({len(plan.table_rows)} rows)")
     return "\n".join(lines)
 
 
-def count_text(eth: int, can: int) -> str:
-    """"3 CAN<->Ethernet + 2 CAN->CAN route(s)" (only the parts that exist)."""
-    parts = [f"{eth} CAN<->Ethernet"] if eth or not can else []
+def count_text(eth: int, can: int, sig: int = 0) -> str:
+    """"3 CAN<->Ethernet + 2 CAN->CAN + 4 signal route(s)" (only the parts that exist)."""
+    parts = [f"{eth} CAN<->Ethernet"] if eth or not (can or sig) else []
     if can:
         parts.append(f"{can} CAN->CAN")
+    if sig:
+        parts.append(f"{sig} signal")
     return " + ".join(parts) + " route(s)"
 
 

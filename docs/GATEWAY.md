@@ -88,8 +88,8 @@ Routing được suy ra từ DBC của cả mạng, ví dụ DBC Power có node 
 
 ## 0. Chuẩn bị
 
-- Python 3.10+ cùng các gói `lxml` và `cantools` (`py -m pip install -r requirements.txt`).
-  `run.bat` tự kiểm tra và tự cài nếu thiếu.
+- Python 3.10+ cùng các gói `lxml` và `cantools` (`py -m pip install -r requirements.txt`); routing table dạng
+  `.xlsx` cần thêm `openpyxl` (mục 17). `run.bat` tự kiểm tra và tự cài nếu thiếu.
 - File network ARXML mà project đang dùng (ví dụ export từ PREEvision), **nếu có**. Có Ethernet cluster thì
   gateway được gộp vào cluster đó. **Chưa có** Ethernet cluster (file chỉ có CAN) thì tool tự tạo cluster, kênh
   (VLAN), controller, connector và địa chỉ IP của ECU, xem mục 3.1. **Không có file network** thì bỏ trống, xem
@@ -740,6 +740,9 @@ Thêm mỗi DBC một dòng ở tab **Input**, mỗi dòng chọn **node của E
 khác nhau giữa các DBC (ví dụ `Gw_Body` trong DBC Body, `Gw_Chassis` trong DBC Chassis): tool chỉ cần biết node
 nào là ECU đang làm trên từng bus.
 
+Có **routing table** của khách hàng (file Excel đi kèm DBC) thì CAN → CAN chỉ lấy theo bảng, gồm cả route signal:
+xem mục 17. Phần dưới đây là cách tool tự ghép khi **không** có bảng.
+
 Khi **Analyze**, tool ghép message ECU **nhận** trên một bus với message ECU **gửi** trên bus khác, theo thứ tự:
 
 1. cùng tên message;
@@ -1058,9 +1061,108 @@ Lưu ý:
 - Phía nhận (máy tính trung tâm) phải đọc được nhiều PDU trong một datagram.
 - Mạng nhiều ECU: cài đặt gom nằm trong cấu hình gateway của từng ECU (`ethernet.collection`).
 
+## 17. Routing table của khách hàng (CAN → CAN theo bảng)
+
+Khách hàng gửi kèm DBC một file Excel liệt kê từng message / signal cần route và route từ mạng nào sang mạng nào.
+Chọn file ở tab **Input**, khung **Routing table (CAN -> CAN)** (wizard: trang *DBC files of the network*; topology:
+*Network settings* → *Routing table*). Khi có bảng:
+
+- **CAN → CAN chỉ lấy theo bảng**: tool không tự ghép message theo tên / CAN ID (mục 12), link CAN → CAN không dùng;
+- dòng **message** thành route PduR (nguyên PDU), dòng **signal** thành Com signal gateway;
+- CAN ↔ Ethernet vẫn theo DBC như cũ.
+
+Không chọn bảng thì mọi thứ như mục 12.
+
+### 17.1 Định dạng
+
+`.xlsx` (sheet đầu tiên có dòng tiêu đề; dòng tiêu đề có thể nằm dưới vài dòng tiêu đề khác) hoặc `.csv` / `.tsv`
+(dấu `;`, `,` hoặc tab). Cột được nhận theo **tên tiêu đề**, không theo thứ tự:
+
+| Cột | Dùng cho |
+|---|---|
+| cột đầu (không tên) | số thứ tự của bảng, hiện trong report: `row 12 #10` = dòng 12 của sheet, số 10 của bảng |
+| Signal name | signal nguồn (dòng signal) |
+| Src Message/PDU name | message nguồn |
+| Receive CAN … PduID (Hex) | CAN ID nguồn (hex), dùng khi tên message không có trong DBC |
+| Routing Type (Signal = 1, Message = 0) | 0 = route nguyên message (PduR), 1 = route signal (Com) |
+| HW-Accelerator (LLCE/PFE) (Yes = 1, No = 0) | 1 = LLCE / PFE route bằng phần cứng (mục 17.3) |
+| các **cột mạng** (giữa HW-Accelerator và Dest Signal name) | `S` = mạng nguồn (đúng một), `D` = mạng đích (một hoặc nhiều) |
+| Dest Signal name / Dest Message/PDU name | signal / message đích (trống = giống nguồn) |
+| Transmit CAN … PduID (Hex) | CAN ID đích (hex) |
+
+Các cột khác (Length, Timeout, Default / Invalid value, KeepAlive …) được đọc nhưng chưa dùng.
+
+**Cột mạng ↔ bus**: tool khớp tên cột với tên bus, DBName hoặc tên file DBC (không phân biệt hoa thường, bỏ qua
+`_` / `-`), hoặc với một từ của tên file (cột `BusA` ↔ `Vehicle_BusA_v3.dbc`). Không khớp thì chọn ở **Edit…** của
+bus → **Routing table network** (ô bên cạnh ghi `empty = <cột tự khớp>`). Analyze in `Routing table networks:
+BusA = BusA, …` và các bus không có cột.
+
+### 17.2 Dòng message, dòng signal
+
+- **Message** (Routing Type 0): mỗi mạng đích `D` là một route CAN → CAN như mục 12 (PduR, nguyên PDU). Theo DBC,
+  ECU phải **nhận** message trên bus `S` và **gửi** message đích trên bus `D`. Độ dài / layout signal được kiểm
+  tra như mục 12 (khác thì route tắt, bật tay được). DBC đã import trong DaVinci: ghi vào `.vsde` (mục 12.1).
+- **Signal** (Routing Type 1): Com signal gateway. Theo DBC, ECU phải nhận signal nguồn (node có trong receiver của
+  signal) và gửi message chứa signal đích. Tool ghi vào `.vsde` một `COM-SIGNAL-ROUTING`; bộ convert DBC của
+  DaVinci tạo `I-SIGNAL-MAPPING` trong GATEWAY của ECU, DaVinci tạo một `ComGwMapping` cho mỗi signal. Chỉ dùng
+  được khi DBC được import trong DaVinci (file gateway-only, mục 2.1 / 2.2).
+- Message đích của route message / signal không lấy từ Ethernet nữa: route `ETH->CAN` của nó tắt ("fed from …" /
+  "Com sends it (signals routed from …)").
+- Message nguồn vừa được route nguyên PDU vừa có signal được route: tool ghi `SOURCE-SIGNALS` vào `.vsde` để Com
+  vẫn nhận các signal đó (Remark "Com still receives …"). Không có thì converter bỏ signal khỏi Com và signal
+  routing hỏng (đã thử với converter).
+
+Trên bảng route, dòng signal có Direction `SIGNAL`, cột Message `MsgA.SigA -> MsgB.SigB`, cột Length là số bit;
+bật / tắt (Space, chuột phải) và double-click như dòng `CAN->CAN` (lưu trong `can_gateway` của cấu hình).
+
+Xung đột (route tắt, Remark ghi lý do):
+
+| Trường hợp | Kết quả |
+|---|---|
+| hai dòng cấp cùng một message đích bằng PduR (N:1) | dòng sau tắt: "one source per PDU" |
+| signal đi vào message đích đã được route nguyên PDU | route signal tắt |
+| hai dòng ghi vào cùng một signal đích | dòng sau tắt |
+| độ dài signal nguồn và đích khác nhau | vẫn route, WARNING |
+| DBC không ghi ECU là receiver của signal nguồn | route signal tắt (converter sẽ bỏ qua nó) |
+
+Lần đầu project có signal routing, validation của DaVinci báo (đã kiểm chứng với DaVinci 5.24, `ComGwMapping` được
+tạo đúng):
+
+| Validation | Làm gì (một lần) |
+|---|---|
+| COM01009 `ComSignalGateway` = NONE | đặt `/Com/ComGeneral/ComSignalGateway` = `COMPLETESIGNALPROCESSING` (hoặc `MINIMALSIGNALPROCESSING`) |
+| COM02702, RTE01216 partition | project nhiều partition: `ComMainFunctionRouteSignals` và các PDU mới của Com cần partition ref (`ComMainRouteSignalsPartitionRef`, `EcucPduDefaultPartitionRef`) như các phần tử khác |
+| COM02600, PDUR13200 | message đích nay do Com gửi, PDU nguồn có thêm đích Com: Solve như thường lệ |
+| COM02325 `ComSignalAccess` (warning) | Solve |
+
+Kiểm chứng end-to-end: file gateway + `.vsde` do tool sinh từ một routing table (1 dòng message, 3 dòng signal, một
+signal lấy từ chính message được route nguyên PDU) → DaVinci tạo 3 `ComGwMapping`; routing path của message đó có ba
+đích CanIf + SoAd + Com, Com chỉ nhận signal được route.
+
+### 17.3 Dòng không được route
+
+| Trạng thái | Nghĩa |
+|---|---|
+| HW accelerator | HW-Accelerator = 1: LLCE / PFE route bằng phần cứng. Tool không tạo route PduR / Com và tắt route `ETH->CAN` của message đích (không có nguồn thứ hai). Muốn route bằng phần mềm: tick **Route HW accelerator rows too** |
+| LIN | mạng nguồn hoặc đích là LIN (chưa hỗ trợ) |
+| Ethernet | mạng đích là cột Ethernet: CAN ↔ Ethernet vẫn theo DBC |
+| other ECU / not this ECU | bus của ECU khác (đi qua Ethernet, theo DBC) / không phải bus của ECU đang sinh |
+| problem | dòng sai (không có `S`, Routing Type lạ, ID không phải hex …) hoặc không khớp DBC (không có message / signal, ECU không nhận / không gửi) |
+| off | route được tạo nhưng tắt (xung đột, khác độ dài / layout, người dùng tắt) |
+
+Analyze in tổng kết `Routing table <file>: N row(s); for <ECU>: x message route(s), y signal route(s), …`. Report
+đường đi (mục 14) có thêm bảng **Routing table**: mỗi dòng của bảng, gateway, trạng thái và chi tiết từng mạng
+đích (ô lọc của HTML lọc cả bảng này); file CSV có cùng nội dung.
+
+Mạng nhiều ECU (topology): một bảng cho cả mạng (`routing_table` trong file mạng, đường dẫn tương đối so với file
+mạng); mỗi ECU dùng các dòng có bus của nó. Cấu hình của một ECU có `routing_table` riêng thì dùng bảng đó.
+
+Cấu hình (`gateway.json`): `routing_table`, `options.table_hw`, `buses[].table_network`.
+
 ## Giới hạn hiện tại
 
 - Route nguyên PDU. PDU CAN đã có route trong base thì được thêm đích Ethernet (thành 1:N). CAN → CAN có 1:N
-  (một nguồn, nhiều bus đích) nhưng không có N:1; khác layout signal cần signal gateway, tool không tạo.
+  (một nguồn, nhiều bus đích) nhưng không có N:1; khác layout signal thì dùng dòng signal của routing table
+  (mục 17, chỉ khi DBC được import trong DaVinci). Routing table: dòng LIN và Ethernet chưa được route.
 - Message multiplexed và PDU không phải I-SIGNAL-I-PDU (ví dụ SecOC) được route nguyên PDU, không có signal.
 - TCP: tạo TCP-TP-PORT và TCP-ROLE, các tham số TCP khác dùng mặc định của DaVinci.

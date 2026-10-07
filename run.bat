@@ -60,6 +60,12 @@ if errorlevel 1 (
   echo Installing cantools for the CAN gateway generator ...
   %PY% -m pip install "cantools>=39"
 )
+rem    openpyxl reads routing tables in Excel format (.xlsx): try to install, never block
+%PY% -c "import openpyxl" >nul 2>nul
+if errorlevel 1 (
+  echo Installing openpyxl for routing tables in Excel format ...
+  %PY% -m pip install "openpyxl>=3.0"
+)
 
 rem --- 4. the interpreter that was checked above, and its windowless twin pythonw.exe
 set "PYEXE="

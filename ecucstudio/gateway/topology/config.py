@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from ..config import GatewayConfig, SocketSide
+from ..config import GatewayConfig, SocketSide, _abs, _rel
 
 
 @dataclass
@@ -63,6 +63,10 @@ class TopologyConfig:
     routes: dict = field(default_factory=dict)   # "<ecu>/<bus>/<msg> -> <ecu>/<bus>/<msg>" -> {"enabled",
                                                  #     "header_id", "also_to_default_peer"}
     links: list = field(default_factory=list)    # extra pairs: {"src": "<ecu>/<bus>/<msg>", "dst": "..."}
+    # routing table of the customer (.xlsx / .csv) given with the DBC files: the CAN -> CAN routes of every ECU (an
+    # ECU's own gateway.routing_table wins); table_hw: also route its rows with HW-Accelerator = 1
+    routing_table: str = ""
+    table_hw: bool = False
     path: str = field(default="", compare=False)  # file the topology was loaded from / saved to (not saved)
 
     # ------------------------------------------------------------------ nodes
@@ -97,6 +101,8 @@ class TopologyConfig:
             x = {k: v for k, v in dataclasses.asdict(e).items() if k != "gateway"}
             x["gateway"] = e.gateway.to_dict(rel_to)
             d["ecus"].append(x)
+        if rel_to:
+            d["routing_table"] = _rel(self.routing_table, rel_to)
         return d
 
     def save(self, path: str | None = None):
@@ -122,7 +128,8 @@ class TopologyConfig:
                   one_socket=bool(d.get("one_socket", False)),
                   peers=[build(PeerNode, p) for p in d.get("peers") or []], default_peer=d.get("default_peer", ""),
                   ecus=ecus, cross=build(CrossSettings, d.get("cross")), routes=dict(d.get("routes") or {}),
-                  links=list(d.get("links") or []))
+                  links=list(d.get("links") or []), table_hw=bool(d.get("table_hw", False)),
+                  routing_table=_abs(d.get("routing_table", ""), rel_to) if rel_to else d.get("routing_table", ""))
         return cfg
 
     @classmethod

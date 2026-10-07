@@ -158,6 +158,12 @@ DaVinci, các cặp CAN → CAN được ghi vào file `<output>.vsde` cạnh fi
 các DBC, DaVinci route message bằng PduR và bỏ nó khỏi Com (không CanIf → Com, không Com → CanIf). Chi tiết: mục 12
 của [docs/GATEWAY.md](docs/GATEWAY.md).
 
+**Routing table của khách hàng**: chọn file Excel (hoặc CSV) đi kèm DBC ở khung *Routing table (CAN -> CAN)* của tab
+Input (wizard: trang DBC; topology: Network settings). CAN → CAN khi đó chỉ lấy theo bảng: dòng message (Routing
+Type 0) thành route PduR, dòng signal (Routing Type 1) thành Com signal gateway (ghi vào `.vsde`, DaVinci tạo
+`ComGwMapping`). Cột mạng `S` / `D` được khớp với bus theo tên; dòng HW-Accelerator = 1, LIN, Ethernet được liệt kê
+trong bảng *Routing table* của report. Chi tiết: mục 17 của [docs/GATEWAY.md](docs/GATEWAY.md).
+
 **Gom PDU (CAN → ETH)**: khung *PDU collection* của tab Ethernet cho SoAd gom nhiều PDU (mỗi PDU vẫn có header ID
 riêng) vào một UDP datagram, gửi khi hết timeout (ví dụ 5 ms) hoặc khi gặp message đặt *gửi ngay*. Tool ghi các
 thuộc tính `PDU-COLLECTION-*` vào file gateway, DaVinci sinh cấu hình nPdu của SoAd (QUEUED: không mất frame nào).

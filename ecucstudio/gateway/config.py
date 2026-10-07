@@ -119,6 +119,7 @@ class BusInput:
     # tells which messages go to that ECU (it sends them on its bus) or come from it (it receives them) over Ethernet.
     # The Ethernet peer with this name gives its IP address and ports.
     remote_ecu: str = ""
+    table_network: str = ""         # network column of the routing table (empty = the column named like the bus / DBC)
     messages: dict = field(default_factory=dict)   # name -> {"enabled": bool, "header_id": "0x..", "eth_pdu": "..",
                                                    #   "eth_peers": [..] (CAN -> ETH destinations),
                                                    #   "eth_peer": ".." (ETH -> CAN source)}
@@ -145,6 +146,8 @@ class Options:
                                     # (written to the .vsde file of the DBC converter, see vsde.py)
     dbc_imported: bool = False      # no base file: the DBC files are imported in the DaVinci project of the ECU, the
                                     # output holds only Ethernet + gateway (the CAN part is referenced, see imported)
+    table_hw: bool = False          # routing table: also route the rows of a hardware accelerator (HW-Accelerator = 1,
+                                    # LLCE / PFE); off = those rows are left to the accelerator
 
 
 @dataclass
@@ -156,6 +159,8 @@ class GatewayConfig:
                                                       #                           "dst_bus", "dst_msg"}
     previous: str = ""              # gateway file of the previous generation (already imported in DaVinci):
                                     # its elements are taken out of the base, its header ids / names are kept
+    routing_table: str = ""         # routing table of the customer (.xlsx / .csv): the CAN -> CAN routes (message and
+                                    # signal rows) come only from it; empty = messages paired by name / CAN id
     ecu: str = ""                   # gateway ECU-INSTANCE (path or short name; empty = auto). Without a base
                                     # file: name of the new ECU-INSTANCE (empty = node of the first DBC)
     schema: str = "AUTOSAR_00052"   # schema of a new file (without base file); DaVinci 5.24 reads <= AUTOSAR_00049
@@ -171,7 +176,7 @@ class GatewayConfig:
     def to_dict(self, rel_to: str | None = None) -> dict:
         d = dataclasses.asdict(self)
         if rel_to:
-            for key in ("base", "output", "previous", "topology"):
+            for key in ("base", "output", "previous", "topology", "routing_table"):
                 d[key] = _rel(d[key], rel_to)
             for b in d["buses"]:
                 b["dbc"] = _rel(b["dbc"], rel_to)
@@ -200,6 +205,7 @@ class GatewayConfig:
         cfg = cls(base=d.get("base", ""), output=d.get("output", ""), ecu=d.get("ecu", ""),
                   system=d.get("system", ""), schema=d.get("schema", "AUTOSAR_00052"),
                   previous=d.get("previous", ""), topology=d.get("topology", ""),
+                  routing_table=d.get("routing_table", ""),
                   can_gateway=dict(d.get("can_gateway") or {}),
                   can_links=list(d.get("can_links") or []),
                   buses=[build(BusInput, b) for b in d.get("buses", [])],
@@ -212,6 +218,7 @@ class GatewayConfig:
             cfg.output = _abs(cfg.output, rel_to)
             cfg.previous = _abs(cfg.previous, rel_to)
             cfg.topology = _abs(cfg.topology, rel_to)
+            cfg.routing_table = _abs(cfg.routing_table, rel_to)
             for b in cfg.buses:
                 b.dbc = _abs(b.dbc, rel_to)
         return cfg

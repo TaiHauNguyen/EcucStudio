@@ -153,8 +153,8 @@ def cmd_plan(a):
     plan = make_plan(_load(a.config))
     _print_plan(plan)
     from . import report
-    print(f"\n{report.count_text(len(plan.enabled_routes), len(plan.enabled_can_routes))}, "
-          f"{len(plan.warnings)} warning(s), {len(plan.errors)} error(s) "
+    n = report.count_text(len(plan.enabled_routes), len(plan.enabled_can_routes), len(plan.enabled_signal_routes))
+    print(f"\n{n}, {len(plan.warnings)} warning(s), {len(plan.errors)} error(s) "
           f"({time.time() - t:.1f} s)")
     return 1 if plan.errors else 0
 
@@ -179,8 +179,8 @@ def cmd_generate(a):
     html_path, _ = paths.write_report(paths.report_of_plan(plan), os.path.splitext(res.output)[0])
     for w in res.warnings[len(plan.warnings):]:
         print("[WARNING]", w)
-    print(f"\nWritten {res.output} ({report.count_text(len(res.routes), len(res.can_routes))}, "
-          f"{time.time() - t:.1f} s)")
+    n = report.count_text(len(res.routes), len(res.can_routes), len(res.signal_routes))
+    print(f"\nWritten {res.output} ({n}, {time.time() - t:.1f} s)")
     print("Created:", ", ".join(f"{k} {v}" for k, v in sorted(res.created.items())))
     if res.extension:
         print("CAN -> CAN (PduR only, no Com):", res.extension,
@@ -316,7 +316,8 @@ def cmd_topology_generate(a):
         print("\nNothing written: fix the errors above.")
         return 1
     for name, res in generate_topology(tplan, a.ecu or None):
-        print(f"Written {res.output} ({name}: {report.count_text(len(res.routes), len(res.can_routes))})")
+        n = report.count_text(len(res.routes), len(res.can_routes), len(res.signal_routes))
+        print(f"Written {res.output} ({name}: {n})")
         if res.extension:
             print(f"Written {res.extension} ({name}: CAN -> CAN, PduR only, no Com - add it to the Input Files "
                   f"of the DaVinci project next to the DBC files)")

@@ -14,7 +14,7 @@ from ..gui.widgets import Tooltip, dialog_header
 from . import dbcread, dvproject, paths, report, start
 from .base import DEFAULT_SCHEMA, SCHEMAS, Base, new_document
 from .config import BusInput, EthPeer, GatewayConfig, Naming, PduCollection, SocketSide
-from .planner import CAN_TO_ETH, ETH_TO_CAN, CanRoute, Route, load_base, make_plan, new_ecu_name
+from .planner import CAN_TO_ETH, ETH_TO_CAN, CanRoute, Route, SignalRoute, load_base, make_plan, new_ecu_name
 from .regen import config_from_file
 from .suggest import apply as apply_suggestions
 from .suggest import suggest as suggest_settings
@@ -86,7 +86,7 @@ class BusDialog(tk.Toplevel):
     """Add / edit one DBC input."""
 
     def __init__(self, master, bus: BusInput, base: Base | None, dbc_cache: dict, project_ecu: str = "",
-                 target_node: str = ""):
+                 target_node: str = "", networks=()):
         super().__init__(master)
         self.title("CAN Bus Input")
         self.target_node = target_node      # gateway node of the ECU being generated (from the other buses)
@@ -125,6 +125,17 @@ class BusDialog(tk.Toplevel):
         self.busname = tk.StringVar(value=bus.bus)
         self.e_busname = ttk.Entry(f, textvariable=self.busname, width=24)
         self.e_busname.grid(row=r, column=1, sticky="w", pady=2)
+        r += 1
+        ttk.Label(f, text="Routing table network:").grid(row=r, column=0, sticky="w", pady=2)
+        self.network = tk.StringVar(value=bus.table_network)
+        self.networks = list(networks)
+        c_net = ttk.Combobox(f, textvariable=self.network, values=[""] + self.networks, width=24)
+        c_net.grid(row=r, column=1, sticky="w", pady=2)
+        self.network_info = ttk.Label(f, text="", foreground="#666666")
+        self.network_info.grid(row=r, column=1, sticky="w", padx=(200, 0))
+        Tooltip(c_net, "Network column (S / D) of the routing table that is this bus. Empty = the column named like "
+                       "the bus, the DBName or the DBC file (also one word of the file name, e.g. BusA in "
+                       "Vehicle_BusA_v3.dbc)")
         r += 1
         bf = ttk.Frame(f)
         bf.grid(row=r, column=1, sticky="w", pady=2)
@@ -202,6 +213,11 @@ class BusDialog(tk.Toplevel):
             self.node.var.set("")
         if not self.busname.get() and not self.channel.get():
             self.busname.set(self.db.name)
+        if self.networks:
+            from .planner import _match_network
+            auto = _match_network(self.networks, (self.busname.get().strip(), self.db.name,
+                                                  os.path.splitext(os.path.basename(path))[0]))
+            self.network_info.config(text=f"empty = {auto}" if auto else "empty = no column has this name")
         self.node_changed()
 
     def is_remote(self) -> bool:
@@ -240,6 +256,7 @@ class BusDialog(tk.Toplevel):
             b.dbc, b.node = os.path.abspath(self.dbc.get().strip()), self.node.get()
             b.remote_ecu, b.channel, b.new_channel, b.bus = self.node.get(), "", False, ""
             b.include_nm, b.include_diag = self.nm.get(), self.diag.get()
+            b.table_network = self.network.get().strip()
             self.result = b
             self.destroy()
             return
@@ -261,6 +278,7 @@ class BusDialog(tk.Toplevel):
         b.fd_baudrate = _int_or_none(self.fdbaud.get())
         b.rx, b.tx = self.rx.get(), self.tx.get()
         b.include_nm, b.include_diag = self.nm.get(), self.diag.get()
+        b.table_network = self.network.get().strip()
         self.result = b
         self.destroy()
 
@@ -849,6 +867,25 @@ class GatewayWindow:
         ttk.Button(bb, text="Add DBC…", command=self.add_bus).pack(fill="x")
         ttk.Button(bb, text="Edit…", command=self.edit_bus).pack(fill="x", pady=3)
         ttk.Button(bb, text="Remove", command=self.remove_bus).pack(fill="x")
+        tf = ttk.LabelFrame(f, text="Routing table (CAN -> CAN)", padding=6)
+        tf.grid(row=6, column=0, columnspan=3, sticky="we", pady=(8, 0))
+        tf.columnconfigure(1, weight=1)
+        ttk.Label(tf, text="Excel / CSV file:").grid(row=0, column=0, sticky="w")
+        self.v_table = tk.StringVar()
+        e_table = ttk.Entry(tf, textvariable=self.v_table)
+        e_table.grid(row=0, column=1, sticky="we", padx=4)
+        ttk.Button(tf, text="Browse…", command=self.browse_table).grid(row=0, column=2)
+        ttk.Button(tf, text="Clear", command=lambda: self.v_table.set("")).grid(row=0, column=3, padx=(4, 0))
+        Tooltip(e_table, "Routing table of the customer, given with the DBC files (.xlsx or .csv). When set, the CAN "
+                         "-> CAN routes come only from it: a message row (Routing Type 0) becomes a PduR route, a "
+                         "signal row (Routing Type 1) a Com signal gateway (.vsde file). Network columns are matched "
+                         "to the buses by name (Edit DBC: Routing table network). Empty = messages are paired by "
+                         "name / CAN id")
+        self.v_table_hw = tk.BooleanVar(value=False)
+        cb_hw = ttk.Checkbutton(tf, text="Route HW accelerator rows too (HW-Accelerator = 1)", variable=self.v_table_hw)
+        cb_hw.grid(row=1, column=1, columnspan=3, sticky="w", padx=4, pady=(2, 0))
+        Tooltip(cb_hw, "Off: rows with HW-Accelerator = 1 are left to the LLCE / PFE (no PduR / Com route; their "
+                       "target message is not sent from Ethernet either). On: they are routed like the others")
 
     def _tab_eth(self, nb):
         f = ttk.Frame(nb, padding=10)
@@ -1258,6 +1295,28 @@ class GatewayWindow:
             return (dvproject.read(path) if dvproject.is_project(path) else None), load_base(c)
         self._run("Loading " + os.path.basename(path), work, done)
 
+    def browse_table(self):
+        p = filedialog.askopenfilename(parent=self.win, title="Routing table",
+                                       filetypes=[("Routing table", "*.xlsx *.xlsm *.csv *.tsv *.txt"),
+                                                  ("All files", "*.*")])
+        if p:
+            self.v_table.set(os.path.normpath(p))
+
+    def table_networks(self) -> list[str]:
+        """Network columns of the routing table ([] when there is none or it cannot be read)."""
+        path = self.v_table.get().strip()
+        if not path or not os.path.isfile(path):
+            return []
+        key = (os.path.abspath(path), os.path.getmtime(path))
+        if getattr(self, "_table_key", None) != key:
+            from . import routing_table
+            try:
+                self._table_nets = routing_table.read(path).networks
+            except Exception:  # noqa: BLE001 - the analysis reports the problem
+                self._table_nets = []
+            self._table_key = key
+        return self._table_nets
+
     def browse_prev(self):
         p = filedialog.askopenfilename(parent=self.win, title="Previous gateway file (already imported in DaVinci)",
                                        filetypes=[("AUTOSAR XML", "*.arxml"), ("All files", "*.*")])
@@ -1511,7 +1570,8 @@ class GatewayWindow:
             self.refresh_peers()
 
     def add_bus(self):
-        d = BusDialog(self.win, BusInput(), self.base, self.dbc_cache, self.project_ecu(), self.target_node())
+        d = BusDialog(self.win, BusInput(), self.base, self.dbc_cache, self.project_ecu(), self.target_node(),
+                      self.table_networks())
         self.win.wait_window(d)
         if d.result:
             self.cfg.buses.append(d.result)
@@ -1532,7 +1592,7 @@ class GatewayWindow:
             return
         i = int(sel[0])
         d = BusDialog(self.win, self.cfg.buses[i], self.base, self.dbc_cache, self.project_ecu(),
-                      self.target_node(skip=i))
+                      self.target_node(skip=i), self.table_networks())
         self.win.wait_window(d)
         self.refresh_buses()
         if d.result is not None and d.result.remote_ecu:
@@ -1586,6 +1646,8 @@ class GatewayWindow:
         c.options.can_match_id = self.v_canmatchid.get()
         c.options.eth_fanout = self.v_fanout.get()
         c.options.eth_no_com = self.v_nocom.get()
+        c.options.table_hw = self.v_table_hw.get()
+        c.routing_table = self.v_table.get().strip()
         c.previous = self.v_prev.get().strip()
         for k, v in self.v_naming.items():
             setattr(c.naming, k, v.get().strip() or getattr(Naming(), k))
@@ -1623,6 +1685,8 @@ class GatewayWindow:
         self.v_canmatchid.set(c.options.can_match_id)
         self.v_fanout.set(c.options.eth_fanout)
         self.v_nocom.set(c.options.eth_no_com)
+        self.v_table_hw.set(c.options.table_hw)
+        self.v_table.set(c.routing_table)
         self.v_prev.set(c.previous)
         for k, v in self.v_naming.items():
             v.set(getattr(c.naming, k))
@@ -1696,7 +1760,8 @@ class GatewayWindow:
                 self._done_text = ""
                 self.fill_routes()
                 self.show_messages(plan.errors, plan.warnings, filled + plan.infos)
-                n = report.count_text(len(plan.enabled_routes), len(plan.enabled_can_routes))
+                n = report.count_text(len(plan.enabled_routes), len(plan.enabled_can_routes),
+                                      len(plan.enabled_signal_routes))
                 self.status.config(text=f"{n}, {len(plan.warnings)} warning(s), {len(plan.errors)} error(s)")
                 if then and plan.ok:
                     then(plan)
@@ -1729,14 +1794,18 @@ class GatewayWindow:
                 if res.extension:
                     ncan = sum(1 for c in res.can_routes if c.vsde)
                     ntx = sum(1 for r in res.routes if r.no_com)
+                    nsig = len(res.signal_routes)
                     ext = (f"{os.path.basename(res.extension)}: CAN -> CAN {ncan} route(s) in PduR only, ETH -> CAN "
-                           f"{ntx} CAN PDU(s) not sent by Com. Add it to the Input Files of the DaVinci project next "
-                           f"to the DBC files (once), then run Update. The DBC converter then logs 'ECU ... does not "
-                           f"receive source pdu ...' for the ETH -> CAN PDUs: expected.")
+                           f"{ntx} CAN PDU(s) not sent by Com" + (f", {nsig} signal route(s) by Com (signal gateway: "
+                                                                   f"set Com/ComGeneral/ComSignalGateway once)"
+                                                                   if nsig else "") +
+                           ". Add it to the Input Files of the DaVinci project next to the DBC files (once), then "
+                           "run Update. The DBC converter then logs 'ECU ... does not receive source pdu ...' for "
+                           "the ETH -> CAN PDUs: expected.")
                 self.show_messages([], res.warnings, [f"Written {res.output}"] +
                                    ([f"Written {res.extension}", ext] if ext else []) +
                                    [f"Route table: {csv_path}", f"Message paths: {self._report_files[0]}"])
-                n = report.count_text(len(res.routes), len(res.can_routes))
+                n = report.count_text(len(res.routes), len(res.can_routes), len(res.signal_routes))
                 self.status.config(text=f"Written {os.path.basename(res.output)}: {n}")
                 regen = cfg.previous and os.path.abspath(cfg.previous) == os.path.abspath(res.output)
                 done_routes = plan.enabled_routes + plan.enabled_can_routes
@@ -1880,7 +1949,7 @@ class GatewayWindow:
         if not p.enabled_routes and not p.enabled_can_routes:
             return ("No message is routed: check the gateway node / channels of the buses and the Options tab.",
                     [("Input tab", lambda: self.nb.select(0))])
-        n = report.count_text(len(p.enabled_routes), len(p.enabled_can_routes))
+        n = report.count_text(len(p.enabled_routes), len(p.enabled_can_routes), len(p.enabled_signal_routes))
         if p.previous:
             every = p.enabled_routes + p.enabled_can_routes
             kept = sum(1 for r in every if r.change == "kept")
@@ -1922,11 +1991,11 @@ class GatewayWindow:
             return
         self._route_by_iid = {}
         items = report.route_items(self.plan)
-        removed = [row for r, row in items if not isinstance(r, (Route, CanRoute))]
+        removed = [row for r, row in items if not isinstance(r, (Route, CanRoute, SignalRoute))]
         for k, row in enumerate(removed):
             t.insert("", "end", iid=f"removed-{k}", values=row, tags=("removed",))
         again = []
-        for i, (r, row) in enumerate((r, row) for r, row in items if isinstance(r, (Route, CanRoute))):
+        for i, (r, row) in enumerate((r, row) for r, row in items if isinstance(r, (Route, CanRoute, SignalRoute))):
             if not r.enabled:
                 tags = ("off",)
             elif isinstance(r, Route) and r.header_note.startswith("flag"):
@@ -1958,10 +2027,17 @@ class GatewayWindow:
         if not routes:
             return
         r = routes[0]
-        if isinstance(r, CanRoute):
-            text = (f"{r.src.bus.name} / {r.src.message.name}  ->  {r.dst.bus.name} / {r.dst.message.name}\n"
-                    f"Pairing: {r.match}\n" + "".join(f"{x}\n" for x in ([r.reason] if r.reason else []) + r.notes) +
-                    "\nRoute this message from bus to bus?")
+        if isinstance(r, (CanRoute, SignalRoute)):
+            if isinstance(r, SignalRoute):
+                text = (f"{r.src.bus.name} / {r.src.message.name}.{r.src_signal.name}  ->  {r.dst.bus.name} / "
+                        f"{r.dst.message.name}.{r.dst_signal.name}\nRouting table {r.row}\n" +
+                        "".join(f"{x}\n" for x in ([r.reason] if r.reason else []) + r.notes) +
+                        "\nRoute this signal (Com signal gateway)?")
+            else:
+                text = (f"{r.src.bus.name} / {r.src.message.name}  ->  {r.dst.bus.name} / {r.dst.message.name}\n"
+                        f"Pairing: {r.match}\n" + "".join(f"{x}\n" for x in ([r.reason] if r.reason else []) +
+                                                          r.notes) +
+                        "\nRoute this message from bus to bus?")
             ans = messagebox.askyesnocancel(TITLE, text, parent=self.win)
             if ans is not None:
                 self.cfg.can_gateway[r.key] = {"enabled": ans}
@@ -1980,7 +2056,7 @@ class GatewayWindow:
     def toggle_routes(self, value=None):
         routes = self._selected_routes()
         for r in routes:
-            if isinstance(r, CanRoute):
+            if isinstance(r, (CanRoute, SignalRoute)):
                 self.cfg.can_gateway[r.key] = {"enabled": (not r.enabled) if value is None else value}
                 continue
             over = dict(r.bus.cfg.messages.get(r.message.name, {}))
@@ -2058,14 +2134,14 @@ class GatewayWindow:
 
     def reset_routes(self):
         for r in self._selected_routes():
-            if isinstance(r, CanRoute):
+            if isinstance(r, (CanRoute, SignalRoute)):
                 self.cfg.can_gateway.pop(r.key, None)
             else:
                 r.bus.cfg.messages.pop(r.message.name, None)
         self.analyze()
 
     def set_peers(self):
-        routes = [r for r in self._selected_routes() if not isinstance(r, CanRoute)]
+        routes = [r for r in self._selected_routes() if isinstance(r, Route)]
         dirs = {r.direction for r in routes}
         if len(dirs) != 1:
             if routes:
@@ -2094,7 +2170,7 @@ class GatewayWindow:
     def add_link(self):
         if not self.plan:
             return
-        d = LinkDialog(self.win, self.plan, [r for r in self._selected_routes() if not isinstance(r, CanRoute)])
+        d = LinkDialog(self.win, self.plan, [r for r in self._selected_routes() if isinstance(r, Route)])
         self.win.wait_window(d)
         if d.result is not None:
             self.cfg.can_links = [x for x in self.cfg.can_links

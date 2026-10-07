@@ -289,6 +289,8 @@ class StartWizard(tk.Toplevel):
                 rows.append({"path": key, "db": self.cache[key], "node": tk.StringVar(value=b.node),
                              "ecu": tk.StringVar(value=e.name), "reason": "", "chosen": True})
         self.s["dbcs"] = rows
+        self.s.setdefault("table", tk.StringVar()).set(t.routing_table)
+        self.s.setdefault("table_hw", tk.BooleanVar()).set(t.table_hw)
 
     def _network_from_topology(self, t):
         st = self.s.setdefault("net", {})
@@ -372,8 +374,26 @@ class StartWizard(tk.Toplevel):
         holder.pack(fill="both", expand=True, pady=(10, 0))
         rows = self._scroll_area(holder, height=220)
         self._fill_dbc_rows(rows)
+        self.s.setdefault("table", tk.StringVar())
+        self.s.setdefault("table_hw", tk.BooleanVar(value=False))
+        tf = ttk.LabelFrame(self.body, text="Routing table (optional)", padding=6)
+        tf.pack(fill="x", pady=(8, 0))
+        tf.columnconfigure(1, weight=1)
+        ttk.Label(tf, text="Excel / CSV file:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(tf, textvariable=self.s["table"]).grid(row=0, column=1, sticky="we", padx=4)
+        ttk.Button(tf, text="Browse…", command=self._browse_table).grid(row=0, column=2)
+        ttk.Checkbutton(tf, text="Route HW accelerator rows too (HW-Accelerator = 1)",
+                        variable=self.s["table_hw"]).grid(row=1, column=1, columnspan=2, sticky="w", padx=4)
+        ttk.Label(tf, text="Given by the customer with the DBC files: the CAN -> CAN routes inside an ECU then come "
+                           "only from it (message rows: PduR, signal rows: Com signal gateway). Without it, messages "
+                           "are paired by name / CAN id.", foreground="#666666", wraplength=860,
+                  justify="left").grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
         def leave():
+            p = self.s["table"].get().strip()
+            if p and not os.path.isfile(p):
+                messagebox.showinfo(TITLE, f"The routing table {p} does not exist.", parent=self)
+                return False
             dbcs = self.s.get("dbcs", [])
             if not dbcs:
                 messagebox.showinfo(TITLE, "Add the DBC files of the network.", parent=self)
@@ -384,6 +404,13 @@ class StartWizard(tk.Toplevel):
             self.s["groups"] = self._groups()
             return True
         self.leave = leave
+
+    def _browse_table(self):
+        p = filedialog.askopenfilename(parent=self, title="Routing table",
+                                       filetypes=[("Routing table", "*.xlsx *.xlsm *.csv *.tsv *.txt"),
+                                                  ("All files", "*.*")])
+        if p:
+            self.s["table"].set(os.path.normpath(p))
 
     def _groups(self):
         return start.group_ecus([(d["path"], d["node"].get(), d["ecu"].get().strip() or d["node"].get())
@@ -779,6 +806,9 @@ class StartWizard(tk.Toplevel):
             _int(st["tx"].get()) or 50000, _int(st["rx"].get()) or 50001, os.path.splitext(os.path.basename(path))[0],
             projects=projects, gateway_only=True, one_socket=st["one"].get() if "one" in st else True,
             eth_nodes=self._eth_nodes())
+        if "table" in self.s:
+            t.routing_table = os.path.abspath(self.s["table"].get().strip()) if self.s["table"].get().strip() else ""
+            t.table_hw = self.s["table_hw"].get()
         node = t.ecu(target)
         node.gateway.previous = x["prev"].get().strip()
         if not x["proj"].get():

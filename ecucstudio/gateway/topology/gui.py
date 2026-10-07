@@ -469,6 +469,16 @@ class TopologyWindow:
         e_ch = ttk.Entry(f, textvariable=v["channel"], width=36)
         Tooltip(e_ch, "Ethernet channel to use in bases that already have Ethernet (path, short name or VLANnn). "
                       "Empty = the channel the ECU is connected to.")
+        v_table, v_hw = tk.StringVar(value=cfg.routing_table), tk.BooleanVar(value=cfg.table_hw)
+        tf = ttk.Frame(f)
+        e_table = ttk.Entry(tf, textvariable=v_table, width=36)
+        e_table.pack(side="left")
+        ttk.Button(tf, text="…", width=3, command=lambda: self._browse_table(v_table)).pack(side="left", padx=(2, 0))
+        Tooltip(e_table, "Routing table of the customer (.xlsx / .csv) given with the DBC files. When set, the CAN -> "
+                         "CAN routes of every ECU come only from it (message rows: PduR, signal rows: Com signal "
+                         "gateway in the .vsde file). Empty = messages paired by name / CAN id")
+        hw_cb = ttk.Checkbutton(f, text="Route HW accelerator rows too", variable=v_hw)
+        Tooltip(hw_cb, "Off: rows with HW-Accelerator = 1 are left to the LLCE / PFE")
         self._grid(f, [("Name:", ttk.Entry(f, textvariable=v["name"], width=36)),
                        ("VLAN id (new channels):", ttk.Entry(f, textvariable=v["vlan"], width=8)),
                        ("Existing channel:", e_ch),
@@ -479,7 +489,9 @@ class TopologyWindow:
                        ("Port of every node:", ttk.Entry(f, textvariable=v["tx"], width=8)),
                        ("Receive port (two sockets):", e_rx),
                        ("Default peer:", ttk.Combobox(f, textvariable=v["dp"], values=[""] + [p.name for p in cfg.peers],
-                                                      width=20, state="readonly"))])
+                                                      width=20, state="readonly")),
+                       ("Routing table (CAN -> CAN):", tf),
+                       ("", hw_cb)])
         o = ttk.LabelFrame(self.panel, text="ECU -> ECU routes", padding=6)
         o.pack(side="left", fill="y", anchor="n", padx=(16, 0))
         b = {k: tk.BooleanVar(value=x) for k, x in (("also", cfg.cross.also_to_default_peer),
@@ -510,7 +522,26 @@ class TopologyWindow:
             cfg.cross.also_to_default_peer = b["also"].get()
             cfg.cross.from_default_peer = b["from"].get()
             cfg.cross.match_id = b["match"].get()
+            cfg.routing_table = v_table.get().strip()
+            cfg.table_hw = v_hw.get()
         self._store = store
+
+    def _browse_table(self, var):
+        p = filedialog.askopenfilename(parent=self.win, title="Routing table",
+                                       filetypes=[("Routing table", "*.xlsx *.xlsm *.csv *.tsv *.txt"),
+                                                  ("All files", "*.*")])
+        if p:
+            var.set(os.path.normpath(p))
+
+    def _table_networks(self) -> list[str]:
+        path = self.cfg.routing_table
+        if not path or not os.path.isfile(path):
+            return []
+        from .. import routing_table
+        try:
+            return routing_table.read(path).networks
+        except Exception:  # noqa: BLE001 - the analysis reports the problem
+            return []
 
     def _ports_row(self, f, node):
         pf = ttk.Frame(f)
@@ -614,7 +645,7 @@ class TopologyWindow:
             store()
             base, proj_ecu = self._ecu_base(g)
             bus = BusInput() if i is None else g.buses[i]
-            d = BusDialog(self.win, bus, base, self.dbc_cache, proj_ecu)
+            d = BusDialog(self.win, bus, base, self.dbc_cache, proj_ecu, networks=self._table_networks())
             self.win.wait_window(d)
             if d.result is not None and i is None:
                 g.buses.append(d.result)

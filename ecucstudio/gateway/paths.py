@@ -21,6 +21,7 @@ LOAD_COLUMNS = ("Gateway", "To Ethernet node", "Socket", "PDUs", "Collected", "I
                 "Datagrams / window")
 BURST_COLUMNS = ("Gateway", "CAN bus", "ETH -> CAN PDUs", "Frames / window", "Bus busy ms", "Window ms", "Busy %",
                  "Note")
+TABLE_COLUMNS = ("Row", "Type", "From", "Message / signal", "To", "Gateway", "Status", "Detail")
 _ARROW = " → "
 
 
@@ -57,6 +58,7 @@ class PathReport:
     gateways: list[str] = field(default_factory=list)
     load: list[tuple] = field(default_factory=list)       # LOAD_COLUMNS rows (PDU collection)
     burst: list[tuple] = field(default_factory=list)      # BURST_COLUMNS rows
+    table: list[tuple] = field(default_factory=list)      # TABLE_COLUMNS rows: every row of the routing table(s)
 
     @property
     def messages(self) -> int:
@@ -262,13 +264,44 @@ def _not_routed(plans: dict, cross, routed: set) -> list[tuple]:
     return rows
 
 
+def _table_rows(plans: dict) -> list[tuple]:
+    """What every gateway made of each routing table row; a row no gateway has a bus of is listed once."""
+    rows, done, first = [], set(), {}
+    for ecu, plan in plans.items():
+        for st in plan.table_rows:
+            key = (plan.table_file, st.row.row)
+            first.setdefault(key, st)
+            if st.status == "not this ECU" and len(plans) > 1:
+                continue
+            done.add(key)
+            rows.append((key, ecu, st))
+    rows += [(key, "-", st) for key, st in first.items() if key not in done]
+    out = []
+    for (_f, n), ecu, st in sorted(rows, key=lambda x: (x[0][0], x[0][1], x[1])):
+        r = st.row
+        what = r.what
+        target = r.target_signal if r.routing == "signal" else r.target_msg
+        if r.routing == "signal" and (r.target_msg, target) != (r.src_msg, r.signal):
+            what += f" -> {r.target_msg}.{target}"
+        elif r.routing != "signal" and target != r.src_msg:
+            what += f" -> {target}"
+        out.append((r.label, (r.routing or "?") + (" (HW)" if r.hw else ""), r.source, what, ", ".join(r.dests),
+                    ecu, st.status, st.detail))
+    return out
+
+
 def report_of_plan(plan: Plan) -> PathReport:
-    return build_report({plan.ecu_name or "Gateway": plan}, (), f"Message paths - {plan.ecu_name or 'gateway'}")
+    plans = {plan.ecu_name or "Gateway": plan}
+    rep = build_report(plans, (), f"Message paths - {plan.ecu_name or 'gateway'}")
+    rep.table = _table_rows(plans)
+    return rep
 
 
 def report_of_topology(tplan) -> PathReport:
     name = tplan.cfg.name or "topology"
-    return build_report(dict(tplan.plans), tplan.cross, f"Message paths - {name}")
+    rep = build_report(dict(tplan.plans), tplan.cross, f"Message paths - {name}")
+    rep.table = _table_rows(dict(tplan.plans))
+    return rep
 
 
 # ---------------------------------------------------------------------------- files
@@ -292,6 +325,11 @@ def write_csv(rep: PathReport, path: str) -> str:
             w.writerow(("ETH -> CAN bursts if the Ethernet node collects with the same timeout",))
             w.writerow(BURST_COLUMNS)
             w.writerows(rep.burst)
+        if rep.table:
+            w.writerow(())
+            w.writerow(("Routing table",))
+            w.writerow(TABLE_COLUMNS)
+            w.writerows(rep.table)
     return path
 
 
@@ -313,6 +351,8 @@ table { border-collapse:collapse; width:100%; }
 th, td { border-bottom:1px solid var(--line); padding:6px 8px; text-align:left; vertical-align:top; }
 th { background:var(--head); position:sticky; top:0; font-weight:600; }
 tr.g1 td { background:var(--alt); }
+td.st-routed { color:var(--eth); font-weight:600; } td.st-off, td.st-problem { color:var(--warn); font-weight:600; }
+td.st-other { color:var(--muted); }
 td.id { font-family:Consolas, monospace; white-space:nowrap; font-variant-numeric:tabular-nums; }
 td.via { white-space:nowrap; } .eth { color:var(--eth); font-family:Consolas, monospace; }
 .gw { color:var(--accent); font-weight:600; } .reason { color:var(--warn); }
@@ -323,7 +363,7 @@ input { padding:6px 8px; width:min(420px, 100%); border:1px solid var(--line); b
 _JS = """
 const f = document.getElementById('filter');
 f.addEventListener('input', () => { const q = f.value.toLowerCase();
-  document.querySelectorAll('#paths tbody tr').forEach(tr => {
+  document.querySelectorAll('#paths tbody tr, #rtable tbody tr').forEach(tr => {
     tr.hidden = q && !tr.textContent.toLowerCase().includes(q); }); });
 """
 
@@ -370,6 +410,19 @@ def write_html(rep: PathReport, path: str) -> str:
                   "ETH -> CAN: if the Ethernet node collects its PDUs with the same timeout, one datagram puts these "
                   "frames on the CAN bus at once (estimate with ~20 % bit stuffing).")
     extra = (f"<h2>Ethernet load (PDU collection)</h2>{load}" if load else "") +         (f"<h2>ETH -> CAN bursts</h2>{burst}" if burst else "")
+    if rep.table:
+        def st_class(s):
+            return "st-" + (s if s in ("routed", "off", "problem") else "other")
+        trs = "".join("<tr>" + "".join(f"<td>{html.escape(str(v))}</td>" for v in row[:6]) +
+                      f'<td class="{st_class(row[6])}">{html.escape(row[6])}</td><td>{html.escape(row[7])}</td></tr>'
+                      for row in rep.table)
+        routed = sum(1 for row in rep.table if row[6] == "routed")
+        extra += (f"<h2>Routing table</h2><div class=\"meta\">{routed} of {len(rep.table)} row(s) routed by PduR "
+                  f"(message) or Com (signal). Routed = in the gateway / .vsde file; off = deselected or in conflict; "
+                  f"HW accelerator, LIN, Ethernet, other ECU = not routed by this tool.</div>"
+                  f'<div class="wrap"><table id="rtable"><thead><tr>' +
+                  "".join(f"<th>{c}</th>" for c in TABLE_COLUMNS) +
+                  f"</tr></thead><tbody>{trs}</tbody></table></div>")
     when = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     doc = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

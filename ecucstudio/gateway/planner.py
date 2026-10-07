@@ -130,6 +130,58 @@ class CanRoute:
     change: str = ""
     direction: str = "CAN->CAN"
     vsde: bool = False          # routed by DaVinci from the extension file (.vsde) of the DBC files: no Com
+    row: str = ""               # routing table row it comes from ("row 12 (#10)")
+    keep_signals: list[str] = field(default_factory=list)  # (.vsde) source signals Com keeps: signal routes use them
+
+
+@dataclass
+class SignalRoute:
+    """Com signal gateway from a routing table row (Routing Type = signal): the node receives *src_signal* in the
+    message of route *src* and sends it as *dst_signal* in the message of route *dst*. Written to the .vsde file
+    (COM-SIGNAL-ROUTING): the DBC converter makes the I-SIGNAL-MAPPING, DaVinci a ComGwMapping."""
+    key: str                    # "<bus>/<msg>.<signal>-><bus>/<msg>.<signal>"
+    src: Route                  # CAN -> ETH route of the source message (the node receives it)
+    src_signal: dbcread.Signal
+    dst: Route                  # ETH -> CAN route of the target message (the node sends it)
+    dst_signal: dbcread.Signal
+    row: str = ""
+    enabled: bool = True
+    reason: str = ""
+    notes: list[str] = field(default_factory=list)
+    change: str = ""
+    direction: str = "SIGNAL"
+
+
+@dataclass
+class TableStatus:
+    """What became of one routing table row: per destination network a (status, text, route or None)."""
+    row: object                 # routing_table.TableRow
+    outcomes: list = field(default_factory=list)
+
+    def add(self, status: str, text: str, route=None):
+        self.outcomes.append((status, text, route))
+
+    def items(self) -> list[tuple[str, str]]:
+        """(status, text) per destination; a route made from the row is "routed" or "off" (with its reason)."""
+        out = []
+        for status, text, route in self.outcomes:
+            if route is None:
+                out.append((status, text))
+            elif route.enabled:
+                notes = [n for n in route.notes if not n.startswith("routing table")]
+                out.append(("routed", "; ".join([text] + notes)))
+            else:
+                out.append(("off", f"{text}: {route.reason or 'deselected'}"))
+        return out
+
+    @property
+    def status(self) -> str:
+        kinds = list(dict.fromkeys(s for s, _ in self.items()))
+        return " + ".join(kinds) if kinds else "-"
+
+    @property
+    def detail(self) -> str:
+        return " | ".join(t for _, t in self.items() if t)
 
 
 @dataclass
@@ -202,6 +254,9 @@ class Plan:
     removed: list = field(default_factory=list)        # PrevRoute of the previous file that are not generated
 
     can_routes: list = field(default_factory=list)     # CanRoute
+    signal_routes: list = field(default_factory=list)  # SignalRoute (routing table)
+    table_rows: list = field(default_factory=list)     # TableStatus: every row of the routing table
+    table_file: str = ""                               # the routing table that was read
     load: list = field(default_factory=list)           # LoadRow: CAN -> ETH packets with / without PDU collection
     burst: list = field(default_factory=list)          # BurstRow: ETH -> CAN frames per collection window per bus
 
@@ -212,6 +267,10 @@ class Plan:
     @property
     def enabled_can_routes(self) -> list:
         return [r for r in self.can_routes if r.enabled]
+
+    @property
+    def enabled_signal_routes(self) -> list:
+        return [r for r in self.signal_routes if r.enabled]
 
     @property
     def ok(self) -> bool:
@@ -418,8 +477,12 @@ class Planner:
             self.err("No DBC file selected.")
         if plan.errors:
             return False
-        if cfg.options.can_routes:
+        if cfg.options.can_routes and cfg.routing_table:
+            self._plan_table()
+        elif cfg.options.can_routes:
             self._plan_can_routes()
+        elif cfg.routing_table:
+            self.info("CAN -> CAN routing is off: the routing table is not used.")
         if eth and self._remotes:
             self._plan_remote_routes()
         if eth and cfg.options.eth_fanout:
@@ -454,7 +517,7 @@ class Planner:
             kept = sum(1 for r in every if r.change == "kept")
             new = sum(1 for r in every if r.change == "new")
             self.info(f"Compared with the previous file: {kept} route(s) kept, {new} new, {len(plan.removed)} removed.")
-        if not plan.enabled_routes and not plan.enabled_can_routes:
+        if not plan.enabled_routes and not plan.enabled_can_routes and not plan.enabled_signal_routes:
             self.warn("No message is selected for routing.")
 
     # ------------------------------------------------------------------ ECU / Ethernet
@@ -955,6 +1018,11 @@ class Planner:
             else:
                 self._check_can_route(cr, prev_can)
             plan.can_routes.append(cr)
+        self._finish_can_routes("paired message(s) routed between the buses")
+
+    def _finish_can_routes(self, what: str):
+        """CAN -> CAN routes are planned: their target messages are not also fed from Ethernet; .vsde file."""
+        plan = self.plan
         plan.can_routes.sort(key=lambda c: (c.src.bus.name, c.dst.bus.name, c.dst.message.can_id))
         # a message fed from another CAN bus is not also fed from Ethernet (that would be N:1)
         for cr in plan.enabled_can_routes:
@@ -969,8 +1037,7 @@ class Planner:
             if cr.src.enabled:
                 cr.notes.append("also routed to Ethernet (1:N)")
         if plan.can_routes:
-            self.info(f"CAN -> CAN: {len(plan.enabled_can_routes)} of {len(plan.can_routes)} paired message(s) "
-                      f"routed between the buses.")
+            self.info(f"CAN -> CAN: {len(plan.enabled_can_routes)} of {len(plan.can_routes)} {what}.")
         self._plan_vsde()
 
     def _plan_vsde(self):
@@ -989,14 +1056,259 @@ class Planner:
             else:
                 cr.vsde = True
                 cr.notes.append(f"PduR only, no Com ({name})")
+        # a PDU routed as a whole whose signals are also signal-routed: Com keeps those signals (SOURCE-SIGNALS)
+        keep = collections.defaultdict(set)
+        for sr in plan.enabled_signal_routes:
+            keep[id(sr.src)].add(sr.src_signal.name)
+        for cr in plan.enabled_can_routes:
+            cr.keep_signals = sorted(keep.get(id(cr.src), ())) if cr.vsde else []
+            if cr.keep_signals:
+                cr.notes.append(f"Com still receives {', '.join(cr.keep_signals)} (signal routing)")
         n = sum(1 for cr in plan.enabled_can_routes if cr.vsde)
         if n:
             self.info(f"CAN -> CAN: {n} route(s) are written to {name}: add it to the input files of the DaVinci "
                       f"project next to the DBC files. DaVinci then routes them in PduR only and removes them from "
                       f"Com (no CanIf -> Com, no Com -> CanIf).")
+        sig = plan.enabled_signal_routes
+        if sig:
+            self.info(f"Signal routing: {len(sig)} signal(s) are written to {name} (COM-SIGNAL-ROUTING); DaVinci "
+                      f"makes a ComGwMapping for each. Set /Com/ComGeneral/ComSignalGateway to "
+                      f"COMPLETESIGNALPROCESSING (validation COM01009) and solve the main function / partition "
+                      f"references of Com and of the new PDUs (COM02600, COM02702, RTE01216) once.")
         if left:
             self.warn(f"CAN -> CAN routes kept in the gateway file (Com keeps them): {', '.join(left[:6])}"
                       f"{' ...' if len(left) > 6 else ''}.")
+
+    # ------------------------------------------------------------------ routing table (cfg.routing_table)
+    def _plan_table(self):
+        """CAN -> CAN routes from the routing table, and only from it: a message row becomes a PduR route (CanRoute)
+        for every destination bus, a signal row a Com signal gateway (SignalRoute). Rows of LIN / Ethernet networks
+        and of other ECUs' buses, and rows of a hardware accelerator, are only listed (plan.table_rows)."""
+        from . import routing_table as rtab
+        plan, cfg, opts = self.plan, self.cfg, self.cfg.options
+        try:
+            table = rtab.read(cfg.routing_table)
+        except Exception as exc:        # OSError / ValueError / RuntimeError, and openpyxl's own errors
+            self.err(f"Routing table {os.path.basename(cfg.routing_table)}: {exc}")
+            return
+        plan.table_file = table.path
+        for w in table.warnings:
+            self.warn(f"Routing table: {w}")
+        nets = self._table_networks(table)
+        if cfg.can_links:
+            self.info("CAN -> CAN links are not used: the CAN -> CAN routes come from the routing table.")
+        prev_can = [p for p in (self.previous.routes if self.previous else []) if p.direction == "CAN->CAN"]
+        rx, tx = collections.defaultdict(dict), collections.defaultdict(dict)   # bus -> {message: route}
+        for r in plan.routes:
+            (rx if r.direction == CAN_TO_ETH else tx)[r.bus.name][r.message.name] = r
+        seen, hw_fed = {}, []
+        for row in table.rows:
+            st = TableStatus(row)
+            plan.table_rows.append(st)
+            if row.problems:
+                st.add("problem", "; ".join(row.problems))
+                continue
+            sbp = nets.get(row.source)
+            if sbp is None:
+                st.add(*self._table_elsewhere(row.source, row.src_protocol, "source"))
+                continue
+            if row.hw and not opts.table_hw:        # the LLCE / PFE routes it: no PduR / Com route, no DBC check
+                for net in row.dests:
+                    dbp = nets.get(net)
+                    if dbp is None:
+                        st.add(*self._table_elsewhere(net, row.dst_protocol, "destination"))
+                        continue
+                    st.add("HW accelerator", f"{sbp.name}/{row.src_msg} -> {dbp.name}/{row.target_msg}: "
+                                             f"HW-Accelerator = 1 (LLCE / PFE routes it)")
+                    dst = self._table_route(tx, dbp, row.target_msg, row.dst_id, False)
+                    if not isinstance(dst, str):
+                        hw_fed.append((dst, sbp, row))
+                continue
+            src = self._table_route(rx, sbp, row.src_msg, row.src_id, True)
+            if isinstance(src, str):
+                st.add("problem", src)
+                continue
+            for net in row.dests:
+                dbp = nets.get(net)
+                if dbp is None:
+                    st.add(*self._table_elsewhere(net, row.dst_protocol, "destination"))
+                elif dbp is sbp:
+                    st.add("problem", f"{net} is the source and a destination")
+                else:
+                    dst = self._table_route(tx, dbp, row.target_msg, row.dst_id, False)
+                    if isinstance(dst, str):
+                        st.add("problem", dst)
+                    elif row.routing == rtab.MESSAGE:
+                        st.add(*self._table_message(row, src, dst, seen, prev_can))
+                    else:
+                        st.add(*self._table_signal(row, src, dst, seen))
+        self._table_conflicts()
+        for dst, sbp, row in hw_fed:        # the accelerator sends it on that bus: not also from Ethernet
+            over = dst.bus.cfg.messages.get(dst.message.name, {}) if isinstance(dst.bus.cfg.messages, dict) else {}
+            if dst.enabled and "enabled" not in over:
+                dst.enabled, dst.change = False, ""
+                dst.reason = f"routed by the HW accelerator from {sbp.name} (routing table {row.label})"
+                if dst.prev is not None:
+                    self._prev_used.discard(id(dst.prev))
+        count = collections.Counter(s for st in plan.table_rows for s, _ in st.items())
+        self.info(f"Routing table {os.path.basename(table.path)}: {len(table.rows)} row(s); for {plan.ecu_name}: "
+                  f"{len(plan.enabled_can_routes)} message route(s), {len(plan.enabled_signal_routes)} signal "
+                  f"route(s)" + "".join(f", {n} {k}" for k, n in sorted(count.items()) if k != "routed") +
+                  " (see the Routing table section of the message report).")
+        if count.get("HW accelerator"):
+            self.info(f"Routing table: {count['HW accelerator']} destination(s) of rows with HW-Accelerator = 1 are "
+                      f"left to the hardware accelerator (option 'Route HW accelerator rows too').")
+        self._finish_can_routes("message route(s) of the routing table")
+
+    def _table_networks(self, table) -> dict:
+        """Network column of the routing table -> BusPlan of this ECU: BusInput.table_network, else the column named
+        like the bus, the DBName or the DBC file (also one word of it, e.g. BusA in Vehicle_BusA_v3.dbc)."""
+        out, plan = {}, self.plan
+        for bp in plan.buses:
+            if bp.cfg.table_network:
+                net = table.network(bp.cfg.table_network)
+                if not net:
+                    self.warn(f"{bp.name}: the routing table has no network column '{bp.cfg.table_network}'.")
+            else:
+                net = _match_network(table.networks, (bp.name, bp.db.name if bp.db else "",
+                                                      os.path.splitext(os.path.basename(bp.cfg.dbc or ""))[0]))
+            if not net:
+                continue
+            if net in out:
+                self.warn(f"Routing table network {net} matches the buses {out[net].name} and {bp.name}: choose the "
+                          f"network of each bus (Edit DBC).")
+                continue
+            out[net] = bp
+        self._table_remote = {}
+        for ecu, db, _node in self._remotes:
+            net = _match_network(table.networks, (db.name, os.path.splitext(os.path.basename(db.path))[0]))
+            if net and net not in out:
+                self._table_remote[net] = ecu
+        unmatched = [bp.name for bp in plan.buses if bp not in out.values()]
+        self.info("Routing table networks: " + (", ".join(f"{n} = {bp.name}" for n, bp in out.items()) or "none") +
+                  (f"; bus(es) without a network column: {', '.join(unmatched)} (Edit DBC: Routing table network)"
+                   if unmatched else "") + ".")
+        return out
+
+    def _table_elsewhere(self, net: str, protocol: str, side: str) -> tuple[str, str]:
+        """(status, text) of a network that is not a CAN bus of this ECU."""
+        if net in self._table_remote:
+            return "other ECU", f"{net} is a bus of {self._table_remote[net]} (CAN -> ETH -> CAN follows the DBC files)"
+        hint = (net + " " + protocol).upper()
+        if "ETH" in hint:
+            return "Ethernet", f"{side} {net} is an Ethernet network (CAN <-> Ethernet follows the DBC files)"
+        if "LIN" in hint:
+            return "LIN", f"{side} {net} is a LIN network (not supported)"
+        return "not this ECU", f"{side} {net} is not a CAN bus of {self.plan.ecu_name}"
+
+    def _table_route(self, index: dict, bp: BusPlan, name: str, can_id, received: bool):
+        """Route of message *name* (else of CAN id *can_id*) the node receives / sends on bus *bp*, or why not."""
+        routes = index.get(bp.name, {})
+        r = routes.get(name)
+        if r is None and can_id is not None:
+            hits = [x for x in routes.values() if x.message.can_id == can_id]
+            r = hits[0] if len(hits) == 1 else None
+        if r is not None:
+            return r
+        node = bp.cfg.node or self.plan.ecu_name           # a channel of the DaVinci project: the ECU itself
+        dbc = os.path.basename(bp.db.path) if bp.db and bp.db.path else bp.name
+        m = next((x for x in bp.db.messages if x.name == name), None) if bp.db else None
+        if m is None and can_id is not None and bp.db:
+            m = next((x for x in bp.db.messages if x.can_id == can_id), None)
+        if m is None:
+            return f"{bp.name}: no message {name}" + (f" / 0x{can_id:X}" if can_id is not None else "") + f" in {dbc}"
+        if received and node not in m.receivers:
+            return f"{bp.name}: {node} does not receive {m.name} ({dbc})"
+        if not received and node not in m.senders:
+            return f"{bp.name}: {node} does not send {m.name} ({dbc})"
+        return f"{bp.name}: the {'received' if received else 'sent'} messages of this bus are not selected (Edit DBC)"
+
+    def _table_message(self, row, src: Route, dst: Route, seen: dict, prev_can: list):
+        key = f"{src.bus.name}/{src.message.name}->{dst.bus.name}/{dst.message.name}"
+        text = f"{src.bus.name}/{src.message.name} -> {dst.bus.name}/{dst.message.name}"
+        if key in seen:
+            return "duplicate", f"{text}: also in {seen[key].row}", None
+        cr = CanRoute(key, src, dst, f"routing table {row.label}", row=row.label)
+        if src.can_problem or dst.can_problem:
+            cr.enabled, cr.reason = False, src.can_problem or dst.can_problem
+        else:
+            self._check_can_route(cr, prev_can)
+        for r, want in ((src, row.src_msg), (dst, row.target_msg)):
+            if r.message.name != want:
+                cr.notes.append(f"{want} is {r.message.name} in the DBC (same CAN id)")
+        seen[key] = cr
+        self.plan.can_routes.append(cr)
+        return "route", text, cr
+
+    def _table_signal(self, row, src: Route, dst: Route, seen: dict):
+        from . import vsde
+        plan, name = self.plan, row.target_signal
+        text = f"{src.bus.name}/{src.message.name}.{row.signal} -> {dst.bus.name}/{dst.message.name}.{name}"
+        ss = next((s for s in src.message.signals if s.name == row.signal), None)
+        ds = next((s for s in dst.message.signals if s.name == name), None)
+        if ss is None or ds is None:
+            miss, m = (row.signal, src.message) if ss is None else (name, dst.message)
+            return "problem", f"{text}: no signal {miss} in {m.name} (DBC)", None
+        key = f"{src.bus.name}/{src.message.name}.{ss.name}->{dst.bus.name}/{dst.message.name}.{ds.name}"
+        if key in seen:
+            return "duplicate", f"{text}: also in {seen[key].row}", None
+        sr = SignalRoute(key, src, ss, dst, ds, row.label)
+        node = src.bus.cfg.node or plan.ecu_name
+        why = (src.can_problem or dst.can_problem or
+               ("" if plan.delta else "a signal route needs the DBC files imported in DaVinci (gateway-only output: "
+                                      "the .vsde file)") or vsde.signal_problem(sr) or
+               ("" if node in ss.receivers else
+                f"{node} does not receive signal {ss.name} in the DBC (the DBC converter would skip it)"))
+        if why:
+            sr.enabled, sr.reason = False, why
+        if ss.length != ds.length:
+            sr.notes.append(f"length {ss.length} -> {ds.length} bit")
+            self.warn(f"Routing table {row.label}: {ss.name} has {ss.length} bit, {ds.name} {ds.length} bit.")
+        if ss.multiplexed or ds.multiplexed:
+            sr.notes.append("multiplexed signal")
+        over = self.cfg.can_gateway.get(key, {}) if isinstance(self.cfg.can_gateway, dict) else {}
+        if "enabled" in over:
+            sr.enabled = bool(over["enabled"])
+            sr.reason = "" if sr.enabled else (sr.reason or "deselected")
+        seen[key] = sr
+        plan.signal_routes.append(sr)
+        return "route", text, sr
+
+    def _table_conflicts(self):
+        """One source per target PDU; a target signal set once; Com sends the targets of signal routes."""
+        plan = self.plan
+        fed = {}
+        for cr in plan.can_routes:
+            if not cr.enabled:
+                continue
+            first = fed.setdefault(id(cr.dst), cr)
+            if first is not cr:
+                cr.enabled, cr.reason = False, (f"{cr.dst.key} is already fed from {first.src.key} ({first.row}): "
+                                                 f"one source per PDU")
+        done = {}
+        for sr in plan.signal_routes:
+            if not sr.enabled:
+                continue
+            cr = fed.get(id(sr.dst))
+            if cr is not None:
+                sr.enabled, sr.reason = False, f"{sr.dst.key} is routed as a whole from {cr.src.key} ({cr.row})"
+                continue
+            first = done.setdefault((id(sr.dst), sr.dst_signal.name), sr)
+            if first is not sr:
+                sr.enabled, sr.reason = False, f"{sr.dst_signal.name} is already set from {first.src.key} ({first.row})"
+        warned = set()
+        for sr in plan.enabled_signal_routes:
+            t = sr.dst
+            over = t.bus.cfg.messages.get(t.message.name, {}) if isinstance(t.bus.cfg.messages, dict) else {}
+            if over.get("enabled") and t.enabled:
+                if id(t) not in warned:
+                    warned.add(id(t))
+                    self.warn(f"{t.key}: sent from Ethernet and by Com (signal routing from {sr.src.bus.name}): two "
+                              f"sources (N:1).")
+            elif t.enabled:
+                t.enabled, t.reason, t.change = False, f"Com sends it (signals routed from {sr.src.bus.name})", ""
+                if t.prev is not None:
+                    self._prev_used.discard(id(t.prev))
 
     def _plan_vsde_tx(self):
         """ETH -> CAN routes on buses of DBC files imported in DaVinci: the extension file (.vsde) tells the DBC
@@ -1760,6 +2072,19 @@ def pair_problem(src: Route, dst: Route, src_label: str = "", dst_label: str = "
     if ls and ld and {s.name for s in src.message.signals} != {s.name for s in dst.message.signals}:
         return "", ["same layout, different signal names"]
     return "", []
+
+
+def _match_network(networks: list[str], names) -> str:
+    """The network column named like one of *names* (case and _ - ignored), else the one equal to a single word of
+    them; '' when there is none or more than one."""
+    key = lambda x: re.sub(r"[^a-z0-9]", "", x.lower())
+    cols = {key(n): n for n in networks}
+    for name in names:
+        if name and key(name) in cols:
+            return cols[key(name)]
+    words = {key(w) for name in names if name for w in re.split(r"[^A-Za-z0-9]+", name) if w}
+    hits = [n for k, n in cols.items() if k in words]
+    return hits[0] if len(hits) == 1 else ""
 
 
 def _with_local(s: SocketSide, default: SocketSide) -> SocketSide:

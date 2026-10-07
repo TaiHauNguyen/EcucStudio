@@ -207,6 +207,8 @@ class TopologyPlanner:
         elif node.generate and not gc.previous and gc.output and os.path.isfile(gc.output):
             gc.previous = gc.output                 # regeneration: DaVinci keeps what does not change
         gc.options.eth_routes = not first or self.dp is not None
+        if cfg.routing_table and not gc.routing_table:        # one routing table for the whole network
+            gc.routing_table, gc.options.table_hw = cfg.routing_table, cfg.table_hw
         e = gc.ethernet
         if te.channel and not e.channel and not e.new_channel:
             e.channel = te.channel

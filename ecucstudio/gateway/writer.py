@@ -42,6 +42,7 @@ class Result:
     warnings: list[str] = field(default_factory=list)
     can_routes: list = field(default_factory=list)      # CanRoute (CAN -> CAN)
     extension: str = ""                                 # .vsde file written next to the output ('' = none)
+    signal_routes: list = field(default_factory=list)   # SignalRoute (routing table, in the .vsde file)
 
 
 def base_type_name(spec: SignalSpec) -> str:
@@ -650,19 +651,22 @@ def generate(plan: Plan, base: Base | None = None, output: str | None = None) ->
         base.xf.path = out
         base.xf.save(backup=os.path.exists(out))
     ext = write_extension(plan, out)
-    return Result(out, plan.enabled_routes, w.created, plan.warnings + w.warnings, plan.enabled_can_routes, ext)
+    return Result(out, plan.enabled_routes, w.created, plan.warnings + w.warnings, plan.enabled_can_routes, ext,
+                  plan.enabled_signal_routes)
 
 
 def write_extension(plan: Plan, out: str) -> str:
     """The .vsde file for the DBC converter ('' = none): CAN -> CAN routes DaVinci makes, CAN PDUs fed from Ethernet
-    that Com does not send. An existing one is rewritten also without routes (the project may list it)."""
+    that Com does not send, signal routes of the routing table. An existing one is rewritten also without routes (the
+    project may list it)."""
     from . import vsde
     path = vsde.path_for(out)
     routes = [cr for cr in plan.enabled_can_routes if cr.vsde]
     tx = [r for r in plan.enabled_routes if r.no_com]
-    if not routes and not tx and not os.path.isfile(path):
+    signals = plan.enabled_signal_routes
+    if not routes and not tx and not signals and not os.path.isfile(path):
         return ""
-    data = vsde.build(routes, tx)
+    data = vsde.build(routes, tx, signals)
     if os.path.isfile(path):
         with open(path, "rb") as fh:
             if fh.read() == data:

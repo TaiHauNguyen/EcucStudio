@@ -29,6 +29,23 @@ format; a routing from the PDU to itself (source = target cluster and PDU) with 
 drops the node's signals of the PDU, so Com does not send it, and creates no mapping. Checked with DaVinci 5.24: no Com
 Tx I-PDU, the Ethernet -> CanIf routing path stays, the N:1 errors are gone. The converter logs "ECU <node> does not
 receive source pdu <cluster>.<PDU>" (an error it ignores: the update finishes) when the node is named like the ECU.
+
+Signal routes of a routing table (Com signal gateway) are COM-SIGNAL-ROUTING elements:
+
+    <COM-SIGNAL-ROUTING>
+      <ECU-INSTANCE-REF>ECU</ECU-INSTANCE-REF>
+      <SOURCE-CAN-CLUSTER-REF>BusA</SOURCE-CAN-CLUSTER-REF><TARGET-CAN-CLUSTER-REF>BusB</TARGET-CAN-CLUSTER-REF>
+      <SIGNAL-MAPPINGS>
+        <SIGNAL-MAPPING>
+          <SOURCE-I-PDU-REF>MsgA</SOURCE-I-PDU-REF><SOURCE-SIGNAL-REF>SigA</SOURCE-SIGNAL-REF>
+          <TARGET-I-PDU-REF>MsgB</TARGET-I-PDU-REF><TARGET-SIGNAL-REF>SigB</TARGET-SIGNAL-REF>
+        </SIGNAL-MAPPING>
+
+Checked with DaVinci 5.24: the converter writes an I-SIGNAL-MAPPING (ST_SigA_oMsgA -> ST_SigB_oMsgB) into the GATEWAY
+of the ECU (ECU-INSTANCE-REF = the ECU, also when its nodes are named per bus), the I-SIGNAL-PORTs stay, DaVinci makes
+a ComGwMapping. The ECU must receive the source signal and send the target signal in the DBC files, else the converter
+logs "ECU X does not receive source signal ..." and skips the mapping. A PDU routed as a whole (PDUR-MESSAGE-ROUTING)
+whose signals are also signal-routed lists them in SOURCE-SIGNALS of every routing of it, so they stay in Com.
 """
 from __future__ import annotations
 
@@ -73,6 +90,20 @@ def problem(cr) -> str:
     return ""
 
 
+def signal_problem(sr) -> str:
+    """Why signal route *sr* cannot be given to the converter ('' = it can)."""
+    src, dst = dbc_cluster(sr.src.bus), dbc_cluster(sr.dst.bus)
+    if not src or not dst:
+        return "a bus is not imported from a DBC file"
+    ecu, other = converter_ecu(sr.src.bus), converter_ecu(sr.dst.bus)
+    if ecu != other:
+        return f"the gateway node is ECU {ecu} in one DBC file and {other} in the other"
+    for n in (ecu, src, dst, sr.src.message.name, sr.dst.message.name, sr.src_signal.name, sr.dst_signal.name):
+        if not _REF.match(n or ""):
+            return f"'{n}' is not a valid name for the DBC converter"
+    return ""
+
+
 def tx_problem(r) -> str:
     """Why Com cannot be kept from sending the CAN PDU of ETH -> CAN route *r* ('' = it can)."""
     cluster = dbc_cluster(r.bus)
@@ -84,9 +115,9 @@ def tx_problem(r) -> str:
     return ""
 
 
-def build(routes: list, tx: list = ()) -> bytes:
+def build(routes: list, tx: list = (), signals: list = ()) -> bytes:
     """Extension file routing *routes* (CanRoute) through PduR of their gateway ECU; Com does not send the CAN PDUs
-    of the ETH -> CAN routes *tx*."""
+    of the ETH -> CAN routes *tx*; Com routes the *signals* (SignalRoute)."""
     groups = collections.OrderedDict()
     for cr in routes:
         groups.setdefault((converter_ecu(cr.src.bus), dbc_cluster(cr.src.bus), dbc_cluster(cr.dst.bus)),
@@ -102,7 +133,10 @@ def build(routes: list, tx: list = ()) -> bytes:
     own = collections.OrderedDict()
     for r in tx:
         own.setdefault((r.bus.cfg.node, dbc_cluster(r.bus)), []).append(r)
-    if groups or own:
+    sig = collections.OrderedDict()
+    for sr in signals:
+        sig.setdefault((converter_ecu(sr.src.bus), dbc_cluster(sr.src.bus), dbc_cluster(sr.dst.bus)), []).append(sr)
+    if groups or own or sig:
         gw = sub(root, "GATEWAY-ROUTING")
         for (ecu, src, dst), crs in groups.items():
             nodes = [n for n in dict.fromkeys((crs[0].src.bus.cfg.node, crs[0].dst.bus.cfg.node)) if n != ecu]
@@ -115,6 +149,10 @@ def build(routes: list, tx: list = ()) -> bytes:
                 for cr in crs:
                     m = sub(maps, "I-PDU-MAPPING")
                     sub(m, "SOURCE-I-PDU-REF", cr.src.message.name)
+                    if getattr(cr, "keep_signals", None):     # Com keeps them: they are signal-routed
+                        keep = sub(m, "SOURCE-SIGNALS")
+                        for s in cr.keep_signals:
+                            sub(keep, "SYSTEM-SIGNAL-REF", s)
                     sub(m, "TARGET-I-PDU-REF", cr.dst.message.name)
         for (node, cluster), rs in own.items():         # PDU -> itself: the node does not send its signals
             r = sub(gw, "PDUR-MESSAGE-ROUTING")
@@ -126,6 +164,18 @@ def build(routes: list, tx: list = ()) -> bytes:
                 m = sub(maps, "I-PDU-MAPPING")
                 sub(m, "SOURCE-I-PDU-REF", x.message.name)
                 sub(m, "TARGET-I-PDU-REF", x.message.name)
+        for (ecu, src, dst), srs in sig.items():          # Com signal gateway
+            r = sub(gw, "COM-SIGNAL-ROUTING")
+            sub(r, "ECU-INSTANCE-REF", ecu)
+            sub(r, "SOURCE-CAN-CLUSTER-REF", src)
+            sub(r, "TARGET-CAN-CLUSTER-REF", dst)
+            maps = sub(r, "SIGNAL-MAPPINGS")
+            for sr in srs:
+                m = sub(maps, "SIGNAL-MAPPING")
+                sub(m, "SOURCE-I-PDU-REF", sr.src.message.name)
+                sub(m, "SOURCE-SIGNAL-REF", sr.src_signal.name)
+                sub(m, "TARGET-I-PDU-REF", sr.dst.message.name)
+                sub(m, "TARGET-SIGNAL-REF", sr.dst_signal.name)
     etree.indent(root, space="  ")
     return b'<?xml version="1.0" encoding="UTF-8"?>\n' + etree.tostring(root, encoding="UTF-8") + b"\n"
 
