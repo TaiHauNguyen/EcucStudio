@@ -150,6 +150,10 @@ class TopologyWindow:
         for text, cmd in (("New", self.new), ("Open…", self.open_dialog), ("Save", self.save),
                           ("Save As…", self.save_as)):
             ttk.Button(tb, text=text, command=cmd).pack(side="left", padx=(0, 4))
+        b_nodes = ttk.Button(tb, text="Ethernet nodes…", command=self.edit_nodes)
+        b_nodes.pack(side="left", padx=(0, 4))
+        Tooltip(b_nodes, "MAC, IPv4 and port base of the Ethernet nodes: the empty IP addresses, ports and MACs of the "
+                         "ECUs and peers are filled from this table by node name (also on Analyze)")
         ttk.Separator(tb, orient="vertical").pack(side="left", fill="y", padx=6)
         ttk.Button(tb, text="Analyze", command=self.analyze).pack(side="left", padx=(0, 4))
         b_gen = ttk.Button(tb, text="Generate", command=self.generate)
@@ -266,8 +270,27 @@ class TopologyWindow:
         self.win.title(f"{TITLE} - {name}")
 
     def new(self):
-        self.cfg = TopologyConfig(peers=[PeerNode(name="Central", ip="")], default_peer="Central")
+        self.cfg = TopologyConfig(peers=[PeerNode(name="Central", ip="")], default_peer="Central", one_socket=True)
         self._reset()
+
+    def fill_from_nodes(self) -> list[str]:
+        """Fill the empty addresses / ports / MACs from the Ethernet node table; returns info lines."""
+        from .. import nodes as nodemod
+        try:
+            done = nodemod.fill_topology(self.cfg, nodemod.load())
+        except (OSError, ValueError):
+            return []
+        return [f"Filled from Ethernet nodes: {x}" for x in done]
+
+    def edit_nodes(self):
+        from ..gui import NodesDialog
+        self.store()
+        d = NodesDialog(self.win)
+        self.win.wait_window(d)
+        if d.result is not None:
+            filled = self.fill_from_nodes()
+            self.refresh_nodes("net")
+            self.show_messages(infos=filled or ["Ethernet nodes saved (no empty field to fill)."])
 
     def _reset(self):
         self.tplan, self.bases, self._gui_bases, self._store = None, {}, {}, None
@@ -436,6 +459,13 @@ class TopologyWindow:
             ("name", cfg.name), ("vlan", _port_text(te.vlan_id)), ("channel", te.channel), ("mask", te.netmask),
             ("tx", str(cfg.tx_port)), ("rx", str(cfg.rx_port)), ("proto", te.protocol or "UDP"),
             ("dp", cfg.default_peer))}
+        v_one = tk.BooleanVar(value=cfg.one_socket)
+        e_rx = ttk.Entry(f, textvariable=v["rx"], width=8, state="disabled" if cfg.one_socket else "normal")
+        one_cb = ttk.Checkbutton(f, text="One socket per node for both directions", variable=v_one,
+                                 command=lambda: e_rx.configure(state="disabled" if v_one.get() else "normal"))
+        Tooltip(one_cb, "Every node sends and receives on one port (SA_<node>_CanGw); one socket connection per "
+                        "pair of nodes carries both directions. Off: sends from the port, receives on the receive "
+                        "port (two sockets).")
         e_ch = ttk.Entry(f, textvariable=v["channel"], width=36)
         Tooltip(e_ch, "Ethernet channel to use in bases that already have Ethernet (path, short name or VLANnn). "
                       "Empty = the channel the ECU is connected to.")
@@ -445,8 +475,9 @@ class TopologyWindow:
                        ("Netmask:", ttk.Entry(f, textvariable=v["mask"], width=16)),
                        ("Protocol:", ttk.Combobox(f, textvariable=v["proto"], values=("UDP", "TCP"), width=6,
                                                   state="readonly")),
-                       ("Port every node sends from:", ttk.Entry(f, textvariable=v["tx"], width=8)),
-                       ("Port every node receives on:", ttk.Entry(f, textvariable=v["rx"], width=8)),
+                       ("", one_cb),
+                       ("Port of every node:", ttk.Entry(f, textvariable=v["tx"], width=8)),
+                       ("Receive port (two sockets):", e_rx),
                        ("Default peer:", ttk.Combobox(f, textvariable=v["dp"], values=[""] + [p.name for p in cfg.peers],
                                                       width=20, state="readonly"))])
         o = ttk.LabelFrame(self.panel, text="ECU -> ECU routes", padding=6)
@@ -474,6 +505,7 @@ class TopologyWindow:
             te.protocol = v["proto"].get() or "UDP"
             cfg.tx_port = _int_or_none(v["tx"].get()) or 50000
             cfg.rx_port = _int_or_none(v["rx"].get()) or 50001
+            cfg.one_socket = v_one.get()
             cfg.default_peer = v["dp"].get()
             cfg.cross.also_to_default_peer = b["also"].get()
             cfg.cross.from_default_peer = b["from"].get()
@@ -485,9 +517,10 @@ class TopologyWindow:
         v_tx, v_rx = tk.StringVar(value=_port_text(node.tx_port)), tk.StringVar(value=_port_text(node.rx_port))
         ttk.Entry(pf, textvariable=v_tx, width=8).pack(side="left")
         ttk.Label(pf, text=" / ").pack(side="left")
-        ttk.Entry(pf, textvariable=v_rx, width=8).pack(side="left")
-        ttk.Label(pf, text=f"  (empty = {self.cfg.tx_port} / {self.cfg.rx_port})", foreground="#666666").pack(
+        ttk.Entry(pf, textvariable=v_rx, width=8, state="disabled" if self.cfg.one_socket else "normal").pack(
             side="left")
+        ttk.Label(pf, text=f"  (empty = {self.cfg.tx_port}" + ("; one socket: the first port only)" if
+                           self.cfg.one_socket else f" / {self.cfg.rx_port})"), foreground="#666666").pack(side="left")
         return pf, v_tx, v_rx
 
     def _panel_peer(self, p: PeerNode):
@@ -662,11 +695,14 @@ class TopologyWindow:
             self.show_messages(infos=["Add the ECUs of the network (Add ECU) and the peers (Add peer)."])
             return
         cfg = self.cfg
+        filled = self.fill_from_nodes()
+        if filled:
+            self.refresh_nodes("net")
 
         def done(tplan):
             self.tplan = tplan
             self.fill_tables()
-            self.show_messages(tplan.errors, tplan.warnings, tplan.infos)
+            self.show_messages(tplan.errors, tplan.warnings, filled + tplan.infos)
             self.status.config(text=f"{len(tplan.enabled_cross)} ECU -> ECU route(s), {len(tplan.links)} Ethernet "
                                     f"PDU(s), {len(tplan.warnings)} warning(s), {len(tplan.errors)} error(s)")
             if then and tplan.ok:

@@ -108,10 +108,14 @@ def cmd_template(a):
             dvproject.load_communication(proj), proj.ecu_path)]
         for c in channels:
             cfg.buses.append(BusInput(channel=c))
+    cfg.ethernet.one_socket = True          # new configuration: one socket for both directions
     cfg.ethernet.channel = a.channel or ""
     cfg.ethernet.vlan_id = a.vlan
     cfg.ethernet.ecu_ip = a.ecu_ip or ""
     cfg.ethernet.new_channel = bool(a.new_channel)
+    from . import nodes as nodemod
+    for x in nodemod.fill_gateway(cfg, nodemod.load()):        # Ethernet node table first
+        print("[NODES]    ", x)
     if not a.no_suggest:
         from .suggest import apply, suggest
         try:

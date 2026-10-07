@@ -61,8 +61,9 @@ Các trang:
    theo: node có trong mọi DBC → node có tên trong tên file DBC → tên kiểu gateway / zone (`GW`, `XGW_…`, `ZONE`,
    `Z1`, `ZC2` …) → node nhiều message nhất. Node đặt theo tên bus của cùng một ECU (`XGW_Body` trên bus Body,
    `XGW_Chassis` trên bus Chassis) được gộp thành ECU `XGW`; cột ECU sửa được (gõ cùng tên để gộp).
-2. **ECUs, IP addresses and network file**: IP của từng ECU (gợi ý sẵn, theo VLAN hoặc theo IP có trong project),
-   VLAN, port gửi / nhận chung, node trung tâm (tuỳ chọn, mặc định không có). Tất cả lưu trong **file mạng**
+2. **ECUs, IP addresses and network file**: IP của từng ECU (lấy từ bảng **Ethernet nodes** nếu có tên trong bảng,
+   không thì gợi ý theo VLAN hoặc theo IP có trong project), VLAN, **One socket per ECU for both directions** (mặc
+   định bật), port cho ECU không có trong bảng, node trung tâm (node của bảng không phải ECU nào được đề xuất sẵn). Tất cả lưu trong **file mạng**
    (`gateway_network.json`) dùng chung cho mọi ECU, kèm file lock giữ header ID, nên file gateway của các ECU sinh ở
    các lúc khác nhau vẫn khớp nhau.
 3. **ECU to generate the gateway file for**: chọn ECU đích; project DaVinci (tuỳ chọn; nếu project đã có file gateway
@@ -258,13 +259,22 @@ Trong mỗi khung:
 | Trường | Ý nghĩa |
 |---|---|
 | Local socket | socket có sẵn của ECU, hoặc `<create new>` |
-| new socket name / port | khi tạo mới: tên (bỏ trống = `SA_<ECU>_CanGw_Tx` / `_Rx`) và **port của ECU** |
+| new socket name / port | khi tạo mới: tên (bỏ trống = `SA_<ECU>_CanGw`, hai socket: `SA_<ECU>_CanGw_Tx` / `_Rx`) và **port của ECU** |
 | Remote socket | socket có sẵn của node bên kia, hoặc `<create new>` |
 | remote IP / port | khi tạo mới: **IP và port của node bên kia** (IP đã có trong VLAN thì dùng lại endpoint đó) |
 | remote socket name | tên socket remote mới (bỏ trống = tên mặc định) |
 | Socket connection name | tên STATIC-SOCKET-CONNECTION mới (bỏ trống = dùng connection có sẵn tới remote đó, hoặc `<local>_to_<remote>`) |
 
-Hai chiều có thể dùng chung một socket.
+**One socket for both directions** (mặc định bật cho cấu hình mới): chiều ETH -> CAN dùng chính socket và socket
+connection của chiều CAN -> ETH. Chỉ còn một khung **Socket**:
+
+- socket của ECU `SA_<ECU>_CanGw` (một port), socket của node bên kia `SA_Remote_CanGw` (hoặc `SA_<peer>_CanGw`);
+- một STATIC-SOCKET-CONNECTION cho mỗi node, chứa identifier của cả hai chiều. DaVinci tạo một socket connection
+  group: PduRoute (gửi) và SocketRoute (nhận) dùng chung socket connection;
+- header ID của hai chiều độc lập (gửi và nhận là hai bảng riêng trong SoAd).
+
+Cấu hình tạo bằng phiên bản cũ (không có khoá `ethernet.one_socket`) giữ nguyên hai socket, sinh lại không đổi file.
+Bỏ chọn ô này thì quay lại hai socket như cũ.
 
 ### 3.3 Nhiều node Ethernet (peers)
 
@@ -339,6 +349,29 @@ Ví dụ HPC gửi `HpcCmd` (CAN ID 0x12C) cho zone ECU; zone ECU gửi message 
   ID theo ECU gửi;
 - sinh lại giữ nguyên tên PDU và header ID. Bỏ chọn **ETH -> CAN 1:N** ở tab Options thì mỗi bus một PDU Ethernet
   như trước.
+
+### 3.6 Bảng Ethernet nodes (giá trị mặc định)
+
+Nút **Ethernet nodes…** (tab Ethernet của generator, thanh công cụ của cửa sổ topology, trang mạng của wizard) mở
+bảng các node của mạng: **tên, MAC, IPv4, port base**. Ví dụ:
+
+| Name | MAC address | IPv4 address | Port base |
+|---|---|---|---|
+| Central | 02:00:00:00:00:01 | 10.0.5.1 | 41100 |
+| Z1 | 02:00:00:00:00:02 | 10.0.5.2 | 41200 |
+| Z2 | 02:00:00:00:00:03 | 10.0.5.3 | 41300 |
+
+Tool điền từ bảng vào **các ô còn trống** (không ghi đè giá trị đã nhập), theo tên node:
+
+- ECU đang làm (tên ECU instance hoặc node trong DBC, kể cả node đặt theo bus như `Z1_Body`): IP, MAC (controller
+  mới), port của socket;
+- node mặc định và các peer: IP và port của node bên kia;
+- topology: IP, MAC, port của từng ECU và peer;
+- một socket: port = port base; hai socket: gửi từ port base, nhận trên port base + 1.
+
+Việc điền chạy khi bấm **Analyze**, **Suggest values**, lưu bảng, tạo topology bằng wizard, và lệnh `template`.
+Mỗi giá trị được điền có một dòng INFO "Filled from Ethernet nodes: …". Bảng lưu trong cài đặt người dùng
+(`%APPDATA%\EcucStudio\settings.json`, khoá `gateway_nodes`), không nằm trong file project.
 
 ## 4. Tab **Options & Naming** (không bắt buộc)
 
@@ -816,12 +849,15 @@ Danh sách **Network** bên trái:
   - VLAN id của kênh mới (ECU chưa có Ethernet trong base), hoặc **Existing channel** (tên / `VLANnn`) khi base
     của các ECU đã có kênh;
   - netmask, protocol;
-  - **port mọi node gửi** và **port mọi node nhận** (mặc định 50000 / 50001). Mỗi node có một socket gửi và một
-    socket nhận, mỗi đối tác là một socket connection;
+  - **One socket per node for both directions** (mặc định bật cho topology mới): mỗi node một socket
+    `SA_<node>_CanGw` ở **port của node** (port base trong bảng Ethernet nodes, không có thì port chung, mặc định
+    50000); mỗi cặp node một socket connection chở cả hai chiều. Bỏ chọn thì như cũ: **port mọi node gửi** và
+    **receive port** (50000 / 50001), một socket gửi và một socket nhận;
   - **Default peer**: node nhận các message không ECU nào cần, và gửi các message không ECU nào cấp (ví dụ máy tính
     trung tâm).
 - **Add ECU**: mỗi ECU gateway một mục:
-  - tên (dùng trong tên socket `SA_<ECU>_CanGw_Tx` / `_Rx`), IP, port riêng nếu khác;
+  - tên (dùng trong tên socket `SA_<ECU>_CanGw`, hai socket: `SA_<ECU>_CanGw_Tx` / `_Rx`), IP, port riêng nếu
+    khác (IP / port / MAC trống được điền từ bảng Ethernet nodes, mục 3.6);
   - **Network file / project**: project DaVinci `.dpa` (bus = kênh CAN của project), file network, hoặc để trống
     (chỉ có DBC: file mới, như mục 2.1). Các ECU trộn được nhiều kiểu;
   - **Output file** và **Generate**. ECU bỏ **Generate** chỉ để tham chiếu: tool vẫn đọc DBC / project của nó để biết
@@ -844,8 +880,8 @@ thì không route). Message nhiều ECU cùng nhận (N:1) không được route
 - Message ECU → ECU **không** gửi default peer nữa (bật *also sent to the default peer*, hoặc từng route trong
   Edit…). Các message còn lại ECU nhận vẫn gửi default peer như trước.
 - Hai đầu dùng chung **tên PDU Ethernet** (theo bên gửi, ví dụ `WheelSpeed_oChassis_Eth`), **header ID**, IP và
-  port: file của ZoneB có connection `SA_ZoneB_CanGw_Tx → SA_ZoneC_CanGw_Rx`, file của ZoneC có connection
-  `SA_ZoneC_CanGw_Rx ← SA_ZoneB_CanGw_Tx`, cùng identifier.
+  port: một socket thì file của ZoneB có connection `SA_ZoneB_CanGw ↔ SA_ZoneC_CanGw` và file của ZoneC có
+  `SA_ZoneC_CanGw ↔ SA_ZoneB_CanGw` (hai socket: `SA_ZoneB_CanGw_Tx → SA_ZoneC_CanGw_Rx`), cùng identifier.
 - Header ID được cấp **một lần cho cả mạng**: duy nhất trên socket gửi và trên **mọi socket nhận** (socket nhận của
   default peer nhận từ mọi ECU, nên CAN ID trùng giữa hai zone sẽ được thêm cờ), tính cả ID base các ECU đã dùng.
   Thứ tự: nhập tay → file lock → file sinh lần trước → tự động.

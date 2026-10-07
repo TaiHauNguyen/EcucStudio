@@ -90,6 +90,10 @@ class EthernetSettings:
     mac: str = ""                   # MAC-UNICAST-ADDRESS of a new controller (optional)
     protocol: str = "UDP"           # UDP | TCP (TCP: the socket connection gets TCP-ROLE)
     tcp_role: str = "CONNECT"
+    # one socket for both directions: ETH -> CAN uses the socket (and socket connection) of CAN -> ETH;
+    # eth_to_can is then not used. New configurations (GUI, wizard, template) switch it on; files of older
+    # versions (no such key) keep a socket per direction.
+    one_socket: bool = False
     can_to_eth: SocketSide = field(default_factory=SocketSide)
     eth_to_can: SocketSide = field(default_factory=SocketSide)
     id_set: str = ""                # SOCKET-CONNECTION-IPDU-IDENTIFIER-SET (path or new name; empty = auto)

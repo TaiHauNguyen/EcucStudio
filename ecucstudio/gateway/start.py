@@ -112,15 +112,18 @@ def suggest_ips(n: int, vlan: int | None = None, like: str = "", used=()) -> lis
 def topology_for_dbcs(groups: dict, folder: str, schema: str, ips: dict, generate: dict | None = None,
                       outputs: dict | None = None, vlan: int | None = None, peer: tuple[str, str] | None = None,
                       tx_port: int = 50000, rx_port: int = 50001, name: str = "", projects: dict | None = None,
-                      gateway_only: bool = False):
+                      gateway_only: bool = False, one_socket: bool = False, eth_nodes=None):
     """Several gateway ECUs -> topology: one ECU per group, optionally a central Ethernet node (*peer* = (name, ip))
     for the messages no ECU needs.
 
     An ECU of *projects* ({ECU: (dpa, [CAN channel paths])}) is read from its DaVinci project, in which its DBC files
     are imported: its output is an additional input file with only Ethernet + gateway (nothing is imported twice).
-    The other ECUs come from their DBC files: a complete new network file each (or only referenced)."""
+    The other ECUs come from their DBC files: a complete new network file each (or only referenced).
+    *one_socket*: one socket per node for both directions (port = tx_port). *eth_nodes*: Ethernet node table
+    (gateway/nodes.py) whose MAC / port base fill the nodes of the same name."""
     from .topology import EcuNode, PeerNode, TopoEthernet, TopologyConfig
-    t = TopologyConfig(name=name, ethernet=TopoEthernet(vlan_id=vlan), tx_port=tx_port, rx_port=rx_port)
+    t = TopologyConfig(name=name, ethernet=TopoEthernet(vlan_id=vlan), tx_port=tx_port, rx_port=rx_port,
+                       one_socket=one_socket)
     projects = projects or {}
     for ecu, dbcs in groups.items():
         out = (outputs or {}).get(ecu)
@@ -138,6 +141,9 @@ def topology_for_dbcs(groups: dict, folder: str, schema: str, ips: dict, generat
     if peer and peer[0]:
         t.peers.append(PeerNode(name=peer[0], ip=peer[1]))
         t.default_peer = peer[0]
+    if eth_nodes:
+        from . import nodes
+        nodes.fill_topology(t, eth_nodes)
     return t
 
 

@@ -22,8 +22,9 @@ class PeerNode:
     """Ethernet-only node (e.g. a central computer): only its address is needed, no file is generated for it."""
     name: str = ""
     ip: str = ""
-    tx_port: int | None = None      # port it sends from (empty = topology tx_port)
-    rx_port: int | None = None      # port it receives on (empty = topology rx_port)
+    tx_port: int | None = None      # port it sends from (empty = topology tx_port); one socket: its only port
+    rx_port: int | None = None      # port it receives on (empty = topology rx_port); one socket: not used
+    mac: str = ""                   # MAC address (Ethernet node table; informative for a peer)
 
 
 @dataclass
@@ -33,6 +34,7 @@ class EcuNode:
     ip: str = ""
     tx_port: int | None = None
     rx_port: int | None = None
+    mac: str = ""                   # MAC address of a new Ethernet controller of the ECU
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     # existing sockets to use for a partner: {"<node>": {"can_to_eth": {SocketSide}, "eth_to_can": {SocketSide}}}
     sockets: dict = field(default_factory=dict)
@@ -51,6 +53,9 @@ class TopologyConfig:
     ethernet: TopoEthernet = field(default_factory=TopoEthernet)
     tx_port: int = 50000            # every node sends from this port ...
     rx_port: int = 50001            # ... and receives on this one (one socket connection per partner)
+    # one socket per node for both directions (port = tx_port of the node or of the topology): one socket connection
+    # per pair of nodes carries both directions. New topologies switch it on; older files keep two sockets.
+    one_socket: bool = False
     peers: list[PeerNode] = field(default_factory=list)
     default_peer: str = ""          # node of the messages no other ECU needs / sends (empty = none)
     ecus: list[EcuNode] = field(default_factory=list)
@@ -68,8 +73,11 @@ class TopologyConfig:
         return next((n for n in self.ecus if n.name == name), None)
 
     def ports(self, node) -> tuple[int, int]:
-        return (node.tx_port if node.tx_port is not None else self.tx_port,
-                node.rx_port if node.rx_port is not None else self.rx_port)
+        """(port it sends from, port it receives on); the same port twice with one socket per node."""
+        tx = node.tx_port if node.tx_port is not None else self.tx_port
+        if self.one_socket:
+            return tx, tx
+        return tx, node.rx_port if node.rx_port is not None else self.rx_port
 
     @property
     def lock_path(self) -> str:
@@ -111,6 +119,7 @@ class TopologyConfig:
             ecus.append(node)
         cfg = cls(name=d.get("name", ""), ethernet=build(TopoEthernet, d.get("ethernet")),
                   tx_port=int(d.get("tx_port") or 50000), rx_port=int(d.get("rx_port") or 50001),
+                  one_socket=bool(d.get("one_socket", False)),
                   peers=[build(PeerNode, p) for p in d.get("peers") or []], default_peer=d.get("default_peer", ""),
                   ecus=ecus, cross=build(CrossSettings, d.get("cross")), routes=dict(d.get("routes") or {}),
                   links=list(d.get("links") or []))

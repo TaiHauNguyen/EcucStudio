@@ -1427,10 +1427,12 @@ class Planner:
         plan = self.plan
         need = {(r.direction, p) for r in plan.enabled_routes for p in r.peers}
         default_sides = self._peer_cfg[plan.default_peer]
+        one = self.cfg.ethernet.one_socket
         for peer, sides in self._peer_cfg.items():          # default peer first, then in configuration order
             for k, direction in enumerate((CAN_TO_ETH, ETH_TO_CAN)):
                 if (direction, peer) not in need:
                     continue
+                k = 0 if one else k                     # one socket: ETH -> CAN uses the CAN -> ETH settings
                 s = sides[k] if peer == plan.default_peer else _with_local(sides[k], default_sides[k])
                 sp = self._side(direction, s, peer)
                 if sp:
@@ -1439,7 +1441,13 @@ class Planner:
     def _side(self, direction: str, s: SocketSide, peer: str = "") -> SidePlan | None:
         b, plan, ch = self.base, self.plan, self._eth
         tag = "Tx" if direction == CAN_TO_ETH else "Rx"
+        one = self.cfg.ethernet.one_socket
+        # default socket names: SA_<ECU>_CanGw_Tx / _Rx, or SA_<ECU>_CanGw when both directions share one socket
+        local_sfx = "" if one else f"_{tag}"
+        remote_sfx = "" if one else ("_Rx" if tag == "Tx" else "_Tx")
         what = "CAN->ETH" if direction == CAN_TO_ETH else "ETH->CAN"
+        if one:
+            what = "Socket"
         extra = bool(peer) and peer != plan.default_peer
         if extra:
             what += f" ({peer})"
@@ -1459,7 +1467,7 @@ class Planner:
                           f"{sockets[local_path].connector.rsplit('/', 1)[-1]}.")
             local_port = sockets[local_path].port
         else:
-            name = sanitize(s.local_name or f"SA_{plan.ecu_name}_CanGw_{tag}")
+            name = sanitize(s.local_name or f"SA_{plan.ecu_name}_CanGw{local_sfx}")
             existing = f"{ch.path}/{name}"
             if existing in sockets and sockets[existing].connector:
                 local_path, local_port = existing, sockets[existing].port
@@ -1524,7 +1532,7 @@ class Planner:
             if nep_path in own:
                 self.warn(f"{what}: the remote endpoint {nep_path.rsplit('/', 1)[-1]} is an address of "
                           f"{plan.ecu_name} itself; enter the IP address of the other node.")
-            name = sanitize(s.remote_name or f"SA_{peer if extra else 'Remote'}_CanGw_{'Rx' if tag == 'Tx' else 'Tx'}")
+            name = sanitize(s.remote_name or f"SA_{peer if extra else 'Remote'}_CanGw{remote_sfx}")
             existing = f"{ch.path}/{name}"
             if existing in sockets and not sockets[existing].connector:
                 remote_path, remote_port = existing, sockets[existing].port

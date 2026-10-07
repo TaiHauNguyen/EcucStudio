@@ -371,6 +371,106 @@ class PeerPickDialog(tk.Toplevel):
         self.destroy()
 
 
+class NodesDialog(tk.Toplevel):
+    """Ethernet nodes of the vehicle network (name, MAC, IPv4, port base): default values the generator fills into
+    empty fields. Kept in the user settings, not in project files."""
+
+    COLS = ("Name", "MAC address", "IPv4 address", "Port base")
+
+    def __init__(self, master):
+        from . import nodes as nodemod
+        super().__init__(master)
+        self.title("Ethernet nodes")
+        self.transient(master)
+        self.result = None
+        self.nodemod = nodemod
+        dialog_header(self, "Ethernet nodes (default values)",
+                      "MAC address, IPv4 address and port base of every Ethernet node of the network. Empty fields "
+                      "are filled from here by node name: the IP / MAC / port of the ECU, the address and port of "
+                      "the default node and of every peer. One socket per node: the node sends and receives on its "
+                      "port base; a socket per direction: port base and port base + 1. Saved in the user settings.")
+        f = ttk.Frame(self, padding=10)
+        f.pack(fill="both", expand=True)
+        self.t = ttk.Treeview(f, columns=self.COLS, show="headings", height=8, selectmode="browse")
+        for c, w in zip(self.COLS, (140, 160, 140, 90)):
+            self.t.heading(c, text=c, anchor="w")
+            self.t.column(c, width=w, anchor="w")
+        self.t.pack(fill="both", expand=True)
+        self.t.bind("<<TreeviewSelect>>", lambda _e: self._pick())
+        ef = ttk.Frame(f)
+        ef.pack(fill="x", pady=(6, 0))
+        self.v = [tk.StringVar() for _ in self.COLS]
+        for v, w in zip(self.v, (18, 20, 16, 8)):
+            ttk.Entry(ef, textvariable=v, width=w).pack(side="left", padx=(0, 4))
+        ttk.Button(ef, text="Add / Update", command=self._put).pack(side="left", padx=(6, 0))
+        ttk.Button(ef, text="Remove", command=self._remove).pack(side="left", padx=4)
+        for n in nodemod.load():
+            self.t.insert("", "end", values=(n.name, n.mac, n.ip, "" if n.port is None else n.port))
+        bb = ttk.Frame(self, padding=(10, 0, 10, 10))
+        bb.pack(fill="x")
+        ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(bb, text="Save", command=self.ok).pack(side="right", padx=6)
+        self.grab_set()
+
+    def _pick(self):
+        sel = self.t.selection()
+        if sel:
+            for v, x in zip(self.v, self.t.item(sel[0], "values")):
+                v.set(x)
+
+    def _put(self):
+        import re
+        from .planner import _valid_ip
+        name, mac, ip, port = (v.get().strip() for v in self.v)
+        if not name:
+            messagebox.showwarning(TITLE, "Enter the node name.", parent=self)
+            return
+        if mac and not re.fullmatch(r"([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", mac):
+            messagebox.showwarning(TITLE, f"'{mac}' is not a MAC address (02:00:00:00:00:01).", parent=self)
+            return
+        if ip and not _valid_ip(ip):
+            messagebox.showwarning(TITLE, f"'{ip}' is not an IPv4 address.", parent=self)
+            return
+        if port and not (port.isdigit() and 0 < int(port) < 65535):
+            messagebox.showwarning(TITLE, f"'{port}' is not a port.", parent=self)
+            return
+        row = next((i for i in self.t.get_children() if self.t.item(i, "values")[0].lower() == name.lower()), None)
+        if row is None:
+            self.t.insert("", "end", values=(name, mac, ip, port))
+        else:
+            self.t.item(row, values=(name, mac, ip, port))
+
+    def _remove(self):
+        for i in self.t.selection():
+            self.t.delete(i)
+
+    def ok(self):
+        out = []
+        for i in self.t.get_children():
+            name, mac, ip, port = (str(x) for x in self.t.item(i, "values"))
+            out.append(self.nodemod.EthNode(name, mac, ip, int(port) if port.isdigit() else None))
+        try:
+            self.nodemod.save(out)
+        except OSError as exc:
+            messagebox.showerror(TITLE, f"Cannot save the settings:\n{exc}", parent=self)
+            return
+        self.result = out
+        self.destroy()
+
+
+def set_enabled(widget, enabled: bool):
+    """Enable / disable a frame and everything in it."""
+    for w in widget.winfo_children():
+        set_enabled(w, enabled)
+    try:
+        widget.state(["!disabled"] if enabled else ["disabled"])
+    except (AttributeError, tk.TclError):
+        try:
+            widget.configure(state="normal" if enabled else "disabled")
+        except tk.TclError:
+            pass
+
+
 class FanoutDialog(tk.Toplevel):
     """ETH -> CAN routes of one CAN id on several buses: compare their signal layouts, then forward them from one
     Ethernet PDU (1:N, also when the layout differs), give each bus its own PDU, or let the tool decide."""
@@ -453,6 +553,10 @@ class PeerDialog(tk.Toplevel):
         for frame, side in ((self.tx, peer.can_to_eth), (self.rx, peer.eth_to_can)):
             frame.fill(ch, conn)
             frame.load(side)
+        if app.v_onesock.get():                 # both directions use the CAN -> ETH socket
+            self.tx.config(text="Socket  (both directions with this node)")
+            self.rx.config(text="ETH -> CAN  (same socket)")
+            set_enabled(self.rx, False)
         bb = ttk.Frame(self, padding=(10, 0, 10, 10))
         bb.pack(fill="x")
         ttk.Button(bb, text="Cancel", command=self.destroy).pack(side="right")
@@ -777,8 +881,21 @@ class GatewayWindow:
                      state="readonly").pack(side="left", padx=4)
         ttk.Label(top, text="Header id set:").grid(row=4, column=0, sticky="w", pady=2)
         self.c_idset = Choice(top, width=62, editable=True).grid(row=4, column=1, sticky="w")
+        osf = ttk.Frame(f)
+        osf.pack(fill="x", pady=(8, 0))
+        self.v_onesock = tk.BooleanVar(value=True)
+        cb = ttk.Checkbutton(osf, text="One socket for both directions (CAN -> ETH and ETH -> CAN use the same socket "
+                                       "and socket connection)", variable=self.v_onesock,
+                             command=self._one_socket_changed)
+        cb.pack(side="left")
+        Tooltip(cb, "The ETH -> CAN PDUs are received on the socket the CAN -> ETH PDUs are sent from: one port "
+                    "per node (SA_<ECU>_CanGw), one socket connection per node pair.")
+        b_nodes = ttk.Button(osf, text="Ethernet nodes…", command=self.edit_nodes)
+        b_nodes.pack(side="right")
+        Tooltip(b_nodes, "MAC, IPv4 and port base of the Ethernet nodes: empty fields are filled from this table "
+                         "by node name (Analyze, Suggest values).")
         sides = ttk.Frame(f)
-        sides.pack(fill="x", pady=(8, 0))
+        sides.pack(fill="x", pady=(4, 0))
         self.side_tx = SideFrame(sides, "CAN -> ETH  (gateway ECU sends on Ethernet)", self)
         self.side_rx = SideFrame(sides, "ETH -> CAN  (gateway ECU receives from Ethernet)", self)
         self.side_tx.pack(side="left", fill="both", expand=True, padx=(0, 4))
@@ -1282,6 +1399,7 @@ class GatewayWindow:
 
         def run():
             cfg = self.collect()
+            filled = self.fill_from_nodes(cfg)          # the node table first, then the suggestions
             try:
                 sugg = suggest_settings(cfg, self.base)
             except Exception as exc:  # noqa: BLE001 - shown to the user
@@ -1296,7 +1414,7 @@ class GatewayWindow:
             self.v_mac.set(e.mac)
             self.channel_changed()          # refreshes connector, endpoint and both socket frames from cfg
             kept = [s for s in sugg if s not in applied]
-            self.show_messages(infos=[f"Suggested {s}" for s in applied] +
+            self.show_messages(infos=filled + [f"Suggested {s}" for s in applied] +
                                [f"Kept your value for {s.field} (suggestion: {s.value})" for s in kept]
                                or ["Nothing to suggest: all Ethernet settings are filled in."])
             self.status.config(text=f"{len(applied)} Ethernet setting(s) suggested - check them, then Analyze.")
@@ -1323,6 +1441,44 @@ class GatewayWindow:
                            if i != skip and b.dbc and b.node and not b.remote_ecu)
         return nodes.most_common(1)[0][0] if nodes else ""
 
+    # ------------------------------------------------------------------ Ethernet nodes (default values)
+    def _one_socket_changed(self):
+        one = self.v_onesock.get()
+        self.side_tx.config(text="Socket  (gateway ECU sends and receives on Ethernet)" if one else
+                            "CAN -> ETH  (gateway ECU sends on Ethernet)")
+        self.side_rx.config(text="ETH -> CAN  (same socket as CAN -> ETH)" if one else
+                            "ETH -> CAN  (gateway ECU receives from Ethernet)")
+        set_enabled(self.side_rx, not one)
+        if not one:
+            self.side_rx.refresh()
+
+    def _show_eth_fields(self):
+        e = self.cfg.ethernet
+        self.v_ecuip.set(e.ecu_ip)
+        self.v_mac.set(e.mac)
+        self.side_tx.load(e.can_to_eth)
+        self.side_rx.load(e.eth_to_can)
+        self._one_socket_changed()
+        self.refresh_peers()
+
+    def fill_from_nodes(self, cfg: GatewayConfig) -> list[str]:
+        """Fill the empty Ethernet fields from the Ethernet node table; returns info lines."""
+        from . import nodes as nodemod
+        try:
+            done = nodemod.fill_gateway(cfg, nodemod.load())
+        except (OSError, ValueError):
+            return []
+        if done:
+            self._show_eth_fields()
+        return [f"Filled from Ethernet nodes: {x}" for x in done]
+
+    def edit_nodes(self):
+        d = NodesDialog(self.win)
+        self.win.wait_window(d)
+        if d.result is not None:
+            filled = self.fill_from_nodes(self.collect())
+            self.show_messages(infos=filled or ["Ethernet nodes saved (no empty field to fill)."])
+
     def ensure_peer(self, name: str):
         """A bus of another ECU needs that ECU as Ethernet peer (its IP address and ports, same VLAN)."""
         if name in self.peer_names():
@@ -1339,8 +1495,15 @@ class GatewayWindow:
                 return s.remote_port
             ch = self.channel()
             return next((x.port for x in (ch.sockets if ch else []) if x.path == s.remote_socket), None)
-        new = EthPeer(name=name, can_to_eth=SocketSide(remote_port=port(e.can_to_eth)),
-                      eth_to_can=SocketSide(remote_port=port(e.eth_to_can)))
+        from . import nodes as nodemod
+        node = nodemod.find(nodemod.load(), name)
+        if node is not None:                    # its address and port base from the Ethernet node table
+            tx, rx = nodemod.ports(node, e.one_socket)
+            new = EthPeer(name=name, can_to_eth=SocketSide(remote_ip=node.ip, remote_port=rx),
+                          eth_to_can=SocketSide(remote_ip=node.ip, remote_port=tx))
+        else:
+            new = EthPeer(name=name, can_to_eth=SocketSide(remote_port=port(e.can_to_eth)),
+                          eth_to_can=SocketSide(remote_port=port(e.eth_to_can)))
         d = PeerDialog(self.win, self, new, taken=self.peer_names())
         self.win.wait_window(d)
         if d.result is not None:
@@ -1408,6 +1571,7 @@ class GatewayWindow:
         self.side_tx.store(e.can_to_eth)
         self.side_rx.store(e.eth_to_can)
         e.default_peer = self.v_defpeer.get().strip()
+        e.one_socket = self.v_onesock.get()
         e.collection = PduCollection(
             enabled=self.v_col_on.get(), timeout_ms=_float_or(self.v_col_timeout.get(), 5),
             buffer=_int_or_none(self.v_col_buffer.get()) or 1400, mode=self.v_col_mode.get(),
@@ -1440,6 +1604,8 @@ class GatewayWindow:
         self.v_mac.set(c.ethernet.mac)
         self.v_role.set(c.ethernet.tcp_role or "CONNECT")
         self.v_defpeer.set(c.ethernet.default_peer)
+        self.v_onesock.set(c.ethernet.one_socket)
+        self._one_socket_changed()
         col = c.ethernet.collection
         self.v_col_on.set(col.enabled)
         self.v_col_timeout.set(f"{col.timeout_ms:g}")
@@ -1467,6 +1633,7 @@ class GatewayWindow:
 
     def new_config(self):
         self.cfg, self.cfg_path, self.plan = GatewayConfig(), None, None
+        self.cfg.ethernet.one_socket = True         # new configuration: one socket for both directions
         self.show_config()
         self.fill_routes()
 
@@ -1522,12 +1689,13 @@ class GatewayWindow:
 
         def run_plan():
             cfg = self.collect()        # now the widgets show the loaded base and the configuration
+            filled = self.fill_from_nodes(cfg)
 
             def done(plan):
                 self.plan = plan
                 self._done_text = ""
                 self.fill_routes()
-                self.show_messages(plan.errors, plan.warnings, plan.infos)
+                self.show_messages(plan.errors, plan.warnings, filled + plan.infos)
                 n = report.count_text(len(plan.enabled_routes), len(plan.enabled_can_routes))
                 self.status.config(text=f"{n}, {len(plan.warnings)} warning(s), {len(plan.errors)} error(s)")
                 if then and plan.ok:
@@ -1647,6 +1815,8 @@ class GatewayWindow:
     def apply_start(self, cfg: GatewayConfig, case: str, notes=()):
         self.cfg, self.cfg_path, self.plan, self._done_text = cfg, None, None, ""
         regen = case == "update"
+        if not regen:
+            cfg.ethernet.one_socket = True          # new gateway: one socket for both directions
         name = os.path.basename(cfg.output) if cfg.output else "new"
         self.win.title(f"{TITLE} - {name}" + (" (regenerate)" if regen else ""))
         self.fill_routes()
@@ -1661,7 +1831,11 @@ class GatewayWindow:
         # after an analysis only the directions that really use the default node need its sockets
         used = ({r.direction for r in p.enabled_routes if p.default_peer in r.peers} if p is not None and not p.errors
                 else {"CAN->ETH", "ETH->CAN"})
-        for label, s in (("CAN -> ETH", c.ethernet.can_to_eth), ("ETH -> CAN", c.ethernet.eth_to_can)):
+        sides = (("CAN -> ETH", c.ethernet.can_to_eth), ("ETH -> CAN", c.ethernet.eth_to_can))
+        if c.ethernet.one_socket:                   # one socket: the CAN -> ETH settings serve both directions
+            sides = (("CAN -> ETH", c.ethernet.can_to_eth),) if used else ()
+            used = {"CAN->ETH"}
+        for label, s in sides:
             if label.replace(" ", "") not in used:
                 continue
             if not s.local_socket and s.local_port is None:

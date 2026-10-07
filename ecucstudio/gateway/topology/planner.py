@@ -184,11 +184,13 @@ class TopologyPlanner:
         p_tx, p_rx = self.cfg.ports(partner)
         over = node.sockets.get(partner.name) or {}
         nep = self._endpoint_name(partner)
+        rx_name, tx_name = (f"SA_{partner.name}_CanGw",) * 2 if self.cfg.one_socket else \
+            (f"SA_{partner.name}_CanGw_Rx", f"SA_{partner.name}_CanGw_Tx")
         to = (socket_side(over["can_to_eth"]) if over.get("can_to_eth") else
-              SocketSide(remote_ip=partner.ip.strip(), remote_port=p_rx, remote_name=f"SA_{partner.name}_CanGw_Rx",
+              SocketSide(remote_ip=partner.ip.strip(), remote_port=p_rx, remote_name=rx_name,
                          remote_endpoint_name=nep, remote_netmask=self.cfg.ethernet.netmask))
         frm = (socket_side(over["eth_to_can"]) if over.get("eth_to_can") else
-               SocketSide(remote_ip=partner.ip.strip(), remote_port=p_tx, remote_name=f"SA_{partner.name}_CanGw_Tx",
+               SocketSide(remote_ip=partner.ip.strip(), remote_port=p_tx, remote_name=tx_name,
                           remote_endpoint_name=nep, remote_netmask=self.cfg.ethernet.netmask))
         return to, frm
 
@@ -211,6 +213,8 @@ class TopologyPlanner:
         if e.vlan_id is None and te.vlan_id is not None:
             e.vlan_id = te.vlan_id
         e.ecu_ip = e.ecu_ip or node.ip.strip()
+        e.mac = e.mac or (node.mac or "").strip()
+        e.one_socket = cfg.one_socket
         e.ecu_netmask = te.netmask or e.ecu_netmask
         e.protocol = te.protocol or e.protocol
         tx, rx = cfg.ports(node)
@@ -224,11 +228,11 @@ class TopologyPlanner:
             to.local_port = tx
         if not frm.local_socket and frm.local_port is None:
             frm.local_port = rx
-        # the partners know these sockets by the node name (SA_<node>_CanGw_Rx): same name in every file
+        # the partners know these sockets by the node name (SA_<node>_CanGw[_Rx]): same name in every file
         if not to.local_socket and not to.local_name:
-            to.local_name = f"SA_{node.name}_CanGw_Tx"
+            to.local_name = f"SA_{node.name}_CanGw" if cfg.one_socket else f"SA_{node.name}_CanGw_Tx"
         if not frm.local_socket and not frm.local_name:
-            frm.local_name = f"SA_{node.name}_CanGw_Rx"
+            frm.local_name = f"SA_{node.name}_CanGw" if cfg.one_socket else f"SA_{node.name}_CanGw_Rx"
         e.can_to_eth, e.eth_to_can = to, frm
         e.peers = [EthPeer(o.name, *self._sides_to(node, o)) for o in [*cfg.ecus, *cfg.peers]
                    if o is not node and o is not self.dp]

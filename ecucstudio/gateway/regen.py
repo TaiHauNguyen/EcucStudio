@@ -315,18 +315,23 @@ def _reconstruct(path: str, m: GatewayModel) -> GatewayConfig:
         ctrl = b.ref(conn_el, "COMM-CONTROLLER-REF") if conn_el is not None else ""
         if ctrl and is_owned(ctrl) and b.el(ctrl) is not None:
             e.mac = (b.el(ctrl).findtext(".//" + q("MAC-UNICAST-ADDRESS")) or "").strip()
-    # ---- sockets of both directions
+    # ---- sockets of both directions (one socket when both use the same socket connection)
+    e.one_socket = False
+    conns = {}
     for direction, side in (("CAN->ETH", e.can_to_eth), ("ETH->CAN", e.eth_to_can)):
         ids = [h for r in eth_routes if (r.eth is r.dst) == (direction == "CAN->ETH") for h in r.eth.ids]
         conn_path = next((c for h in ids for c in h.connections), "")
         if not conn_path:
             continue
+        conns[direction] = conn_path
         _side_from_connection(b, conn_path, side, is_owned)
         if not e.id_set:
             id_set = ids[0].path.rsplit("/", 1)[0]
             e.id_set = id_set.rsplit("/", 1)[-1] if is_owned(id_set) else id_set
         if b.el(conn_path).getparent().getparent().find(".//" + q("TCP-TP")) is not None:
             e.protocol = "TCP"
+    if len(conns) == 2 and conns["CAN->ETH"] == conns["ETH->CAN"]:
+        e.one_socket = True
     # ---- CAN buses: one per CAN channel of the routes
     from .config import BusInput
     channels = []

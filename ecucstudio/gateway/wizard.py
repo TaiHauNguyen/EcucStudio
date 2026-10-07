@@ -472,22 +472,35 @@ class StartWizard(tk.Toplevel):
                     "is saved in the network file and used for every ECU, so their gateway files match.")
         st = self.s.setdefault("net", {})
         first_dbc = self.s["dbcs"][0]["path"]
+        from . import nodes as nodemod
+        table = self._eth_nodes()
         v = {k: st.setdefault(k, tk.StringVar(value=x)) for k, x in (
             ("vlan", ""), ("tx", "50000"), ("rx", "50001"), ("pname", "Central"), ("pip", ""))}
+        v_one = st.setdefault("one", tk.BooleanVar(value=True))
         if not self.s.setdefault("netfile", tk.StringVar()).get():
             self.s["netfile"].set(os.path.join(os.path.dirname(first_dbc), "gateway_network.json"))
-        v_peer = st.setdefault("peer", tk.BooleanVar(value=False))
+        # central node: a node of the Ethernet node table that is not one of the ECUs (only proposed once)
+        central = next((n for n in table if n.ip and not any(nodemod.find([n], e) for e in groups)), None)
+        v_peer = st.setdefault("peer", tk.BooleanVar(value=central is not None))
+        if central is not None and not st.get("central_done"):
+            v["pname"].set(central.name)
+            v["pip"].set(central.ip)
+            st["central_done"] = True
         ecus = st.setdefault("ecus", {})
         known = [x["ip"].get() for x in ecus.values() if x["ip"].get()]
+        known += [n.ip for n in table if n.ip]
         free = iter(start.suggest_ips(len(groups), _int(v["vlan"].get()), known[0] if known else "", known))
         suggested = st.setdefault("suggested", set())
         for e in groups:
+            node = nodemod.find(table, e)
             if e not in ecus:
-                ecus[e] = {"ip": tk.StringVar(value=next(free, ""))}
-                suggested.add(ecus[e]["ip"].get())
+                ecus[e] = {"ip": tk.StringVar(value=node.ip if node is not None and node.ip else next(free, ""))}
+                if node is None or not node.ip:
+                    suggested.add(ecus[e]["ip"].get())
             elif not ecus[e]["ip"].get():
-                ecus[e]["ip"].set(next(free, ""))
-                suggested.add(ecus[e]["ip"].get())
+                ecus[e]["ip"].set(node.ip if node is not None and node.ip else next(free, ""))
+                if node is None or not node.ip:
+                    suggested.add(ecus[e]["ip"].get())
 
         def vlan_changed(*_a):
             # suggested addresses follow the VLAN (192.168.<VLAN>.x); typed ones stay
@@ -506,23 +519,41 @@ class StartWizard(tk.Toplevel):
         box = ttk.LabelFrame(f, text="ECUs (from the gateway nodes of the DBC files)", padding=6)
         box.pack(fill="both", expand=True)
         inner = self._scroll_area(box, height=140)
-        for c, text in enumerate(("ECU", "CAN buses", "IP address")):
+        for c, text in enumerate(("ECU", "CAN buses", "IP address", "Ethernet node table")):
             ttk.Label(inner, text=text, font=("Segoe UI", 9, "bold")).grid(row=0, column=c, sticky="w", padx=4)
         for r, (e, dbcs) in enumerate(groups.items(), start=1):
             ttk.Label(inner, text=e).grid(row=r, column=0, sticky="w", padx=4)
-            ttk.Label(inner, text=", ".join(self._bus_of(p) for p, _n in dbcs), wraplength=520,
+            ttk.Label(inner, text=", ".join(self._bus_of(p) for p, _n in dbcs), wraplength=460,
                       justify="left").grid(row=r, column=1, sticky="w", padx=4)
             ttk.Entry(inner, textvariable=ecus[e]["ip"], width=16).grid(row=r, column=2, sticky="w", padx=4, pady=1)
+            node = nodemod.find(table, e)
+            ttk.Label(inner, text=(f"{node.name}: MAC {node.mac or '-'}, port base {node.port or '-'}"
+                                   if node is not None else "-"), foreground="#555555").grid(
+                row=r, column=3, sticky="w", padx=4)
         net = ttk.LabelFrame(f, text="Ethernet", padding=6)
         net.pack(fill="x", pady=(8, 0))
         pf = ttk.Frame(net)
         pf.pack(fill="x")
         ttk.Label(pf, text="VLAN id:").pack(side="left")
         ttk.Entry(pf, textvariable=v["vlan"], width=6).pack(side="left", padx=4)
-        ttk.Label(pf, text="(empty = untagged)    every ECU sends from port").pack(side="left")
-        ttk.Entry(pf, textvariable=v["tx"], width=7).pack(side="left", padx=4)
-        ttk.Label(pf, text="and receives on").pack(side="left")
-        ttk.Entry(pf, textvariable=v["rx"], width=7).pack(side="left", padx=4)
+        ttk.Label(pf, text="(empty = untagged)").pack(side="left")
+        ttk.Button(pf, text="Ethernet nodes…", command=self._edit_eth_nodes).pack(side="right")
+        sf = ttk.Frame(net)
+        sf.pack(fill="x", pady=(4, 0))
+        e_rx = None
+
+        def one_changed():
+            if e_rx is not None:
+                e_rx.configure(state="disabled" if v_one.get() else "normal")
+        ttk.Checkbutton(sf, text="One socket per ECU for both directions", variable=v_one,
+                        command=one_changed).pack(side="left")
+        ttk.Label(sf, text="    ECUs not in the node table: port").pack(side="left")
+        ttk.Entry(sf, textvariable=v["tx"], width=7).pack(side="left", padx=4)
+        ttk.Label(sf, text="(two sockets: sends from it, receives on").pack(side="left")
+        e_rx = ttk.Entry(sf, textvariable=v["rx"], width=7)
+        e_rx.pack(side="left", padx=4)
+        ttk.Label(sf, text=")").pack(side="left")
+        one_changed()
         cf = ttk.Frame(net)
         cf.pack(fill="x", pady=(4, 0))
         ttk.Checkbutton(cf, text="Also a central Ethernet node for the messages no ECU needs:", variable=v_peer).pack(
@@ -554,6 +585,25 @@ class StartWizard(tk.Toplevel):
                 return False
             return True
         self.leave = leave
+
+    def _eth_nodes(self):
+        from . import nodes as nodemod
+        try:
+            return nodemod.load()
+        except (OSError, ValueError):
+            return []
+
+    def _edit_eth_nodes(self):
+        from .gui import NodesDialog
+        d = NodesDialog(self)
+        self.wait_window(d)
+        if d.result is not None:
+            st = self.s.get("net", {})
+            for x in st.get("ecus", {}).values():      # suggested addresses give way to the table
+                if x["ip"].get() in st.get("suggested", set()):
+                    x["ip"].set("")
+            st.pop("central_done", None)
+            self._show()
 
     def _save_json(self, var):
         p = filedialog.asksaveasfilename(parent=self, title="Network file", defaultextension=".json",
@@ -727,7 +777,8 @@ class StartWizard(tk.Toplevel):
             {target: x["out"].get().strip()}, _int(st["vlan"].get()),
             (st["pname"].get().strip(), st["pip"].get().strip()) if st["peer"].get() else None,
             _int(st["tx"].get()) or 50000, _int(st["rx"].get()) or 50001, os.path.splitext(os.path.basename(path))[0],
-            projects=projects, gateway_only=True)
+            projects=projects, gateway_only=True, one_socket=st["one"].get() if "one" in st else True,
+            eth_nodes=self._eth_nodes())
         node = t.ecu(target)
         node.gateway.previous = x["prev"].get().strip()
         if not x["proj"].get():
