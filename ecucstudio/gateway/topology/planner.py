@@ -1,8 +1,10 @@
 """Plan every ECU of a topology together.
 
 1. Each ECU is planned alone (its CAN messages, CAN -> CAN pairs, everything to / from the default peer).
-2. Messages one ECU receives are paired with messages another ECU sends (same rules as CAN -> CAN: name, name
-   without gateway prefix, CAN id + length; length / signal layout checked; N:1 needs a link).
+2. Messages one ECU receives are paired with messages another ECU sends. With a routing table: only its rows whose
+   source bus belongs to one ECU and a destination bus to another (message rows; a signal row only sends the message
+   to the other ECU). Without: same rules as CAN -> CAN (name, name without gateway prefix, CAN id + length; length /
+   signal layout checked; N:1 needs a link).
 3. Each ECU is planned again with the result: the sender sends the PDU to the other ECU (eth_peers), the receiver
    takes it from the sender (eth_peer) under the sender's Ethernet PDU name.
 4. Header ids are assigned once for the whole network: unique on the sending socket and on every receiving socket
@@ -82,6 +84,8 @@ class TopologyPlanner:
         self.plan = TopologyPlan(cfg)
         self.lock = cfg.load_lock()
         self.dp = None                                      # default peer node
+        self._marks = []            # routing table rows between ECUs: (ecu, row, network, status, text, route)
+        self._signal_sends = []     # (ecu, CAN -> ETH route, other ECU): signal row between ECUs, message only
 
     def err(self, msg):
         self.plan.errors.append(msg)
@@ -117,6 +121,7 @@ class TopologyPlanner:
             second[node.name] = pl
         self.plan.plans = {n: pl.plan for n, pl in second.items()}
         self._rebind(second)
+        self._table_status(second)
         if not any(pl.plan.errors for pl in second.values()):
             self._check_addresses(second)
             self._assign_headers(second)
@@ -130,8 +135,12 @@ class TopologyPlanner:
                     getattr(self, kind)(f"[{name}] {m}")
         n_on = len(self.plan.enabled_cross)
         if self.plan.cross:
-            self.info(f"ECU -> ECU: {n_on} of {len(self.plan.cross)} paired message(s) routed directly over "
-                      f"Ethernet.")
+            how = "routing table message(s)" if self.cfg.routing_table else "paired message(s)"
+            self.info(f"ECU -> ECU: {n_on} of {len(self.plan.cross)} {how} routed directly over Ethernet.")
+        if self._signal_sends:
+            self.warn(f"ECU -> ECU: {len(self._signal_sends)} routing table signal row(s) between ECUs: the source ECU "
+                      f"sends the whole message to the other ECU; the signal gateway there (Ethernet PDU -> CAN "
+                      f"signal) is not generated yet (Routing table section of the report).")
         return self.plan
 
     # ------------------------------------------------------------------ checks
@@ -271,6 +280,120 @@ class TopologyPlanner:
         return not r.reason.startswith(("sent by Com", "already routed"))
 
     def _pair(self, first: dict):
+        if self.cfg.routing_table:
+            self._pair_table(first)
+        else:
+            self._pair_names(first)
+
+    def _pair_table(self, first: dict):
+        """ECU -> ECU routes of the routing table: rows whose source bus belongs to one ECU and a destination bus to
+        another. A message row is a PDU routed over Ethernet (the destination ECU sends it on its bus); a signal row
+        makes the source ECU send the message to the other ECU (its signal gateway is not generated)."""
+        from .. import routing_table as rtab
+        cfg, plan = self.cfg, self.plan
+        try:
+            table = rtab.read(cfg.routing_table)
+        except Exception:  # noqa: BLE001 - every ECU reports the unreadable table
+            return
+        owner = {}                                          # network -> (ECU, bus)
+        for ecu, pl in first.items():
+            for net, bus in pl.plan.table_nets.items():
+                if net in owner and owner[net][0] != ecu:
+                    self.warn(f"Routing table network {net} is a bus of {owner[net][0]} and of {ecu}; using "
+                              f"{owner[net][0]}.")
+                owner.setdefault(net, (ecu, bus))
+        index, fed = {}, {}
+        for ecu, pl in first.items():
+            fed[ecu] = {id(cr.dst) for cr in pl.plan.enabled_can_routes}
+            for r in pl.plan.routes:
+                index.setdefault((ecu, r.bus.name, r.direction), {})[r.message.name] = r
+
+        def find(ecu, bus, direction, name, can_id):
+            routes = index.get((ecu, bus, direction), {})
+            r = routes.get(name)
+            if r is None and can_id is not None:
+                hits = [x for x in routes.values() if x.message.can_id == can_id]
+                r = hits[0] if len(hits) == 1 else None
+            return r
+        taken, seen, sends = {}, set(), set()
+        for row in table.rows:
+            if row.problems or row.source not in owner:
+                continue
+            a, sbus = owner[row.source]
+            for net in row.dests:
+                if net not in owner or owner[net][0] == a:
+                    continue                        # not a bus of an ECU, or inside one ECU (CAN -> CAN of it)
+                b, dbus = owner[net]
+                what = (f"{row.src_msg}.{row.signal} -> {row.target_msg}.{row.target_signal}"
+                        if row.routing == rtab.SIGNAL else
+                        row.src_msg if row.target_msg == row.src_msg else f"{row.src_msg} -> {row.target_msg}")
+                text = f"{a}/{sbus} -> {b}/{dbus}: {what}"
+                if row.hw and not cfg.table_hw:
+                    self._mark(a, b, row, net, "HW accelerator", f"{text} (HW-Accelerator = 1, LLCE / PFE routes it)")
+                    continue
+                src = find(a, sbus, CAN_TO_ETH, row.src_msg, row.src_id)
+                if src is None or src.can_problem:
+                    why = src.can_problem if src is not None else f"{a} does not receive {row.src_msg} on {sbus} (DBC)"
+                    self._mark(a, b, row, net, "problem", f"{text}: {why}")
+                    continue
+                if row.routing == rtab.SIGNAL:
+                    if (a, id(src), b) not in sends:
+                        sends.add((a, id(src), b))
+                        self._signal_sends.append((a, src, b))
+                    self._mark(a, b, row, net, "not supported",
+                               f"{text}: {a} sends {src.message.name} to {b} over Ethernet; the signal gateway in {b} "
+                               f"(Ethernet PDU -> CAN) is not generated yet")
+                    continue
+                dst = find(b, dbus, ETH_TO_CAN, row.target_msg, row.dst_id)
+                if dst is None:
+                    self._mark(a, b, row, net, "problem", f"{text}: {b} does not send {row.target_msg} on {dbus} (DBC)")
+                    continue
+                key = f"{a}/{src.key} -> {b}/{dst.key}"
+                if key in seen:
+                    self._mark(a, b, row, net, "duplicate", f"{text}: also an earlier row")
+                    continue
+                seen.add(key)
+                cr = CrossRoute(key, a, src, b, dst, f"routing table {row.label}")
+                reason, notes = pair_problem(src, dst, f"{a}/{src.bus.name}", f"{b}/{dst.bus.name}")
+                cr.notes += notes
+                first_cr = taken.get((b, id(dst)))
+                if dst.can_problem:
+                    reason = dst.can_problem
+                elif id(dst) in fed[b]:
+                    reason = f"{b}/{dst.key} is fed from another bus of {b} (CAN -> CAN)"
+                elif first_cr is not None:
+                    reason = f"{b}/{dst.key} is already fed from {first_cr.src_ecu}/{first_cr.src.key}: one source"
+                if reason:
+                    cr.enabled, cr.reason = False, reason
+                over = cfg.routes.get(cr.key, {}) if isinstance(cfg.routes, dict) else {}
+                if "enabled" in over:
+                    cr.enabled = bool(over["enabled"])
+                    cr.reason = "" if cr.enabled else (cr.reason or "deselected")
+                if cr.enabled:
+                    taken.setdefault((b, id(dst)), cr)
+                plan.cross.append(cr)
+                self._mark(a, b, row, net, "route", text, cr)
+        order = {n.name: i for i, n in enumerate(cfg.ecus)}
+        plan.cross.sort(key=lambda c: (order[c.src_ecu], c.src.bus.name, c.src.message.can_id, order[c.dst_ecu]))
+
+    def _mark(self, a, b, row, net, status, text, route=None):
+        """Status of a routing table row between ECUs, for the row in both ECUs' plans."""
+        self._marks.append((a, row.row, net, status, text, route))
+        self._marks.append((b, row.row, row.source, status, text, route))
+
+    def _table_status(self, second: dict):
+        """Rows between ECUs: their outcome in each ECU's table status (the ECUs alone only see one end)."""
+        if not self._marks:
+            return
+        marks = collections.defaultdict(lambda: collections.defaultdict(list))
+        for ecu, rownum, net, status, text, route in self._marks:
+            marks[(ecu, rownum)][net].append((status, text, route))
+        for ecu, pl in second.items():
+            for st in pl.plan.table_rows:
+                for net, items in marks.get((ecu, st.row.row), {}).items():
+                    st.replace(net, items)
+
+    def _pair_names(self, first: dict):
         cfg, plan = self.cfg, self.plan
         rx, tx = [], []
         for ecu, pl in first.items():
@@ -343,10 +466,19 @@ class TopologyPlanner:
             i = next(k for k, b in enumerate(buses) if b is r.bus.cfg)
             return ov[ecu][i].setdefault(r.message.name, {})
         dests, also = collections.defaultdict(list), {}
-        sources = {}
+        sources, src_of = {}, {}
+        for ecu, r, other in self._signal_sends:       # signal row between ECUs: the message goes to the other ECU
+            k = (ecu, id(r))
+            src_of[k] = r
+            if other not in dests[k]:
+                dests[k].append(other)
+            if cfg.cross.also_to_default_peer:
+                also[k] = True
         for cr in self.plan.enabled_cross:
             k = (cr.src_ecu, id(cr.src))
-            dests[k].append(cr.dst_ecu)
+            src_of[k] = cr.src
+            if cr.dst_ecu not in dests[k]:
+                dests[k].append(cr.dst_ecu)
             over = cfg.routes.get(cr.key, {}) if isinstance(cfg.routes, dict) else {}
             if over.get("also_to_default_peer", cfg.cross.also_to_default_peer):
                 also[k] = True
@@ -360,8 +492,7 @@ class TopologyPlanner:
             o["eth_peer"], o["eth_pdu"] = cr.src_ecu, name
             sources[(cr.dst_ecu, id(cr.dst))] = cr.src_ecu
         for (s, _rid), ds in dests.items():
-            src = next(c.src for c in self.plan.enabled_cross if c.src_ecu == s and id(c.src) == _rid)
-            slot(s, src)["eth_peers"] = ds + ([dp.name] if dp is not None and also.get((s, _rid)) else [])
+            slot(s, src_of[(s, _rid)])["eth_peers"] = ds + ([dp.name] if dp is not None and also.get((s, _rid)) else [])
         # messages without a partner ECU: default peer, or not routed
         n_to = {(c.dst_ecu, id(c.dst)): c for c in self.plan.cross}
         for ecu, pl in first.items():

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -398,12 +399,24 @@ def cmd_capl(a):
 
 
 def cmd_gui(a):
+    """Main window (zonal network file); --classic or a one-ECU configuration: the generator window."""
     from ..__main__ import run_window
+    classic = a.classic
+    if a.config and not classic:
+        try:
+            with open(a.config, encoding="utf-8-sig") as fh:
+                classic = "ecus" not in json.load(fh)
+        except (OSError, ValueError):
+            classic = False
 
     def start():
-        from .gui import main as gui_main
-        gui_main(a.config)
-    return run_window(f"gateway generator config={a.config or '-'}", start)
+        if classic:
+            from .gui import main as gui_main
+            gui_main(a.config)
+        else:
+            from .app import main as app_main
+            app_main(a.config)
+    return run_window(f"gateway {'generator' if classic else 'main window'} config={a.config or '-'}", start)
 
 
 def main(argv=None):
@@ -443,8 +456,9 @@ def main(argv=None):
     p.add_argument("-o", "--output")
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(fn=cmd_generate)
-    p = sub.add_parser("gui")
+    p = sub.add_parser("gui", help="main window (network file), or --classic: generator for one ECU")
     p.add_argument("config", nargs="?")
+    p.add_argument("--classic", action="store_true", help="generator window for one ECU (gateway.json)")
     p.set_defaults(fn=cmd_gui)
     p = sub.add_parser("reopen", help="configuration of a generated gateway file, to change and regenerate it")
     p.add_argument("file")

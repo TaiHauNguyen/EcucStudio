@@ -2,7 +2,8 @@
 rem ---------------------------------------------------------------------------
 rem EcucStudio launcher.   Usage:
 rem   run.bat [project.dpa]               EcucStudio
-rem   run.bat gateway [gateway.json]      CAN gateway generator (CAN-Ethernet, CAN-CAN)
+rem   run.bat gateway [network.json]      CAN gateway main window (zonal network, routing table);
+rem                                       a gateway.json of one ECU opens the generator window
 rem   run.bat editor [network.arxml]      CAN-Ethernet gateway editor
 rem   run.bat topology [topology.json]    CAN gateway topology (several ECUs)
 rem   run.bat debug [gateway^|editor^|topology] ... the same, but in this window: every message is shown here

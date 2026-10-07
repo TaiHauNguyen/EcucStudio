@@ -109,6 +109,7 @@ class App(tk.Tk):
         p.add_command(label="Project Settings…", image=ic.settings, compound="left", command=self.settings_dialog)
         mb.add_cascade(label="Project", menu=p)
         t = tk.Menu(mb, tearoff=False)
+        t.add_command(label="CAN Gateway (zonal network, routing table)…", command=self.gateway_main)
         t.add_command(label="CAN Gateway Generator (CAN-Ethernet, CAN-CAN)…", command=self.gateway_generator)
         t.add_command(label="CAN Gateway Topology (several ECUs)…", command=self.gateway_topology)
         t.add_command(label="CAN-Ethernet Gateway Editor…", command=self.gateway_editor)
@@ -126,6 +127,11 @@ class App(tk.Tk):
         self.recent_menu.delete(0, "end")
         for pth in self.cfg.get("recent", []):
             self.recent_menu.add_command(label=pth, command=lambda p=pth: self.open_project(p))
+
+    def gateway_main(self):
+        """Main window of the gateway generator: zonal network, DBC files, routing table, one ECU's file."""
+        from ..gateway.app import open_app
+        open_app(self)
 
     def gateway_generator(self):
         """CAN <-> Ethernet PduR gateway generator (writes a system description for DaVinci)."""

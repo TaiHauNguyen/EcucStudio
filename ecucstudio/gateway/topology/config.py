@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 
-from ..config import GatewayConfig, SocketSide, _abs, _rel
+from ..config import BusInput, GatewayConfig, SocketSide, _abs, _rel
 
 
 @dataclass
@@ -67,6 +67,8 @@ class TopologyConfig:
     # ECU's own gateway.routing_table wins); table_hw: also route its rows with HW-Accelerator = 1
     routing_table: str = ""
     table_hw: bool = False
+    target: str = ""                # ECU whose gateway file is generated (main window)
+    unassigned: list = field(default_factory=list)   # BusInput: DBC files not given to an ECU yet (main window)
     path: str = field(default="", compare=False)  # file the topology was loaded from / saved to (not saved)
 
     # ------------------------------------------------------------------ nodes
@@ -94,7 +96,10 @@ class TopologyConfig:
     # ------------------------------------------------------------------ JSON
     def to_dict(self, rel_to: str | None = None) -> dict:
         d = {f.name: dataclasses.asdict(getattr(self, f.name)) if dataclasses.is_dataclass(getattr(self, f.name))
-             else getattr(self, f.name) for f in dataclasses.fields(self) if f.name not in ("ecus", "peers", "path")}
+             else getattr(self, f.name) for f in dataclasses.fields(self)
+             if f.name not in ("ecus", "peers", "path", "unassigned")}
+        d["unassigned"] = [dict(dataclasses.asdict(b), dbc=_rel(b.dbc, rel_to) if rel_to else b.dbc)
+                           for b in self.unassigned]
         d["peers"] = [dataclasses.asdict(p) for p in self.peers]
         d["ecus"] = []
         for e in self.ecus:
@@ -129,6 +134,10 @@ class TopologyConfig:
                   peers=[build(PeerNode, p) for p in d.get("peers") or []], default_peer=d.get("default_peer", ""),
                   ecus=ecus, cross=build(CrossSettings, d.get("cross")), routes=dict(d.get("routes") or {}),
                   links=list(d.get("links") or []), table_hw=bool(d.get("table_hw", False)),
+                  target=d.get("target", ""),
+                  unassigned=[build(BusInput, dict(x, dbc=_abs(x.get("dbc", ""), rel_to) if rel_to else
+                                                   x.get("dbc", "")))
+                              for x in d.get("unassigned") or [] if isinstance(x, dict)],
                   routing_table=_abs(d.get("routing_table", ""), rel_to) if rel_to else d.get("routing_table", ""))
         return cfg
 

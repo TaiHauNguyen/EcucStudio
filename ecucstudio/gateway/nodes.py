@@ -20,6 +20,7 @@ class EthNode:
     mac: str = ""
     ip: str = ""
     port: int | None = None         # port base
+    role: str = ""                  # "hpc" (central computer) | "zonal" | "" (main window)
 
 
 def load(settings=None) -> list[EthNode]:
@@ -31,7 +32,8 @@ def load(settings=None) -> list[EthNode]:
         if isinstance(x, dict) and str(x.get("name", "")).strip():
             port = x.get("port")
             out.append(EthNode(str(x["name"]).strip(), str(x.get("mac") or "").strip(), str(x.get("ip") or "").strip(),
-                               int(port) if str(port or "").strip().isdigit() else None))
+                               int(port) if str(port or "").strip().isdigit() else None,
+                               str(x.get("role") or "").strip()))
     return out
 
 

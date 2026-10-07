@@ -123,8 +123,22 @@ class RoutingTable:
         return next((n for n in self.networks if _key(n) == k), "")
 
 
+_CACHE: dict = {}       # (path, mtime, size) -> RoutingTable: a network is planned ECU by ECU, twice
+
+
 def read(path: str) -> RoutingTable:
-    """Read a routing table (.xlsx / .xlsm, or .csv / .tsv / .txt with ; , or tab). Raises ValueError / OSError."""
+    """Read a routing table (.xlsx / .xlsm, or .csv / .tsv / .txt with ; , or tab). Raises ValueError / OSError.
+    The result is shared between callers while the file does not change: do not modify it."""
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    if key not in _CACHE:
+        if len(_CACHE) > 8:
+            _CACHE.clear()
+        _CACHE[key] = _read(path)
+    return _CACHE[key]
+
+
+def _read(path: str) -> RoutingTable:
     ext = os.path.splitext(path)[1].lower()
     if ext in (".xlsx", ".xlsm"):
         sheets = _xlsx_sheets(path)

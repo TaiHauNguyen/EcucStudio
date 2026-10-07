@@ -10,6 +10,8 @@ SocketRoute (header ID) và CanIf PDU, không phải cấu hình ECUC bằng tay
   bus B** được route thẳng từ bus A sang bus B.
 - **Nhiều ECU trên một mạng Ethernet** (mục 13): các zone ECU khai báo chung trong một topology; message một ECU nhận
   trên CAN và ECU khác gửi trên CAN đi thẳng giữa hai ECU, hai đầu khớp header ID / IP / port.
+- **Mạng zonal + routing table** (cửa sổ chính, phần *Bắt đầu nhanh* bên dưới): HPC + các ECU zonal, DBC của cả mạng,
+  routing table của khách hàng; sinh file gateway của từng ECU.
 
 Có hai cách dùng: **giao diện** (mục 1–7) hoặc **command line** (mục 8). Cả hai ra cùng một kết quả.
 File network đã có gateway thì mở bằng **Gateway Editor** để xem và sửa lại (mục 11).
@@ -25,9 +27,63 @@ Tool dùng được cho bốn tình huống:
 
 ---
 
-## Bắt đầu nhanh: cửa sổ **Start**
+## Bắt đầu nhanh: cửa sổ chính (mạng zonal + routing table)
 
-Mở tool (`run.bat gateway` hoặc menu **Tools**) là cửa sổ **Start** hiện ra (mở lại bằng nút **Start…**).
+`run.bat gateway` (hoặc EcucStudio: menu *Tools → CAN Gateway (zonal network, routing table)…*) mở **cửa sổ chính**.
+Dùng cho mạng Ethernet có một **HPC** (máy tính trung tâm) và các **ECU zonal**, mỗi ECU zonal có các bus CAN (file
+DBC), kèm **routing table** (Excel) của khách hàng. Bốn trang theo thứ tự công việc; dải **Next step** luôn ghi việc
+cần làm tiếp (nút **Show** mở đúng trang). Mọi thứ lưu trong một **file mạng** (`gateway_network.json`, *Save* /
+*Open*); lần sau cửa sổ tự mở file cuối cùng.
+
+| Trang | Làm gì |
+|---|---|
+| **1 Network** | các node Ethernet: một HPC và các ECU zonal (tên, MAC, IPv4, port); VLAN, netmask, một socket cho hai chiều |
+| **2 CAN buses (DBC)** | *Add DBC files…* (chọn nhiều file một lần). Tool tìm node gateway và ECU của từng DBC (node trùng tên ECU, thuộc tính `ECU` của node, tên ECU là một từ của tên node, hoặc node đã gán ở DBC khác); double-click để sửa node / ECU / cột routing table. Dòng màu cam là chưa đủ |
+| **3 Routing table** | file Excel (hoặc CSV) của khách hàng. Bảng *Network columns*: cột mạng nào là bus nào của ECU nào; bảng *Rows*: mỗi dòng đi đường nào (CAN → CAN trong một ECU, ECU → ECU qua Ethernet, LIN, lỗi …), có ô lọc |
+| **4 Generate** | ECU cần sinh file, tên *ECU instance in DaVinci*, file ra; **Analyze**, **Generate**, **Message report** |
+
+**Node mặc định**: *Save as my default nodes* lưu danh sách node (kèm vai trò HPC) vào cài đặt người dùng
+(`%APPDATA%\EcucStudio\settings.json`), không vào file mạng; mạng mới (*New*) bắt đầu bằng danh sách đó, *Load my
+default nodes* lấy lại. Đổi vai trò: chọn node → *Set as HPC*, hoặc *Edit…*.
+
+**Quy tắc sinh route** (cố định):
+
+| | Quy tắc |
+|---|---|
+| CAN → Ethernet | mọi message ECU zonal nhận trên CAN được gửi lên HPC. Dòng routing table có mạng nguồn (`S`) là bus của ECU này và mạng đích (`D`) là bus của ECU khác: message được gửi **thêm** thẳng tới ECU đó (một PDU Ethernet, một header ID, hai đích) |
+| Ethernet → CAN | message ECU zonal gửi trên CAN lấy từ HPC; routing table route nó từ bus của ECU khác thì lấy từ ECU đó (cùng PDU, header ID với đầu gửi) |
+| CAN → CAN | dòng routing table giữa hai bus của **cùng** một ECU: message → PduR, signal → Com signal gateway, ghi vào file `.vsde` (mục 12.1, 17) |
+| dòng signal giữa hai ECU | ECU nguồn gửi nguyên message tới ECU đích; signal gateway ở ECU đích (PDU Ethernet → signal CAN) **chưa được sinh**, report ghi `not supported` |
+| HW-Accelerator = 1 | vẫn route (bỏ tick ở trang 3 để để lại cho LLCE / PFE) |
+| message không có trong bảng | chỉ lên HPC / chỉ lấy từ HPC; giữa các ECU tool **không** tự ghép theo tên |
+
+Ví dụ: ZoneA có BusA, BusB; ZoneB có BusC; HPC là Central.
+
+- dòng `Wheel`, `S` = BusA, `D` = BusC: file của ZoneA gửi Wheel tới ZoneB **và** Central; file của ZoneB lấy Wheel từ
+  ZoneA;
+- dòng `EngineData`, `S` = BusA, `D` = BusB: CAN → CAN trong ZoneA (`.vsde`);
+- message `Extra` ZoneA nhận nhưng không có trong bảng: chỉ lên Central.
+
+**Generate** ghi file gateway của ECU đích và file `.vsde` cạnh nó; cạnh file mạng ghi `<mạng>.lock.json` (header ID
+của cả mạng: giữ cùng file mạng để ECU sinh lúc khác vẫn khớp), `<mạng>_contract.csv` (mọi PDU Ethernet: ai gửi, ai
+nhận, header ID, IP:port) và report `<mạng>_message_paths.html` / `.csv` (có bảng *Routing table*). Trong DaVinci:
+thêm file gateway và `.vsde` vào Input Files của project ECU đích (cạnh các DBC) **một lần**, rồi Update. Sinh lại thì
+file được ghi đè, DaVinci giữ cấu hình của phần không đổi.
+
+Trang 4 sau Analyze: ô đếm (CAN → HPC, CAN → ECU khác, HPC → CAN, ECU khác → CAN, CAN → CAN message / signal, dòng
+bảng cần kiểm tra), bảng route của ECU đích (chuột phải: *Enable*, *Disable*, *Automatic*; lưu trong file mạng), thông
+báo (lỗi của mọi ECU vì chúng chặn Generate, cảnh báo của ECU đích và của mạng).
+
+*ECU instance in DaVinci*: tên ECU instance trong project DaVinci của ECU đích. Bộ convert DBC đặt theo thuộc tính
+`ECU` của node gateway trong DBC, không có thì theo tên node; để trống là dùng giá trị đó.
+
+Menu **Advanced**: cửa sổ topology (mọi thiết lập của file mạng, mục 13), generator cho một ECU (cửa sổ cũ, mục 1–7,
+có cửa sổ Start bên dưới), Gateway Editor (mục 11). `run.bat gateway gateway.json` (cấu hình một ECU) hoặc
+`python -m ecucstudio gateway gui --classic` mở thẳng generator cũ.
+
+## Cửa sổ Start của generator một ECU (menu Advanced)
+
+Generator một ECU (*Advanced → Generator for one ECU (classic)…*) mở cửa sổ **Start** (mở lại bằng nút **Start…**).
 
 **Input và output**
 

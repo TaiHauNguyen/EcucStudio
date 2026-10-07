@@ -142,7 +142,7 @@ SocketRoute (header ID) và CanIf PDU — không phải sửa ECUC bằng tay.
 
 Hướng dẫn sử dụng đầy đủ: [docs/GATEWAY.md](docs/GATEWAY.md).
 
-**Bắt đầu**: `run.bat gateway` mở cửa sổ **Start**. Input: file DBC của cả mạng (bắt buộc; tool tìm các ECU từ tên node), project DaVinci của ECU đích (tuỳ chọn) và file gateway cũ của nó (tuỳ chọn, để cập nhật). Output: file gateway của ECU đích, chỉ có Ethernet + gateway (phần CAN được tham chiếu, không import trùng trong DaVinci). IP các ECU nhập một lần trong file mạng dùng chung. Chi tiết: mục *Bắt đầu nhanh* của [docs/GATEWAY.md](docs/GATEWAY.md).
+**Bắt đầu**: `run.bat gateway` mở **cửa sổ chính** cho mạng zonal: (1) node Ethernet: HPC + các ECU zonal (MAC, IPv4, port), (2) file DBC của cả mạng, mỗi DBC thuộc một ECU (tool tự tìm node / ECU), (3) routing table (Excel) của khách hàng, (4) chọn ECU và Generate. Mọi message ECU nhận lên HPC; dòng routing table giữa bus của hai ECU thì message đi thẳng giữa hai ECU qua Ethernet; dòng giữa hai bus của một ECU là CAN → CAN (`.vsde`). Mọi thứ lưu trong một file mạng dùng chung, header ID khớp giữa các ECU. Chi tiết: mục *Bắt đầu nhanh* của [docs/GATEWAY.md](docs/GATEWAY.md). Generator một ECU, cửa sổ topology và Gateway Editor nằm ở menu *Advanced*.
 
 **Report đường đi message**: Generate (hoặc nút *Message Report*, hay `gateway report <cấu hình | file gateway |
 topology>`) ghi `..._message_paths.html` / `.csv`: mỗi message (theo CAN ID; cùng ID trên nhiều kênh là một

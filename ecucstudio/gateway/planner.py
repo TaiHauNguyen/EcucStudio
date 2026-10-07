@@ -154,17 +154,27 @@ class SignalRoute:
 
 @dataclass
 class TableStatus:
-    """What became of one routing table row: per destination network a (status, text, route or None)."""
+    """What became of one routing table row: per network a (status, text, route or None, network)."""
     row: object                 # routing_table.TableRow
     outcomes: list = field(default_factory=list)
 
-    def add(self, status: str, text: str, route=None):
-        self.outcomes.append((status, text, route))
+    def add(self, status: str, text: str, route=None, net: str = ""):
+        self.outcomes.append((status, text, route, net))
+
+    def replace(self, net: str, items: list):
+        """Replace the outcome(s) of network *net* by *items* [(status, text, route)] (the topology knows more)."""
+        new = [(s, t, r, net) for s, t, r in items]
+        at = next((i for i, o in enumerate(self.outcomes) if o[3] == net), None)
+        rest = [o for o in self.outcomes if o[3] != net]
+        if at is None:
+            self.outcomes = rest + new
+        else:
+            self.outcomes = rest[:at] + new + rest[at:]
 
     def items(self) -> list[tuple[str, str]]:
         """(status, text) per destination; a route made from the row is "routed" or "off" (with its reason)."""
         out = []
-        for status, text, route in self.outcomes:
+        for status, text, route, _net in self.outcomes:
             if route is None:
                 out.append((status, text))
             elif route.enabled:
@@ -257,6 +267,7 @@ class Plan:
     signal_routes: list = field(default_factory=list)  # SignalRoute (routing table)
     table_rows: list = field(default_factory=list)     # TableStatus: every row of the routing table
     table_file: str = ""                               # the routing table that was read
+    table_nets: dict = field(default_factory=dict)     # network column of the routing table -> bus name
     load: list = field(default_factory=list)           # LoadRow: CAN -> ETH packets with / without PDU collection
     burst: list = field(default_factory=list)          # BurstRow: ETH -> CAN frames per collection window per bus
 
@@ -1095,6 +1106,7 @@ class Planner:
         for w in table.warnings:
             self.warn(f"Routing table: {w}")
         nets = self._table_networks(table)
+        plan.table_nets = {n: bp.name for n, bp in nets.items()}
         if cfg.can_links:
             self.info("CAN -> CAN links are not used: the CAN -> CAN routes come from the routing table.")
         prev_can = [p for p in (self.previous.routes if self.previous else []) if p.direction == "CAN->CAN"]
@@ -1110,16 +1122,16 @@ class Planner:
                 continue
             sbp = nets.get(row.source)
             if sbp is None:
-                st.add(*self._table_elsewhere(row.source, row.src_protocol, "source"))
+                st.add(*self._table_elsewhere(row.source, row.src_protocol, "source"), net=row.source)
                 continue
             if row.hw and not opts.table_hw:        # the LLCE / PFE routes it: no PduR / Com route, no DBC check
                 for net in row.dests:
                     dbp = nets.get(net)
                     if dbp is None:
-                        st.add(*self._table_elsewhere(net, row.dst_protocol, "destination"))
+                        st.add(*self._table_elsewhere(net, row.dst_protocol, "destination"), net=net)
                         continue
                     st.add("HW accelerator", f"{sbp.name}/{row.src_msg} -> {dbp.name}/{row.target_msg}: "
-                                             f"HW-Accelerator = 1 (LLCE / PFE routes it)")
+                                             f"HW-Accelerator = 1 (LLCE / PFE routes it)", net=net)
                     dst = self._table_route(tx, dbp, row.target_msg, row.dst_id, False)
                     if not isinstance(dst, str):
                         hw_fed.append((dst, sbp, row))
@@ -1131,17 +1143,17 @@ class Planner:
             for net in row.dests:
                 dbp = nets.get(net)
                 if dbp is None:
-                    st.add(*self._table_elsewhere(net, row.dst_protocol, "destination"))
+                    st.add(*self._table_elsewhere(net, row.dst_protocol, "destination"), net=net)
                 elif dbp is sbp:
-                    st.add("problem", f"{net} is the source and a destination")
+                    st.add("problem", f"{net} is the source and a destination", net=net)
                 else:
                     dst = self._table_route(tx, dbp, row.target_msg, row.dst_id, False)
                     if isinstance(dst, str):
-                        st.add("problem", dst)
+                        st.add("problem", dst, net=net)
                     elif row.routing == rtab.MESSAGE:
-                        st.add(*self._table_message(row, src, dst, seen, prev_can))
+                        st.add(*self._table_message(row, src, dst, seen, prev_can), net=net)
                     else:
-                        st.add(*self._table_signal(row, src, dst, seen))
+                        st.add(*self._table_signal(row, src, dst, seen), net=net)
         self._table_conflicts()
         for dst, sbp, row in hw_fed:        # the accelerator sends it on that bus: not also from Ethernet
             over = dst.bus.cfg.messages.get(dst.message.name, {}) if isinstance(dst.bus.cfg.messages, dict) else {}
@@ -1153,7 +1165,8 @@ class Planner:
         count = collections.Counter(s for st in plan.table_rows for s, _ in st.items())
         self.info(f"Routing table {os.path.basename(table.path)}: {len(table.rows)} row(s); for {plan.ecu_name}: "
                   f"{len(plan.enabled_can_routes)} message route(s), {len(plan.enabled_signal_routes)} signal "
-                  f"route(s)" + "".join(f", {n} {k}" for k, n in sorted(count.items()) if k != "routed") +
+                  f"route(s)" + "".join(f", {n} {k}" for k, n in sorted(count.items())
+                                        if k not in ("routed", "not this ECU")) +
                   " (see the Routing table section of the message report).")
         if count.get("HW accelerator"):
             self.info(f"Routing table: {count['HW accelerator']} destination(s) of rows with HW-Accelerator = 1 are "
