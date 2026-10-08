@@ -201,14 +201,18 @@ class GatewayApp:
 
     def _tree(self, parent, cols, widths, height=10, stretch=None):
         holder = ttk.Frame(parent)
+        holder.rowconfigure(0, weight=1)
+        holder.columnconfigure(0, weight=1)
         t = ttk.Treeview(holder, columns=[c for c, _ in cols], show="headings", height=height, selectmode="extended")
         for (c, text), wd in zip(cols, widths):
             t.heading(c, text=text, anchor="w")
-            t.column(c, width=wd, anchor="w", stretch=c == stretch)
+            t.column(c, width=wd, minwidth=40, anchor="w", stretch=c == stretch)
         ys = ttk.Scrollbar(holder, orient="vertical", command=t.yview)
-        t.configure(yscrollcommand=ys.set)
-        t.pack(side="left", fill="both", expand=True)
-        ys.pack(side="left", fill="y")
+        xs = ttk.Scrollbar(holder, orient="horizontal", command=t.xview)   # wide tables scroll left / right
+        t.configure(yscrollcommand=ys.set, xscrollcommand=xs.set)
+        t.grid(row=0, column=0, sticky="nsew")
+        ys.grid(row=0, column=1, sticky="ns")
+        xs.grid(row=1, column=0, sticky="ew")
         t.tag_configure("todo", foreground=COLORS["warning"])
         t.tag_configure("off", foreground="#9e9e9e")
         t.tag_configure("bad", foreground=COLORS["error"])
@@ -593,9 +597,25 @@ class GatewayApp:
         pw = ttk.PanedWindow(f, orient="vertical")
         pw.pack(fill="both", expand=True, pady=(6, 0))
         rt = ttk.Frame(pw)
+        ff = ttk.Frame(rt)
+        ff.pack(fill="x", pady=(0, 4))
+        ttk.Label(ff, text="Filter:").pack(side="left")
+        self.v_rfilter = tk.StringVar()
+        self.v_rfilter.trace_add("write", lambda *_a: self.fill_route_rows())
+        e_rf = ttk.Entry(ff, textvariable=self.v_rfilter, width=40)
+        e_rf.pack(side="left", padx=4)
+        ttk.Button(ff, text="Clear", command=lambda: self.v_rfilter.set("")).pack(side="left")
+        self.v_ronly = tk.StringVar(value="all")
+        for text, val in (("all", "all"), ("enabled", "yes"), ("disabled", "no")):
+            ttk.Radiobutton(ff, text=text, value=val, variable=self.v_ronly,
+                            command=self.fill_route_rows).pack(side="left", padx=(12 if val == "all" else 4, 0))
+        self.rcount = ttk.Label(ff, text="", foreground="#666666")
+        self.rcount.pack(side="left", padx=12)
+        Tooltip(e_rf, "Shows the routes whose row contains all words (case ignored), e.g. 'BusA ETH->CAN', "
+                      "'0x10A', 'ZoneB', 'fed from'")
         holder, self.t_routes = self._tree(rt, [(c, c) for c in report.COLUMNS],
-                                           (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 120, 90, 95, 200, 380),
-                                           height=12, stretch="Remark")
+                                           (60, 65, 75, 120, 200, 90, 70, 55, 65, 200, 220, 120, 90, 95, 200, 900),
+                                           height=12)
         holder.pack(fill="both", expand=True)
         self.t_routes.bind("<Button-3>", self.route_menu)
         msg = ttk.Frame(pw)
@@ -664,6 +684,8 @@ class GatewayApp:
         plan = tp.plans.get(self.cfg.target) if tp is not None else None
         if plan is None:
             self._cards([])
+            self._route_items = []
+            self.fill_route_rows()
             return
         hpc = zonal.hpc(self.cfg)
         hname = hpc.name if hpc is not None else ""
@@ -680,10 +702,27 @@ class GatewayApp:
                      (len(plan.enabled_can_routes), "CAN -> CAN (message)", "#6a1b9a"),
                      (len(plan.enabled_signal_routes), "CAN -> CAN (signal)", "#6a1b9a"),
                      (bad, "table rows to check", COLORS["warning"] if bad else "#444444")])
-        for i, (r, row) in enumerate(report.route_items(plan)):
+        self._route_items = list(report.route_items(plan))
+        self.fill_route_rows()
+
+    def fill_route_rows(self):
+        """Route table of the target ECU, with the filter words and the enabled / disabled choice."""
+        t = self.t_routes
+        t.delete(*t.get_children())
+        self._route_by_iid = {}
+        items = getattr(self, "_route_items", []) if self.tplan is not None else []
+        words = self.v_rfilter.get().lower().split()
+        only = self.v_ronly.get()
+        shown = 0
+        for i, (r, row) in enumerate(items):
+            text = " ".join(str(x) for x in row).lower()
+            if any(w not in text for w in words) or (only != "all" and row[0] != only):
+                continue
             off = isinstance(r, (Route, CanRoute, SignalRoute)) and not r.enabled
             t.insert("", "end", iid=str(i), values=row, tags=("off",) if off else ())
             self._route_by_iid[str(i)] = r
+            shown += 1
+        self.rcount.config(text=f"{shown} of {len(items)} route(s)" if items else "")
 
     def show_messages(self, errors=(), warnings=(), infos=()):
         t = self.t_msg
