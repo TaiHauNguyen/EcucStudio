@@ -523,7 +523,7 @@ class FanoutDialog(tk.Toplevel):
         self.choice = tk.StringVar(value={True: "on", False: "off"}.get(current, "auto"))
         for value, label in (("on", "One Ethernet PDU for all these buses (1:N), also when the signal layout differs"),
                              ("off", "An own Ethernet PDU and header id per bus"),
-                             ("auto", "Automatic: 1:N only when length and signal layout are the same")):
+                             ("auto", "Automatic: 1:N when the CAN id and the length are the same")):
             ttk.Radiobutton(f, text=label, value=value, variable=self.choice).pack(anchor="w")
         lengths = {r.length for r in routes}
         if len(lengths) > 1:

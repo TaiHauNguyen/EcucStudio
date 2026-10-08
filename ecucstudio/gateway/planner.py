@@ -1456,10 +1456,11 @@ class Planner:
 
     # ------------------------------------------------------------------ ETH -> CAN 1:N
     def _plan_eth_fanout(self):
-        """A message the node sends on several buses (same CAN id, length and signal layout, from the same Ethernet
-        node) comes as one Ethernet PDU (one header id) and is forwarded to every bus: the first bus keeps the PDU,
-        the others map it to their CAN PDU (fanout_of). Per message the user can force it although the signal layout
-        differs (override "fanout": true, same length needed) or keep an own Ethernet PDU ("fanout": false)."""
+        """A message the node sends on several buses (same CAN id and length, from the same Ethernet node) is one
+        message: it comes as one Ethernet PDU (one header id) and is forwarded to every bus. The first bus keeps the
+        PDU, the others map it to their CAN PDU (fanout_of). A different signal layout in the DBC files does not
+        change that (the bytes are forwarded unchanged, a note says so). Per message the user can keep an own
+        Ethernet PDU (override "fanout": false); a different length needs its own PDU."""
         plan = self.plan
         for r in plan.routes:
             r.fanout_of, r.fanout_reason = None, ""
@@ -1478,7 +1479,7 @@ class Planner:
                                                      else ""), r.key if over.get("fanout") is False else "")
             m = r.message
             groups.setdefault((m.can_id, m.extended, r.length, tuple(r.peers)) + chosen, []).append(r)
-        n = 0
+        n, layout = 0, []
         for rs in groups.values():
             if len({r.bus.name for r in rs}) < 2:
                 continue
@@ -1490,12 +1491,10 @@ class Planner:
                 reason = pair_problem(first, r)[0]
                 if not reason:
                     members.append(r)
-                elif reason.startswith("signal layout differs") and True in (choice(first), choice(r)):
-                    members.append(r)               # chosen by the user: the bytes are forwarded unchanged
-                    r.notes.append("1:N chosen although the signal layout differs")
-                    self.warn(f"{r.key}: gets the Ethernet PDU of {first.key} although the signal layout differs "
-                              f"(chosen by the user): the PDU is forwarded unchanged, the layout of {first.bus.name} "
-                              f"is put on {r.bus.name}.")
+                elif reason.startswith("signal layout differs"):
+                    members.append(r)               # same CAN id = one message: the bytes are forwarded unchanged
+                    r.notes.append(f"1:N although the signal layout differs from {first.bus.name} in the DBC files")
+                    layout.append(r.key)
             if not members:
                 continue
             for r in members:
@@ -1526,11 +1525,15 @@ class Planner:
                 r.fanout_reason = f"not 1:N with {first.key}: {why}"
                 r.notes.append(r.fanout_reason)
                 hint = (" To forward it from the same Ethernet PDU anyway: route table, right click -> 1:N with the "
-                        "same CAN id..." if why.startswith("signal layout differs") else "")
+                        "same CAN id..." if why.startswith("length differs") else "")
                 self.warn(f"{r.key}: same CAN id as {first.key} but not one Ethernet PDU ({why}): it gets its own "
                           f"Ethernet PDU and header id.{hint}")
         if n:
             self.info(f"ETH -> CAN 1:N: {n} Ethernet PDU(s) forwarded to several CAN buses (one PDU, one header id).")
+        if layout:
+            self.warn(f"ETH -> CAN 1:N: the DBC files define another signal layout for the same CAN id on "
+                      f"{len(layout)} bus(es) ({', '.join(layout[:4])}{' ...' if len(layout) > 4 else ''}): one "
+                      f"message, forwarded unchanged. Check the DBC files.")
 
     # ------------------------------------------------------------------ buses of other ECUs (over Ethernet)
     def _plan_remote_routes(self):

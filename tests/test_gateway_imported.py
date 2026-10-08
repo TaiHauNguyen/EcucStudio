@@ -220,23 +220,24 @@ class ImportedTest(unittest.TestCase):
         a, b, c = r["BusA/HpcCmd"], r["BusB/HpcCmd"], r["BusC/HpcCmd"]
         self.assertIsNone(a.fanout_of)
         self.assertIs(b.fanout_of, a)
-        self.assertIsNone(c.fanout_of)                                   # layout differs: own PDU
-        self.assertTrue(any(w.startswith("BusC/HpcCmd: same CAN id as BusA/HpcCmd but not one Ethernet PDU (signal "
-                                         "layout differs") for w in plan.warnings), plan.warnings)
-        self.assertTrue(any("right click -> 1:N with the same CAN id" in w for w in plan.warnings))
-        # the user forwards HpcCmd of BusC from the same Ethernet PDU anyway (same length, other layout): warning stays
+        self.assertIs(c.fanout_of, a)                    # same CAN id and length = one message, also other layout
+        self.assertIn("1:N although the signal layout differs from BusA in the DBC files", c.notes)
+        self.assertTrue(any(w.startswith("ETH -> CAN 1:N: the DBC files define another signal layout for the same "
+                                         "CAN id on 1 bus(es) (BusC/HpcCmd)") for w in plan.warnings), plan.warnings)
+        self.assertTrue(any(w.startswith("BusC/LenCmd: same CAN id as BusA/LenCmd but not one Ethernet PDU (length "
+                                         "differs") and "right click -> 1:N with the same CAN id" in w
+                            for w in plan.warnings), plan.warnings)
+        # the user keeps an own Ethernet PDU for a message ("fanout": false); another length: never 1:N
         cfg_f = self.config()
         cfg_f.options.can_routes = False
         cfg_f.buses = [BusInput(dbc=b.dbc, node="Zone") for b in cfg.buses]
-        cfg_f.buses[2].messages = {"HpcCmd": {"fanout": True}, "LenCmd": {"fanout": True}}
+        cfg_f.buses[2].messages = {"HpcCmd": {"fanout": False}, "LenCmd": {"fanout": True}}
         cfg_f.buses[1].messages = {"OwnCmd": {"fanout": False}}
         pf = make_plan(cfg_f)
         self.assertEqual(pf.errors, [])
         rf = {x.key: x for x in pf.routes}
-        self.assertIs(rf["BusC/HpcCmd"].fanout_of, rf["BusA/HpcCmd"])
+        self.assertIsNone(rf["BusC/HpcCmd"].fanout_of)
         self.assertIs(rf["BusB/HpcCmd"].fanout_of, rf["BusA/HpcCmd"])
-        self.assertTrue(any(w.startswith("BusC/HpcCmd: gets the Ethernet PDU of BusA/HpcCmd although the signal "
-                                         "layout differs") for w in pf.warnings), pf.warnings)
         self.assertIsNone(rf["BusC/LenCmd"].fanout_of)                  # other length: never
         self.assertIsNone(rf["BusB/OwnCmd"].fanout_of)                  # 1:N off for it
         self.assertIn("own Ethernet PDU chosen (1:N off)", rf["BusB/OwnCmd"].fanout_reason)
@@ -247,7 +248,7 @@ class ImportedTest(unittest.TestCase):
         self.assertIn("not 1:N with BusA/LenCmd: length differs (BusA 8, BusC 12)", ln.header_note)
         self.assertTrue(ln.header_note.startswith("flag 1 added"))
         self.assertEqual((b.eth_pdu, b.header_id), (a.eth_pdu, a.header_id))
-        self.assertNotEqual(c.eth_pdu, a.eth_pdu)
+        self.assertEqual((c.eth_pdu, c.header_id), (a.eth_pdu, a.header_id))
         self.assertIsNone(r["BusB/OwnCmd"].fanout_of)
         self.assertIs(r["BusC/OwnCmd"].fanout_of, r["BusA/OwnCmd"])
         # GenMsgILSupport = No: DaVinci imports it without PDU triggering -> not routed
@@ -257,9 +258,10 @@ class ImportedTest(unittest.TestCase):
         out = Base(res.output)
         maps = [(out.ref(m, "SOURCE-I-PDU-REF"), out.refs(m, "TARGET-I-PDU-REF")[0])
                 for m in out.root.iter("{http://autosar.org/schema/r4.0}I-PDU-MAPPING")]
-        src = [s for s, d in maps if d in ("/Cluster/BusA/CHNL/PT_HpcCmd", "/Cluster/BusB/CHNL/PT_HpcCmd")]
-        self.assertEqual(len(src), 2)
-        self.assertEqual(len(set(src)), 1)                               # one Ethernet PDU, two CAN buses
+        src = [s for s, d in maps if d in ("/Cluster/BusA/CHNL/PT_HpcCmd", "/Cluster/BusB/CHNL/PT_HpcCmd",
+                                           "/Cluster/BusC/CHNL/PT_HpcCmd")]
+        self.assertEqual(len(src), 3)
+        self.assertEqual(len(set(src)), 1)                               # one Ethernet PDU, three CAN buses
         with open(res.output, encoding="utf-8") as fh:
             text = fh.read()
         self.assertEqual(text.count(f"<SHORT-NAME>{a.eth_pdu}</SHORT-NAME>"), 1)
