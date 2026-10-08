@@ -1071,6 +1071,36 @@ Trong CANoe:
 IP / port không xác định được từ file gateway thì để `0.0.0.0` / `0` kèm dòng `// !!` ở đầu file: sửa trong khối
 `variables`. Socket TCP chưa hỗ trợ (script gửi UDP).
 
+### 15.1 CANoe test module cho mọi route của ECU đích (cửa sổ chính)
+
+Trang **4 Generate** → nút **CANoe test**: Analyze rồi ghi `<file output>_canoe_test.can`, một **CANoe test module**
+kiểm tra mọi route của ECU đích trên bàn test. Bàn test: chỉ có ECU đích và CANoe 12+ (VN56xx ở cổng Ethernet của
+ECU, các kênh CAN của ECU); CANoe đóng vai HPC, các ECU zonal khác và các node gửi CAN.
+
+| Nhóm test | CANoe gửi | Pass khi |
+|---|---|---|
+| CAN -> Ethernet | frame CAN trên bus nguồn | PDU Ethernet (đúng header ID, length, byte) đến **mọi** đích: HPC và ECU khác theo routing table |
+| Ethernet -> CAN | UDP datagram (SoAd header) từ IP:port của node nguồn (HPC / ECU khác) tới port của ECU đích | frame CAN (đúng ID, DLC, byte) trên **mọi** bus đích (1:N) |
+| CAN -> CAN (message) | frame trên bus nguồn | cùng byte trên mọi bus đích, ID đích |
+| CAN -> CAN (signal) | frame nguồn với 2 giá trị signal khác nhau | message đích (Com gửi theo chu kỳ) mang đúng 2 giá trị ở bit của signal đích |
+
+- Mỗi testcase dùng một mẫu byte riêng (theo số thứ tự), nên frame của route khác (ví dụ cùng CAN ID trên channel
+  khác) không làm test pass nhầm.
+- Trả lời được bắt bằng `on message *` / `OnUdpReceiveFrom` (tách nhiều PDU trong một datagram), testcase chờ bằng
+  `TestWaitForTextEvent`; CANoe ghi report pass / fail cho từng route, lỗi ghi phần còn thiếu và cái đã thấy
+  (ví dụ `BusB 0x10A: byte 3 is 0x12 (wanted 0x7C)`).
+- CAN -> ETH và ETH -> CAN thử 2 lần (frame đầu có thể phải chờ ARP). Thời gian chờ 300 ms (+ timeout gom PDU), signal:
+  3 chu kỳ của message đích + 200 ms.
+
+Cài đặt trong CANoe (ghi ở đầu file):
+
+1. Test Setup: thêm file làm test module, gán vào mọi mạng CAN của ECU đích và mạng Ethernet.
+2. Bảng bus ở đầu file (`gBusCh`, `gBusName`): kênh CANoe và tên mạng của từng bus (mặc định kênh 1, 2, … theo thứ tự,
+   tên = tên bus). Tìm được tên mạng thì gửi trong mạng đó, không thì theo số kênh.
+3. TCP/IP stack của test node: thêm các IPv4 mà CANoe đóng vai (HPC, ECU khác; VLAN như kênh Ethernet). Các socket
+   dùng để gửi / nhận được liệt kê ở đầu file.
+4. ECU đích phải thức và đang truyền thông (KL15, network management) trước khi chạy.
+
 ## 16. Gom nhiều PDU trong một gói UDP (PDU collection, SoAd nPdu)
 
 Mặc định mỗi frame CAN nhận được là một UDP datagram gửi ngay (1:1). Bật gom thì SoAd chép PDU vào buffer của

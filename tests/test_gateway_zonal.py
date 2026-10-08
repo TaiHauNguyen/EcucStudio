@@ -135,6 +135,44 @@ class ZonalTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, "network_message_paths.html")))
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, "network.lock.json")))
 
+    def test_canoe_test_module(self):
+        """capl_test.py: one test case per route of the target ECU, CANoe plays the other nodes."""
+        import re
+        from ecucstudio.gateway import capl_test
+        tplan = make_topology_plan(self.cfg)
+        path = os.path.join(self.tmp, "ZoneA_canoe_test.can")
+        tm = capl_test.write_test_module(tplan.plans["ZoneA"], path)
+        self.assertEqual(tm.problems, [])
+        self.assertEqual(tm.counts, {"CAN -> ETH": 3, "ETH -> CAN": 1, "CAN -> CAN": 1, "signal": 0})
+        self.assertEqual(tm.buses, ["BusA", "BusB"])
+        self.assertEqual([(s.ip, s.port, s.label) for s in tm.socks],
+                         [("10.0.9.3", 41300, "ZoneB"), ("10.0.9.1", 41100, "Central")])
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        self.assertIn(b"\r\n", raw)
+        text = raw.decode("cp1252")
+        self.assertEqual(text.count("{"), text.count("}"))
+        self.assertNotIn("{{", text.replace("{{ ", ""))
+        names = re.findall(r"^testcase (\w+)\(\)", text, re.M)
+        self.assertEqual(len(names), 5)
+        self.assertEqual(sorted(names), sorted(re.findall(r"^  (TC\w+)\(\);", text, re.M)))   # all in MainTest
+        # Wheel goes to ZoneB and Central: both receive sockets must see it (mask 0x3)
+        self.assertIn("CheckCanToEth(2, 0, 0x101, 0, 0, 8, 0x00000101, 0x3,", text)
+        # Door comes from ZoneB: sent from ZoneB's socket to ZoneA's port
+        self.assertIn("CheckEthToCan(4, 0, 41200, 0x00000200, 8,", text)
+        # signal routes: a target ECU with a Com signal gateway inside
+        from ecucstudio.gateway.planner import make_plan
+        from tests.test_gateway_routing_table import RoutingTableTest
+        rt = RoutingTableTest()
+        rt.setUp()
+        try:
+            tm = capl_test.build(make_plan(rt.config()))
+            self.assertEqual(tm.counts["signal"], 2)
+            text = capl_test.capl_text(tm)
+            self.assertIn("CheckSignal(0, 0x100, 0, 0, 8, 0, 16, 1,", text)
+        finally:
+            rt.tearDown()
+
     def test_main_window_model(self):
         """gateway/zonal.py: what the main window does with the network, the DBC files and the routing table."""
         from ecucstudio.gateway import dbcread, nodes, routing_table, zonal

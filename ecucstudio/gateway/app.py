@@ -591,6 +591,10 @@ class GatewayApp:
         self.b_gen = ttk.Button(bf, text="Generate", command=self.generate)
         self.b_gen.pack(side="left", padx=6)
         ttk.Button(bf, text="Message report", command=self.message_report).pack(side="left")
+        b_test = ttk.Button(bf, text="CANoe test", command=self.canoe_test)
+        b_test.pack(side="left", padx=(6, 0))
+        Tooltip(b_test, "CANoe test module (CAPL) for the ECU to generate: one test case per route (CAN -> ETH, "
+                        "ETH -> CAN, CAN -> CAN, signal). CANoe plays the other nodes and writes a pass / fail report")
         ttk.Button(bf, text="Open folder", command=self.open_folder).pack(side="left", padx=6)
         self.cards = ttk.Frame(f)
         self.cards.pack(fill="x")
@@ -839,6 +843,26 @@ class GatewayApp:
                 os.startfile(html_path)  # noqa: S606 - opens the report in the browser
             except OSError:
                 pass
+        self.analyze(then=write)
+
+    def canoe_test(self):
+        """CANoe test module for the routes of the ECU to generate (from a new analysis)."""
+        def write(tp):
+            from . import capl_test
+            plan = tp.plans.get(self.cfg.target)
+            if plan is None:
+                return
+            out = plan.cfg.output or zonal.default_output(self.cfg, self.cfg.target)
+            path = os.path.splitext(out)[0] + "_canoe_test.can"
+            try:
+                tm = capl_test.write_test_module(plan, path)
+            except OSError as exc:
+                messagebox.showerror(TITLE, f"Cannot write {path}:\n{exc}", parent=self.win)
+                return
+            counts = ", ".join(f"{k} {v}" for k, v in tm.counts.items())
+            self.show_messages(warnings=tm.problems, infos=[f"Written {path} ({counts} test case(s))",
+                                                            "CANoe setup: see the comment at the top of the file."])
+            self.status.config(text=f"Written {os.path.basename(path)}")
         self.analyze(then=write)
 
     def open_folder(self):
