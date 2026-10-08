@@ -296,6 +296,7 @@ void ExpCan(int bus, dword id, int ext, int len)
   gExpExt[gExpN] = ext;
   gExpLen[gExpN] = len;
   gExpGot[gExpN] = 0;
+  gExpCh[gExpN] = 0;
   gExpN++;
 }
 
@@ -303,7 +304,10 @@ void ExpReset()
 {
   int i;
   for (i = 0; i < gExpN; i++)
+  {
     gExpGot[i] = 0;
+    gExpCh[i] = 0;
+  }
   gEthGot = 0;
   gSeen[0] = 0;
 }
@@ -354,56 +358,90 @@ void SendEth(int sock, dword ecuPort, dword hid, int len)
 }
 
 // ---------------------------------------------------------------------------- answers
+// The frame is recognised by its CAN id and the data of the test case (pattern / signal value); the bus is
+// checked when CANoe knows it: by the network name (sure) or by the channel number of gBusCh (not sure, the
+// table may not match the CANoe configuration). gExpGot: 1 = on the expected bus, 2 = bus not confirmed.
 on message *
 {
-  int i, j, bus, len, bad;
+  int i, j, bus, len, bad, sure, pick;
   byte d[64];
   dword v;
   if (this.dir != RX || gExpN == 0)
     return;
   bus = -1;
+  sure = 0;
   for (i = 0; i < kBuses; i++)
   {
     if (gBusCtx[i] != 0 && gBusCtx[i] == GetBusContext())
+    {
       bus = i;
-    else if (gBusCtx[i] == 0 && gBusCh[i] == this.can)
-      bus = i;
+      sure = 1;
+    }
   }
   if (bus < 0)
-    return;
+    for (i = 0; i < kBuses; i++)
+      if (gBusCh[i] == this.can)
+        bus = i;
+  for (i = 0; i < gExpN; i++)               // this channel already answered an expectation of this id
+    if (gExpGot[i] && gExpCh[i] == this.can && gExpId[i] == valOfId(this.id))
+      return;
   len = this.DataLength;
   for (j = 0; j < 64; j++)
     d[j] = 0;
   for (j = 0; j < len && j < 64; j++)
     d[j] = this.byte(j);
-  for (i = 0; i < gExpN; i++)
+  // the expectation it answers: same id on this bus, else (bus not sure) the first open one with this id
+  pick = -1;
+  for (i = 0; i < gExpN && pick < 0; i++)
+    if (!gExpGot[i] && gExpId[i] == valOfId(this.id) && gExpExt[i] == (isExtId(this.id) != 0) && gExpBus[i] == bus)
+      pick = i;
+  for (i = 0; i < gExpN && pick < 0 && !sure; i++)
+    if (!gExpGot[i] && gExpId[i] == valOfId(this.id) && gExpExt[i] == (isExtId(this.id) != 0))
+      pick = i;
+  if (pick < 0)
   {
-    if (gExpGot[i] || gExpBus[i] != bus || gExpId[i] != valOfId(this.id) || gExpExt[i] != (isExtId(this.id) != 0))
-      continue;
-    if (gExpSig)
+    for (i = 0; i < gExpN; i++)
+      if (!gExpGot[i] && gExpId[i] == valOfId(this.id) && sure)
+        snprintf(gSeen, elcount(gSeen), "0x%X on network %s (wanted on %s)", gExpId[i], gBusName[bus],
+                 gBusName[gExpBus[i]]);
+    return;
+  }
+  if (gExpSig)
+  {
+    v = GetBits(d, gSigStart, gSigLen, gSigIntel);
+    if (v != gSigVal)
     {
-      v = GetBits(d, gSigStart, gSigLen, gSigIntel);
-      if (v == gSigVal)
-        gExpGot[i] = 1;
-      else
-        snprintf(gSeen, elcount(gSeen), "%s 0x%X: signal value 0x%X (wanted 0x%X)", gBusName[bus], gExpId[i], v,
-                 gSigVal);
-      continue;
+      snprintf(gSeen, elcount(gSeen), "0x%X channel %d: signal value 0x%X (wanted 0x%X)", gExpId[pick], this.can, v,
+               gSigVal);
+      return;
     }
+  }
+  else
+  {
     bad = -1;
-    if (len != gExpLen[i])
-      bad = 999;
-    for (j = 0; j < len && bad < 0; j++)
+    if (len < gExpLen[pick])
+      bad = 999;                            // CAN FD: longer frames are padded, only the PDU bytes count
+    for (j = 0; j < gExpLen[pick] && bad < 0; j++)
       if (d[j] != gData[j])
         bad = j;
-    if (bad < 0)
-      gExpGot[i] = 1;
-    else if (bad == 999)
-      snprintf(gSeen, elcount(gSeen), "%s 0x%X: length %d (wanted %d)", gBusName[bus], gExpId[i], len, gExpLen[i]);
-    else
-      snprintf(gSeen, elcount(gSeen), "%s 0x%X: byte %d is 0x%02X (wanted 0x%02X)", gBusName[bus], gExpId[i], bad,
-               d[bad], gData[bad]);
+    if (bad == 999)
+    {
+      snprintf(gSeen, elcount(gSeen), "0x%X channel %d: length %d (wanted %d)", gExpId[pick], this.can, len,
+               gExpLen[pick]);
+      return;
+    }
+    if (bad >= 0)
+    {
+      snprintf(gSeen, elcount(gSeen), "0x%X channel %d: byte %d is 0x%02X (wanted 0x%02X)", gExpId[pick], this.can,
+               bad, d[bad], gData[bad]);
+      return;
+    }
   }
+  gExpCh[pick] = this.can;
+  if (gExpBus[pick] == bus)
+    gExpGot[pick] = 1;
+  else
+    gExpGot[pick] = 2;
   for (i = 0; i < gExpN; i++)
     if (!gExpGot[i])
       return;
@@ -474,6 +512,27 @@ void Verdict(long res, char what[], char missing[])
   TestStepFail("check", text);
 }
 
+// frames found by CAN id and data on a channel whose bus CANoe could not confirm: pass with a warning
+void BusNote(char what[])
+{
+  int i;
+  char text[400];
+  char one[80];
+  text[0] = 0;
+  for (i = 0; i < gExpN; i++)
+  {
+    if (gExpGot[i] != 2)
+      continue;
+    snprintf(one, elcount(one), "0x%X wanted on %s, came on channel %d; ", gExpId[i], gBusName[gExpBus[i]], gExpCh[i]);
+    strncat(text, one, elcount(text));
+  }
+  if (text[0] != 0)
+  {
+    strncat(text, "set gBusName / gBusCh to the CANoe networks to check the bus", elcount(text));
+    TestStepWarning(what, text);
+  }
+}
+
 void MissingCan(char out[])
 {
   int i;
@@ -537,8 +596,9 @@ testfunction CheckEthToCan(int tc, int sock, dword ecuPort, dword hid, int len, 
     res = TestWaitForTextEvent("CAN_DONE", kTimeoutCan);
   }
   MissingCan(missing);
-  gExpN = 0;
   Verdict(res, what, missing);
+  BusNote(what);
+  gExpN = 0;
   TestWaitForTimeout(kGapMs);
 }
 
@@ -551,8 +611,9 @@ testfunction CheckCanToCan(int tc, int bus, dword id, int ext, int fd, int len, 
   SendCan(bus, id, ext, fd, len);
   res = TestWaitForTextEvent("CAN_DONE", kTimeoutCan);
   MissingCan(missing);
-  gExpN = 0;
   Verdict(res, what, missing);
+  BusNote(what);
+  gExpN = 0;
   TestWaitForTimeout(kGapMs);
 }
 
@@ -585,8 +646,9 @@ testfunction CheckSignal(int bus, dword id, int ext, int fd, int len, int sStart
     res = TestWaitForTextEvent("CAN_DONE", waitMs);
     snprintf(text, elcount(text), "%s = 0x%X", what, v);
     MissingCan(missing);
-    gExpN = 0;
     Verdict(res, text, missing);
+    BusNote(text);
+    gExpN = 0;
   }
   TestWaitForTimeout(kGapMs);
 }
@@ -666,6 +728,7 @@ variables
   int   gExpExt[16];
   int   gExpLen[16];
   int   gExpGot[16];
+  long  gExpCh[16];
   int   gExpSig = 0;
   int   gSigStart;
   int   gSigLen;
@@ -700,7 +763,14 @@ void OpenAll()
   int i;
   char err[200];
   for (i = 0; i < kBuses; i++)
+  {{
     gBusCtx[i] = GetBusNameContext(gBusName[i]);
+    if (gBusCtx[i] != 0)
+      write("Gateway test: bus %s = CANoe network %s", gBusName[i], gBusName[i]);
+    else
+      write("Gateway test: bus %s: no CANoe network of this name, channel %d is used (gBusCh)", gBusName[i],
+            gBusCh[i]);
+  }}
   for (i = 0; i < kSocks; i++)
   {{
     gSock[i] = UdpOpen(IpGetAddressAsNumber(gSockIp[i]), gSockPort[i]);
