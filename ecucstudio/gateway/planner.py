@@ -1456,14 +1456,19 @@ class Planner:
 
     # ------------------------------------------------------------------ ETH -> CAN 1:N
     def _plan_eth_fanout(self):
-        """A message the node sends on several buses (same CAN id and length, from the same Ethernet node) is one
-        message: it comes as one Ethernet PDU (one header id) and is forwarded to every bus. The first bus keeps the
-        PDU, the others map it to their CAN PDU (fanout_of). A different signal layout in the DBC files does not
-        change that (the bytes are forwarded unchanged, a note says so). Per message the user can keep an own
-        Ethernet PDU (override "fanout": false); a different length needs its own PDU."""
+        """A message the node sends on several buses (same CAN id and length, from the same Ethernet node) can come as
+        one Ethernet PDU (one header id) forwarded to every bus: the first bus keeps the PDU, the others map it to
+        their CAN PDU (fanout_of).
+
+        With a routing table the same CAN id on two buses is one message only when a message row of the table links
+        them (one bus is the source and the other a destination, or both are destinations); otherwise they are two
+        messages, each with its own Ethernet PDU. Without a routing table: same CAN id, length and signal layout.
+        Per message the user can force it (override "fanout": true, same length needed) or keep an own Ethernet PDU
+        ("fanout": false)."""
         plan = self.plan
         for r in plan.routes:
             r.fanout_of, r.fanout_reason = None, ""
+        linked = self._table_links()
 
         def choice(r):
             over = r.bus.cfg.messages.get(r.message.name, {}) if isinstance(r.bus.cfg.messages, dict) else {}
@@ -1479,7 +1484,7 @@ class Planner:
                                                      else ""), r.key if over.get("fanout") is False else "")
             m = r.message
             groups.setdefault((m.can_id, m.extended, r.length, tuple(r.peers)) + chosen, []).append(r)
-        n, layout = 0, []
+        n, layout, apart = 0, [], 0
         for rs in groups.values():
             if len({r.bus.name for r in rs}) < 2:
                 continue
@@ -1489,12 +1494,23 @@ class Planner:
                 if r.bus is first.bus:
                     continue
                 reason = pair_problem(first, r)[0]
-                if not reason:
+                forced = True in (choice(first), choice(r))
+                if linked is not None and not forced:
+                    if not linked(first, r):
+                        continue                    # two messages with the same CAN id (routing table)
+                    members.append(r)               # one message: the bytes are forwarded unchanged
+                    if reason:
+                        r.notes.append(f"1:N (routing table) although the signal layout differs from "
+                                       f"{first.bus.name} in the DBC files")
+                        layout.append(r.key)
+                elif not reason:
                     members.append(r)
-                elif reason.startswith("signal layout differs"):
-                    members.append(r)               # same CAN id = one message: the bytes are forwarded unchanged
-                    r.notes.append(f"1:N although the signal layout differs from {first.bus.name} in the DBC files")
-                    layout.append(r.key)
+                elif reason.startswith("signal layout differs") and forced:
+                    members.append(r)               # chosen by the user: the bytes are forwarded unchanged
+                    r.notes.append("1:N chosen although the signal layout differs")
+                    self.warn(f"{r.key}: gets the Ethernet PDU of {first.key} although the signal layout differs "
+                              f"(chosen by the user): the PDU is forwarded unchanged, the layout of {first.bus.name} "
+                              f"is put on {r.bus.name}.")
             if not members:
                 continue
             for r in members:
@@ -1516,24 +1532,72 @@ class Planner:
                     continue
                 if key[6] or key0[6]:
                     why = "own Ethernet PDU chosen (1:N off)"
-                elif key[2] != key0[2] or pair_problem(first, r)[0]:
+                elif key[2] != key0[2]:
                     why = pair_problem(first, r)[0]
                 elif key[3] != key0[3]:
                     why = f"Ethernet source differs ({', '.join(first.peers)} / {', '.join(r.peers)})"
+                elif linked is not None and not linked(first, r):
+                    why = "two messages: no routing table row links them"
+                elif pair_problem(first, r)[0]:
+                    why = pair_problem(first, r)[0]
                 else:
                     why = "own Ethernet PDU / header id chosen"
                 r.fanout_reason = f"not 1:N with {first.key}: {why}"
                 r.notes.append(r.fanout_reason)
+                if why.startswith("two messages"):
+                    apart += 1                      # expected with a routing table: no warning per message
+                    continue
                 hint = (" To forward it from the same Ethernet PDU anyway: route table, right click -> 1:N with the "
-                        "same CAN id..." if why.startswith("length differs") else "")
+                        "same CAN id..." if why.startswith(("signal layout differs", "length differs")) else "")
                 self.warn(f"{r.key}: same CAN id as {first.key} but not one Ethernet PDU ({why}): it gets its own "
                           f"Ethernet PDU and header id.{hint}")
         if n:
             self.info(f"ETH -> CAN 1:N: {n} Ethernet PDU(s) forwarded to several CAN buses (one PDU, one header id).")
+        if apart:
+            self.info(f"ETH -> CAN: {apart} message(s) have the CAN id of a message on another bus but no routing "
+                      f"table row links them: two messages, each its own Ethernet PDU and header id.")
         if layout:
-            self.warn(f"ETH -> CAN 1:N: the DBC files define another signal layout for the same CAN id on "
-                      f"{len(layout)} bus(es) ({', '.join(layout[:4])}{' ...' if len(layout) > 4 else ''}): one "
-                      f"message, forwarded unchanged. Check the DBC files.")
+            self.warn(f"ETH -> CAN 1:N (routing table): the DBC files define another signal layout on "
+                      f"{len(layout)} bus(es) ({', '.join(layout[:4])}{' ...' if len(layout) > 4 else ''}): forwarded "
+                      f"unchanged. Check the DBC files.")
+
+    def _table_links(self):
+        """With a routing table: function(route a, route b) -> True when a message row of the table has the message
+        of a on its bus and the message of b on its bus (as source / destinations). None without a routing table."""
+        cfg = self.cfg
+        if not cfg.routing_table:
+            return None
+        from . import routing_table as rtab
+        try:
+            table = rtab.read(cfg.routing_table)
+        except Exception:  # noqa: BLE001 - reported by the routing table planning
+            return lambda a, b: False
+        net_of = {bus: net for net, bus in self.plan.table_nets.items()}
+        if not net_of:                              # CAN -> CAN off: the networks were not matched yet
+            net_of = {bp.name: net for net, bp in self._table_networks_quiet(table).items()}
+        rows = {}                                   # (network, message name or CAN id) -> message row numbers
+        for row in table.rows:
+            if row.problems or row.routing != rtab.MESSAGE:
+                continue
+            ends = [(row.source, row.src_msg, row.src_id)] + [(d, row.target_msg, row.dst_id) for d in row.dests]
+            for net, name, can_id in ends:
+                rows.setdefault((net, name), set()).add(row.row)
+                if can_id is not None:
+                    rows.setdefault((net, can_id), set()).add(row.row)
+
+        def of(r):
+            net = net_of.get(r.bus.name)
+            if not net:
+                return set()
+            return rows.get((net, r.message.name), set()) | rows.get((net, r.message.can_id), set())
+        return lambda a, b: bool(of(a) & of(b))
+
+    def _table_networks_quiet(self, table) -> dict:
+        """_table_networks without its messages (used when the CAN -> CAN planning did not run)."""
+        n = (len(self.plan.infos), len(self.plan.warnings))
+        nets = self._table_networks(table)
+        del self.plan.infos[n[0]:], self.plan.warnings[n[1]:]
+        return nets
 
     # ------------------------------------------------------------------ buses of other ECUs (over Ethernet)
     def _plan_remote_routes(self):

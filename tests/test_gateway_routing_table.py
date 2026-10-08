@@ -285,6 +285,36 @@ class RoutingTableTest(unittest.TestCase):
         self.assertTrue(any(i.startswith("Routing table networks: PwrNet = Powertrain, BodyNet = BusB")
                             for i in plan.infos), plan.infos)
 
+    def test_eth_to_can_one_message_only_when_the_table_links_it(self):
+        """ETH -> CAN: the same CAN id on two buses is one message (one Ethernet PDU, 1:N) only when a message row of
+        the routing table has it on both buses; otherwise two messages, each its own Ethernet PDU."""
+        msgs = [(768, "Cmd", 8, "GwEcu", [("CmdSig", 0, 8, "Dev")]),
+                (769, "Other", 8, "GwEcu", [("OtherSig", 0, 8, "Dev")])]
+        b = _dbc(self.tmp, "BusB", ["GwEcu", "Dev"], msgs)
+        c = _dbc(self.tmp, "BusC", ["GwEcu", "Dev"], [(768, "Cmd", 8, "GwEcu", [("CmdSig", 8, 8, "Dev")]),
+                                                      (769, "Other", 8, "GwEcu", [("OtherSig", 0, 8, "Dev")])])
+        rows = [["0", "", "Cmd", "ETH", "0x300", "", "", "0", "0", "", "", "D", "D", "S", "", "Cmd", "CAN_FD", "0x300",
+                 ""]]
+        cfg = self.config(self.table(rows))
+        cfg.buses = [BusInput(dbc=b, node="GwEcu"), BusInput(dbc=c, node="GwEcu")]
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        r = {x.key: x for x in plan.routes if x.direction == "ETH->CAN"}
+        self.assertIs(r["BusC/Cmd"].fanout_of, r["BusB/Cmd"])          # linked by the table (other layout: note)
+        self.assertTrue(any("1:N (routing table) although the signal layout differs" in n
+                            for n in r["BusC/Cmd"].notes))
+        self.assertIsNone(r["BusC/Other"].fanout_of)                   # same CAN id, not in the table: 2 messages
+        self.assertIn("two messages: no routing table row links them", r["BusC/Other"].fanout_reason)
+        self.assertNotEqual(r["BusC/Other"].eth_pdu, r["BusB/Other"].eth_pdu)
+        self.assertFalse(any("same CAN id as BusB/Other" in w for w in plan.warnings), plan.warnings)
+        self.assertEqual(r["BusC/Other"].header_id, 0x20000301)        # own header id: flag, the note says why
+        self.assertIn("two messages", r["BusC/Other"].header_note)
+        self.assertTrue(any(i.startswith("ETH -> CAN: 1 message(s) have the CAN id") for i in plan.infos))
+        # the user can still force 1:N for a message
+        cfg.buses[1].messages = {"Other": {"fanout": True}}
+        r = {x.key: x for x in make_plan(cfg).routes if x.direction == "ETH->CAN"}
+        self.assertIs(r["BusC/Other"].fanout_of, r["BusB/Other"])
+
     def test_without_table_and_bad_table(self):
         cfg = self.config()
         cfg.routing_table = ""

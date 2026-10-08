@@ -380,26 +380,31 @@ cùng VLAN. Thêm DBC của bus thuộc zone khác vào **CAN buses** và chọn
 ### 3.5 Một message Ethernet ra nhiều bus CAN (ETH → CAN 1:N)
 
 Ví dụ HPC gửi `HpcCmd` (CAN ID 0x12C) cho zone ECU; zone ECU gửi message này trên cả BusA và BusB (cùng CAN ID, cùng
-độ dài). Cùng CAN ID là **một** message, kể cả khi hai DBC ghi layout signal, cycle time hay CAN FD khác nhau:
+độ dài, cùng layout signal trong hai DBC):
 
+- **có routing table** (mục 17, cửa sổ chính): cùng CAN ID trên hai bus chỉ là **một** message khi một dòng
+  *message* của bảng có message đó trên cả hai bus (một bus là `S` và bus kia là `D`, hoặc cả hai là `D`). Không có
+  dòng nào nối thì là **hai** message: mỗi bus một PDU Ethernet và header ID riêng (header thường có flag, Header note
+  ghi `two messages: no routing table row links them`). Bảng nối mà DBC ghi layout signal khác nhau thì vẫn gộp
+  (PduR chuyển nguyên byte) và có WARNING nhắc kiểm tra DBC. **Không có routing table**: gộp khi cùng CAN ID, cùng độ
+  dài và cùng layout signal;
 - tool tạo **một** PDU Ethernet và **một** header ID (tên theo bus đầu tiên, ví dụ `HpcCmd_oBusA_Eth`, header
   `0x0000012C`); HPC chỉ gửi một lần;
 - GATEWAY có hai `I-PDU-MAPPING` từ PDU-TRIGGERING Ethernet đó tới PDU-TRIGGERING của BusA và BusB; DaVinci tạo một
   PduR routing path SoAd → CanIf (BusA) + CanIf (BusB);
 - bảng route: dòng bus đầu ghi *1:N: forwarded to BusA, BusB*, dòng còn lại ghi *1:N: Ethernet PDU of BusA/HpcCmd*,
   cùng PDU Ethernet và header ID;
-- DBC ghi layout signal khác nhau: vẫn gộp, PduR chuyển nguyên byte; Remark ghi *1:N although the signal layout
-  differs …* và có một WARNING chung nhắc kiểm tra DBC;
-- cùng CAN ID nhưng khác độ dài, khác nguồn Ethernet, hoặc được chọn tên PDU Ethernet / header ID / 1:N off bằng tay:
-  bus đó có PDU Ethernet và header ID riêng (thường thêm flag, ví dụ `0x200000D9`). Tool báo WARNING
+- cùng CAN ID nhưng khác độ dài, khác layout signal, khác nguồn Ethernet, hoặc được chọn tên PDU Ethernet / header ID
+  riêng bằng tay: bus đó có PDU Ethernet và header ID riêng (thường thêm flag, ví dụ `0x200000D9`). Tool báo WARNING
   và ghi lý do vào cột **Header note** / **Remark**, ví dụ `flag 1 added (0x000000D9 used by …); not 1:N with
   BusA/X: length differs (BusA 8, BusB 12)`;
 - tự chọn cho từng CAN ID: chuột phải một dòng ETH->CAN → **1:N with the same CAN id…**. Hộp thoại liệt kê signal
   của message trên từng bus (start bit, độ dài, byte order), signal khác layout tô màu cam. Chọn:
-  - **One Ethernet PDU for all these buses (1:N)**: gộp (độ dài phải bằng nhau). PduR chuyển nguyên PDU, PDU
-    Ethernet theo layout của bus đầu tiên;
-  - **An own Ethernet PDU and header id per bus**: không gộp;
-  - **Automatic**: như mặc định (gộp khi cùng CAN ID, độ dài và nguồn Ethernet).
+  - **One Ethernet PDU for all these buses (1:N)**: gộp cả khi khác layout signal (độ dài phải bằng nhau). PduR
+    chuyển nguyên PDU, PDU Ethernet theo layout của bus đầu tiên, node nhận trên bus kia đọc byte theo layout của
+    nó. WARNING vẫn hiện để nhắc;
+  - **An own Ethernet PDU and header id per bus**: không gộp, kể cả khi giống hệt;
+  - **Automatic**: như mặc định (có routing table: theo bảng; không có: cùng độ dài và layout).
 
   Lựa chọn lưu trong cấu hình (`messages.<tên>.fanout` = `true` / `false`), sinh lại vẫn giữ;
 - mạng nhiều ECU (mục 13): zone ECU nhận message từ ECU khác và forward ra hai bus của nó cũng dùng một PDU, header
