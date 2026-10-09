@@ -7,8 +7,9 @@
    signal layout checked; N:1 needs a link).
 3. Each ECU is planned again with the result: the sender sends the PDU to the other ECU (eth_peers), the receiver
    takes it from the sender (eth_peer) under the sender's Ethernet PDU name.
-4. Header ids are assigned once for the whole network: unique on the sending socket and on every receiving socket
-   (including the ids the bases already use), lock file / user values first. Both ends get the same value.
+4. Header ids are assigned once for the whole network: header id = CAN id, unique per link (sending node ->
+   receiving node, including the ids the bases already use), user / lock file values first. Twice on one link is an
+   error (no flag is added). Both ends get the same value.
 """
 from __future__ import annotations
 
@@ -17,9 +18,10 @@ import copy
 import os
 from dataclasses import dataclass, field
 
+from ..base import ANY, link_key, link_owners
 from ..config import EthPeer, GatewayConfig, SocketSide
-from ..planner import (CAN_TO_ETH, ETH_TO_CAN, Planner, Route, _norm_gateway_name, _valid_ip, fmt, load_base,
-                       pair_problem, sanitize)
+from ..planner import (CAN_TO_ETH, ETH_TO_CAN, Planner, Route, _norm_gateway_name, _valid_ip, fmt, header_base_id,
+                       load_base, old_flag, pair_problem, sanitize)
 from .config import TopologyConfig, socket_side
 
 
@@ -105,7 +107,8 @@ class TopologyPlanner:
             pl = self._planner(node, {}, first=True)
             if pl is None:
                 continue
-            pl.run()
+            if pl.prepare():                        # no header ids yet: assigned once for the network, after pairing
+                pl.finish()
             first[node.name] = pl
             for e in pl.plan.errors:
                 self.err(f"[{node.name}] {e}")
@@ -549,18 +552,23 @@ class TopologyPlanner:
 
     # ------------------------------------------------------------------ header ids for the whole network
     def _assign_headers(self, second: dict):
+        """Header id = CAN id, unique per link (sending node -> receiving node, the ids the bases already use
+        included): the same CAN id to another node or from another node is fine, twice on one link is an error (no
+        flag is added). Order: set by the user, lock file, previous file, then the others. A kept id that carries a
+        collision flag of an older version becomes the CAN id again."""
         cfg, plan = self.cfg, self.plan
-        used = collections.defaultdict(dict)        # ("tx" | "rx", node) -> {header id: owner}
+        used = collections.defaultdict(dict)        # (sender node, receiver node) -> {header id: owner}
         for ecu, pl in second.items():
             if not pl.plan.sides:
                 continue
             names = {}
             for (d, peer), sp in pl.plan.sides.items():
                 if d == CAN_TO_ETH:
-                    names[("tx", sp.local)] = ("tx", ecu)
-                    names[("rx", sp.remote)] = ("rx", peer)
+                    names[link_key(sp.local, sp.remote)] = link_key(ecu, peer)
+                    names[link_key(sp.local, ANY)] = link_key(ecu, ANY)
                 else:
-                    names[("rx", sp.local)] = ("rx", ecu)
+                    names[link_key(sp.remote, sp.local)] = link_key(peer, ecu)
+                    names[link_key(ANY, sp.local)] = link_key(ANY, ecu)
             for k, ids in pl._scopes().items():
                 if k in names:
                     for hid, owner in ids.items():
@@ -573,13 +581,13 @@ class TopologyPlanner:
                 if not any((r.direction, p) in pl.plan.sides for p in r.peers) or r.fanout_of is not None:
                     continue                        # 1:N: the other buses get the id of the PDU's route
                 if r.direction == CAN_TO_ETH:
-                    key, sender, keys = f"{ecu}/{r.key}", ecu, [("tx", ecu)] + [("rx", p) for p in r.peers]
+                    key, keys = f"{ecu}/{r.key}", [link_key(ecu, p) for p in r.peers]
                 else:
                     src = r.peers[0]
                     if cfg.ecu(src) is not None:
                         continue                    # receiving end of an ECU -> ECU link: gets the sender's id
-                    key, sender, keys = f"{src}->{ecu}/{r.key}", src, [("tx", src), ("rx", ecu)]
-                base_id = r.message.can_id | (0x80000000 if hcfg.extended_flag and r.message.extended else 0)
+                    key, keys = f"{src}->{ecu}/{r.key}", [link_key(src, ecu)]
+                base_id = header_base_id(r.message, hcfg)
                 if r.header_note == "set by user" and r.header_id >= 0:
                     fixed, kind = r.header_id, "user"
                 elif key in self.lock:
@@ -588,50 +596,56 @@ class TopologyPlanner:
                     fixed, kind = r.header_id, "previous"
                 else:
                     fixed, kind = -1, ""
-                items.append((order[kind], key, sender, keys, base_id, fixed, kind, r, hcfg))
+                items.append((order[kind], key, keys, base_id, fixed, kind, r, hcfg))
         items.sort(key=lambda x: x[0])               # stable: ECU / route order within each group
-        values = {}
-        for _o, key, sender, keys, base_id, fixed, kind, r, hcfg in items:
+        values, unflagged = {}, []
+
+        def clash(keys, hid):
+            for k in keys:
+                owners = link_owners(used, k, hid)
+                if owners:
+                    return owners[0], f"{k[0]} to {k[1]}"
+            return None
+        for _o, key, keys, base_id, fixed, kind, r, hcfg in items:
             note = {"user": "set by user", "lock": "kept (lock file)", "previous": "kept from the previous file"}.get(
                 kind, "")
-            if fixed >= 0:
-                clash = [used[k][fixed] for k in keys if fixed in used[k]]
-                if clash and kind == "user":
-                    self.err(f"{key}: header id 0x{fixed:08X} is already used by {clash[0]} on the same socket.")
-                elif clash:
-                    self.warn(f"{key}: header id 0x{fixed:08X} ({note}) is now used by {clash[0]}; a new header id "
-                              f"is assigned.")
-                    fixed = -1
-            if fixed < 0:
-                cand, k, shift = base_id, 0, hcfg.flag_shift
-                max_flag = (0xFFFFFFFF >> shift) if not hcfg.extended_flag else (0x7FFFFFFF >> shift)
-                while any(cand in used[x] for x in keys):
-                    k += 1
-                    if k > max_flag:
-                        cand = None
-                        break
-                    cand = base_id | (k << shift)
-                if cand is None:
-                    self.err(f"{key}: no free header id for CAN id {r.message.id_text}.")
-                    continue
-                note = ""
-                if k:
-                    owner = next(used[x][base_id] for x in keys if base_id in used[x])
-                    note = f"flag {k} added (0x{base_id:08X} used by {owner})"
-                    if r.fanout_reason:
-                        note += f"; {r.fanout_reason}"
-                    self.warn(f"Header id 0x{base_id:08X} of {key} is already used by {owner}; using 0x{cand:08X} "
-                              f"(flag {k} in bits {shift}..31).")
-                fixed = cand
+            if kind in ("lock", "previous") and old_flag(fixed, base_id, hcfg):
+                unflagged.append(f"{key} 0x{fixed:08X} -> 0x{base_id:08X}")
+                fixed, kind, note = -1, "", ""
+            if fixed >= 0 and kind != "user" and clash(keys, fixed):
+                owner, where = clash(keys, fixed)
+                self.warn(f"{key}: header id 0x{fixed:08X} ({note}) is now used by {owner} from {where}; a new header "
+                          f"id is assigned.")
+                fixed, kind, note = -1, "", ""
+            hid = fixed if fixed >= 0 else base_id
+            hit = clash(keys, hid)
+            if hit:
+                owner, where = hit
+                why = f" ({r.fanout_reason})" if r.fanout_reason else ""
+                r.header_clash = (f"{key}: header id 0x{hid:08X}"
+                                  + ("" if kind == "user" else f" (CAN id {r.message.id_text})")
+                                  + f" is already used by {owner} from {where}{why}: two PDUs with one header id on "
+                                    f"one link. Disable one of them or enter another header id.")
+                r.header_note = f"conflict: 0x{hid:08X} used by {owner}"
+                self.err(r.header_clash)
+                continue
             for x in keys:
-                used[x].setdefault(fixed, f"{r.eth_pt_name} ({sender})")
-            values[key] = fixed
-            r.header_id, r.header_note, r.locked = fixed, note, False
+                used[x].setdefault(hid, key)
+            values[key] = hid
+            r.header_id, r.header_note, r.locked = hid, note, False
         plan.header_ids = values
+        if unflagged:
+            self.warn(f"{len(unflagged)} header id(s) kept in the lock / previous file had a collision flag (bits "
+                      f"29..31); they are the CAN id again: {', '.join(unflagged[:6])}"
+                      f"{' ...' if len(unflagged) > 6 else ''}. Tell the other Ethernet nodes.")
         # the receiving end of every ECU -> ECU link uses the sender's header id
         for cr in plan.enabled_cross:
+            if not cr.dst.enabled:
+                continue
             hid = values.get(f"{cr.src_ecu}/{cr.src.key}")
-            if hid is None or not cr.dst.enabled:
+            if hid is None:
+                if cr.src.header_clash:             # reported at the sender: no second error at the receiver
+                    cr.dst.header_clash, cr.dst.header_note = cr.src.header_clash, cr.src.header_note
                 continue
             cr.header_id = hid
             cr.dst.header_id, cr.dst.header_note, cr.dst.locked = hid, f"same as {cr.src_ecu}", False

@@ -3,9 +3,11 @@
 The plan only reads the base file; :mod:`writer` applies it. Rules:
 
 * messages the selected DBC node receives are routed CAN -> ETH, messages it sends ETH -> CAN (1:1)
-* the SoAd header id is the CAN id, zero-padded to 32 bit. When that id is already used by another PDU
-  received on the same socket, a flag is set in bits 29..31 (unused by 29-bit CAN ids) and a warning
-  is reported
+* the SoAd header id is the CAN id, zero-padded to 32 bit. It must be unique per link (sending socket ->
+  receiving socket): the same CAN id to / from another node is fine, twice on one link is an error (no flag
+  bit is added)
+* ETH -> CAN: the same CAN id from the same Ethernet node on several buses is one message: one Ethernet PDU
+  forwarded to every bus (1:N)
 * a CAN bus that already exists in the base file is reused (frames are matched by CAN id), otherwise a
   new CAN cluster is created from the DBC
 """
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field
 from .. import arxml
 from ..arxml import local, q
 from . import dbcread, dvproject
-from .base import Base, CanChannel, EthChannel, new_document
+from .base import Base, CanChannel, EthChannel, link_key, link_owners, new_document
 from .config import BusInput, GatewayConfig, SocketSide
 
 CAN_TO_ETH = "CAN->ETH"
@@ -99,6 +101,7 @@ class Route:
     copy_signals_from: str = ""     # existing CAN I-SIGNAL-I-PDU whose signals are copied to the ETH PDU
     header_id: int = 0
     header_note: str = ""
+    header_clash: str = ""      # the header id is already used on the same link (reported as an error)
     notes: list[str] = field(default_factory=list)
     peers: list[str] = field(default_factory=list)  # Ethernet nodes: CAN->ETH destinations / ETH->CAN source
     fanout_of: "Route | None" = None    # ETH->CAN 1:N: this bus gets the Ethernet PDU of that route (no own PDU)
@@ -1456,23 +1459,17 @@ class Planner:
 
     # ------------------------------------------------------------------ ETH -> CAN 1:N
     def _plan_eth_fanout(self):
-        """A message the node sends on several buses (same CAN id and length, from the same Ethernet node) can come as
-        one Ethernet PDU (one header id) forwarded to every bus: the first bus keeps the PDU, the others map it to
-        their CAN PDU (fanout_of).
+        """The same CAN id from the same Ethernet node is one message: the node sends it once (one Ethernet PDU, one
+        header id) and this ECU forwards it to every bus that has it (1:N). The first bus keeps the PDU, the others map
+        it to their CAN PDU (fanout_of). PduR forwards the bytes unchanged: another signal layout or message name in
+        the DBC files is only a note (and one warning / info line).
 
-        With a routing table the same CAN id on two buses is one message only when a message row of the table links
-        them (one bus is the source and the other a destination, or both are destinations); otherwise they are two
-        messages, each with its own Ethernet PDU. Without a routing table: same CAN id, length and signal layout.
-        Per message the user can force it (override "fanout": true, same length needed) or keep an own Ethernet PDU
-        ("fanout": false)."""
+        Not one PDU: another length, or an own Ethernet PDU / header id chosen for a bus (override "eth_pdu" /
+        "header_id", or "fanout": false). That bus keeps its own Ethernet PDU; when its header id is then twice on the
+        same link, the header id assignment reports an error."""
         plan = self.plan
         for r in plan.routes:
             r.fanout_of, r.fanout_reason = None, ""
-        linked = self._table_links()
-
-        def choice(r):
-            over = r.bus.cfg.messages.get(r.message.name, {}) if isinstance(r.bus.cfg.messages, dict) else {}
-            return over.get("fanout")
         groups = collections.OrderedDict()
         for r in plan.enabled_routes:
             if r.direction != ETH_TO_CAN or r.can_problem:
@@ -1484,33 +1481,19 @@ class Planner:
                                                      else ""), r.key if over.get("fanout") is False else "")
             m = r.message
             groups.setdefault((m.can_id, m.extended, r.length, tuple(r.peers)) + chosen, []).append(r)
-        n, layout, apart = 0, [], 0
+        n, layout, renamed = 0, [], []
         for rs in groups.values():
-            if len({r.bus.name for r in rs}) < 2:
-                continue
-            first = rs[0]
-            members = []
+            first, members = rs[0], []
             for r in rs[1:]:
                 if r.bus is first.bus:
-                    continue
-                reason = pair_problem(first, r)[0]
-                forced = True in (choice(first), choice(r))
-                if linked is not None and not forced:
-                    if not linked(first, r):
-                        continue                    # two messages with the same CAN id (routing table)
-                    members.append(r)               # one message: the bytes are forwarded unchanged
-                    if reason:
-                        r.notes.append(f"1:N (routing table) although the signal layout differs from "
-                                       f"{first.bus.name} in the DBC files")
-                        layout.append(r.key)
-                elif not reason:
-                    members.append(r)
-                elif reason.startswith("signal layout differs") and forced:
-                    members.append(r)               # chosen by the user: the bytes are forwarded unchanged
-                    r.notes.append("1:N chosen although the signal layout differs")
-                    self.warn(f"{r.key}: gets the Ethernet PDU of {first.key} although the signal layout differs "
-                              f"(chosen by the user): the PDU is forwarded unchanged, the layout of {first.bus.name} "
-                              f"is put on {r.bus.name}.")
+                    continue                        # the CAN id twice on one bus: two PDUs (header ids clash)
+                members.append(r)
+                if pair_problem(first, r)[0]:       # same length: only the signal layout can differ
+                    r.notes.append(f"1:N although the signal layout differs from {first.bus.name} in the DBC files")
+                    layout.append(r.key)
+                if r.message.name != first.message.name:
+                    r.notes.append(f"1:N: same CAN id and sender as {first.key} (another name in the DBC)")
+                    renamed.append(r.key)
             if not members:
                 continue
             for r in members:
@@ -1519,85 +1502,38 @@ class Planner:
                 r.notes.append(f"1:N: Ethernet PDU of {first.key}")
             first.notes.append("1:N: forwarded to " + ", ".join(r.bus.name for r in [first] + members))
             n += 1
-        # the same CAN id on other buses that keeps an own Ethernet PDU (own header id): tell why
+        # the same CAN id that keeps an own Ethernet PDU: tell why (twice on one link is reported by the header ids)
         by_id = collections.OrderedDict()
         for key, rs in groups.items():
             for r in rs:
                 if r.fanout_of is None:
                     by_id.setdefault(key[:2], []).append((key, r))
         for owners in by_id.values():
-            (key0, first), others = owners[0], owners[1:]
-            for key, r in others:
-                if r.bus is first.bus:
-                    continue
-                if key[6] or key0[6]:
+            for i, (key, r) in enumerate(owners[1:], 1):
+                same = [o for o in owners[:i] if o[0][3] == key[3]]     # from the same Ethernet node
+                key0, first = same[0] if same else owners[0]
+                if not same:
+                    why = f"another Ethernet sender ({', '.join(first.peers)} / {', '.join(r.peers)})"
+                elif r.bus is first.bus:
+                    why = f"the CAN id is twice on {r.bus.name}"
+                elif key[6] or key0[6]:
                     why = "own Ethernet PDU chosen (1:N off)"
                 elif key[2] != key0[2]:
-                    why = pair_problem(first, r)[0]
-                elif key[3] != key0[3]:
-                    why = f"Ethernet source differs ({', '.join(first.peers)} / {', '.join(r.peers)})"
-                elif linked is not None and not linked(first, r):
-                    why = "two messages: no routing table row links them"
-                elif pair_problem(first, r)[0]:
                     why = pair_problem(first, r)[0]
                 else:
                     why = "own Ethernet PDU / header id chosen"
                 r.fanout_reason = f"not 1:N with {first.key}: {why}"
                 r.notes.append(r.fanout_reason)
-                if why.startswith("two messages"):
-                    apart += 1                      # expected with a routing table: no warning per message
-                    continue
-                hint = (" To forward it from the same Ethernet PDU anyway: route table, right click -> 1:N with the "
-                        "same CAN id..." if why.startswith(("signal layout differs", "length differs")) else "")
-                self.warn(f"{r.key}: same CAN id as {first.key} but not one Ethernet PDU ({why}): it gets its own "
-                          f"Ethernet PDU and header id.{hint}")
         if n:
             self.info(f"ETH -> CAN 1:N: {n} Ethernet PDU(s) forwarded to several CAN buses (one PDU, one header id).")
-        if apart:
-            self.info(f"ETH -> CAN: {apart} message(s) have the CAN id of a message on another bus but no routing "
-                      f"table row links them: two messages, each its own Ethernet PDU and header id.")
         if layout:
-            self.warn(f"ETH -> CAN 1:N (routing table): the DBC files define another signal layout on "
-                      f"{len(layout)} bus(es) ({', '.join(layout[:4])}{' ...' if len(layout) > 4 else ''}): forwarded "
-                      f"unchanged. Check the DBC files.")
-
-    def _table_links(self):
-        """With a routing table: function(route a, route b) -> True when a message row of the table has the message
-        of a on its bus and the message of b on its bus (as source / destinations). None without a routing table."""
-        cfg = self.cfg
-        if not cfg.routing_table:
-            return None
-        from . import routing_table as rtab
-        try:
-            table = rtab.read(cfg.routing_table)
-        except Exception:  # noqa: BLE001 - reported by the routing table planning
-            return lambda a, b: False
-        net_of = {bus: net for net, bus in self.plan.table_nets.items()}
-        if not net_of:                              # CAN -> CAN off: the networks were not matched yet
-            net_of = {bp.name: net for net, bp in self._table_networks_quiet(table).items()}
-        rows = {}                                   # (network, message name or CAN id) -> message row numbers
-        for row in table.rows:
-            if row.problems or row.routing != rtab.MESSAGE:
-                continue
-            ends = [(row.source, row.src_msg, row.src_id)] + [(d, row.target_msg, row.dst_id) for d in row.dests]
-            for net, name, can_id in ends:
-                rows.setdefault((net, name), set()).add(row.row)
-                if can_id is not None:
-                    rows.setdefault((net, can_id), set()).add(row.row)
-
-        def of(r):
-            net = net_of.get(r.bus.name)
-            if not net:
-                return set()
-            return rows.get((net, r.message.name), set()) | rows.get((net, r.message.can_id), set())
-        return lambda a, b: bool(of(a) & of(b))
-
-    def _table_networks_quiet(self, table) -> dict:
-        """_table_networks without its messages (used when the CAN -> CAN planning did not run)."""
-        n = (len(self.plan.infos), len(self.plan.warnings))
-        nets = self._table_networks(table)
-        del self.plan.infos[n[0]:], self.plan.warnings[n[1]:]
-        return nets
+            self.warn(f"ETH -> CAN 1:N: the DBC files define another signal layout on {len(layout)} bus(es) "
+                      f"({', '.join(layout[:4])}{' ...' if len(layout) > 4 else ''}): forwarded unchanged. Check the "
+                      f"DBC files.")
+        if renamed:
+            self.info(f"ETH -> CAN 1:N: {len(renamed)} message(s) have another name than the message with the same "
+                      f"CAN id from the same Ethernet node on another bus ({', '.join(renamed[:4])}"
+                      f"{' ...' if len(renamed) > 4 else ''}): one message, forwarded unchanged.")
 
     # ------------------------------------------------------------------ buses of other ECUs (over Ethernet)
     def _plan_remote_routes(self):
@@ -1983,7 +1919,7 @@ class Planner:
 
     # ------------------------------------------------------------------ header ids
     def _scopes(self) -> dict:
-        """Header ids already used per socket: key -> {header id: owner (PDU triggering name)}."""
+        """Header ids already used per link (sending socket, receiving socket): link -> {header id: owner}."""
         b = self.base
         ids = b.header_ids()
         used = collections.defaultdict(dict)
@@ -1994,56 +1930,67 @@ class Planner:
         return used
 
     def _assign_header_ids(self):
+        """Header id = CAN id (zero padded; bit 31 for extended ids with header.extended_flag), unique per link
+        (sending socket -> receiving socket): the same CAN id to / from another node is fine, twice on one link is an
+        error (no flag is added). A header id set by the user is only checked; one kept from the previous file is
+        assigned again when it is taken now or carries a collision flag of an older version."""
         plan, hcfg = self.plan, self.cfg.header
         used = self._scopes()
-        own = [r for r in plan.enabled_routes if r.fanout_of is None]
+        own = [r for r in plan.enabled_routes if r.fanout_of is None and not r.header_clash]
         routes = [r for r in own if r.header_id >= 0] + \
                  [r for r in own if r.header_id < 0]     # fixed ids (user / kept) first
+        unflagged = []
         for r in routes:
             sps = [plan.sides[(r.direction, p)] for p in r.peers if (r.direction, p) in plan.sides]
             if not sps:
                 continue
-            # one identifier (header id) for every destination: free on each local and remote socket involved
-            keys = list(dict.fromkeys(
-                [("tx", sp.local) for sp in sps] + [("rx", sp.remote) for sp in sps] if r.direction == CAN_TO_ETH
-                else [("rx", sp.local) for sp in sps]))
-            base_id = r.message.can_id | (0x80000000 if hcfg.extended_flag and r.message.extended else 0)
-            if r.header_id >= 0 and r.locked:
-                clash = [used[k][r.header_id] for k in keys if r.header_id in used[k]]
-                if clash:
-                    self.warn(f"{r.key}: the previous header id {r.header_text} is now used by {clash[0]} on the "
-                              f"same socket; a new header id is assigned.")
-                    r.header_id, r.locked, r.header_note = -1, False, ""
-            if r.header_id >= 0:                    # set by the user / kept: never changed, only checked
-                clash = [used[k][r.header_id] for k in keys if r.header_id in used[k]]
-                if clash:
-                    self.err(f"{r.key}: header id {r.header_text} is already used by {clash[0]} on the same socket.")
-            else:
-                cand, k = base_id, 0
-                shift = hcfg.flag_shift
-                max_flag = (0xFFFFFFFF >> shift) if not hcfg.extended_flag else ((0x7FFFFFFF >> shift))
-                while any(cand in used[key] for key in keys):
-                    k += 1
-                    if k > max_flag:
-                        cand = None
-                        break
-                    cand = base_id | (k << shift)
-                if cand is None:
-                    self.err(f"{r.key}: no free header id for CAN id {r.message.id_text}.")
-                    continue
-                if k:
-                    owner = next(used[key][base_id] for key in keys if base_id in used[key])
-                    r.header_note = f"flag {k} added (0x{base_id:08X} used by {owner})"
-                    if r.fanout_reason:
-                        r.header_note += f"; {r.fanout_reason}"
-                    self.warn(f"Header id 0x{base_id:08X} of {r.key} is already used by {owner} on the same "
-                              f"socket; using 0x{cand:08X} (flag {k} in bits {hcfg.flag_shift}..31).")
-                r.header_id = cand
-            for key in keys:
-                used[key].setdefault(r.header_id, r.eth_pt_name)
+            # one identifier (header id) for every destination: free on each link involved
+            links = {}
+            for sp in sps:
+                peer = sp.peer if sp.peer not in ("", "default") else (sp.remote_ip or sp.remote.rsplit("/", 1)[-1])
+                if r.direction == CAN_TO_ETH:
+                    links.setdefault(link_key(sp.local, sp.remote), f"{plan.ecu_name} to {peer}")
+                else:
+                    links.setdefault(link_key(sp.remote, sp.local), f"{peer} to {plan.ecu_name}")
+
+            def clash(hid):
+                for k, where in links.items():
+                    owners = link_owners(used, k, hid)
+                    if owners:
+                        return owners[0], where
+                return None
+            base_id = header_base_id(r.message, hcfg)
+            if r.header_id >= 0 and r.locked and old_flag(r.header_id, base_id, hcfg):
+                unflagged.append(f"{r.key} {r.header_text} -> 0x{base_id:08X}")
+                r.header_id, r.locked, r.header_note = -1, False, ""
+            if r.header_id >= 0 and r.locked and clash(r.header_id):
+                owner, where = clash(r.header_id)
+                self.warn(f"{r.key}: the previous header id {r.header_text} is now used by {owner} from {where}; a "
+                          f"new header id is assigned.")
+                r.header_id, r.locked, r.header_note = -1, False, ""
+            user = r.header_id >= 0                 # set by the user / kept: never changed, only checked
+            hid = r.header_id if user else base_id
+            hit = clash(hid)
+            if hit:
+                owner, where = hit
+                why = f" ({r.fanout_reason})" if r.fanout_reason else ""
+                r.header_clash = (f"{r.direction} {r.key}: header id 0x{hid:08X}"
+                                  + ("" if user else f" (CAN id {r.message.id_text})")
+                                  + f" is already used by {owner} from {where}{why}: two PDUs with one header id on "
+                                    f"one link. Disable one of them or enter another header id.")
+                r.header_note = f"conflict: 0x{hid:08X} used by {owner}"
+                self.err(r.header_clash)
+                continue
+            r.header_id = hid
+            for key in links:
+                used[key].setdefault(r.header_id, r.key)
             r.eth_id_name = self._unique(plan.id_set, fmt(self.cfg.naming.header_id, eth_pdu=r.eth_pdu,
                                                           pdu=r.eth_pdu, msg=r.message.name, bus=r.bus.name,
                                                           ecu=plan.ecu_name), "Header id")
+        if unflagged:
+            self.warn(f"{len(unflagged)} header id(s) of the previous file had a collision flag (bits "
+                      f"{hcfg.flag_shift}..31); they are the CAN id again: {', '.join(unflagged[:6])}"
+                      f"{' ...' if len(unflagged) > 6 else ''}. Tell the other Ethernet nodes.")
         copy_fanout_ids(plan)
 
     def _resolve_gateway(self):
@@ -2055,6 +2002,17 @@ class Planner:
             pkg = self._package("GATEWAY")
             name = self._unique(pkg, fmt(self.cfg.naming.gateway, ecu=plan.ecu_name), "Gateway")
             plan.gateway, plan.gateway_new = f"{pkg}/{name}", True
+
+
+def header_base_id(m: dbcread.Message, hcfg) -> int:
+    """Header id of a CAN message: the CAN id zero padded to 32 bit (+ bit 31 for extended ids with extended_flag)."""
+    return m.can_id | (0x80000000 if hcfg.extended_flag and m.extended else 0)
+
+
+def old_flag(hid: int, base_id: int, hcfg) -> bool:
+    """*hid* is *base_id* with collision flag bits (flag_shift..31) that older versions added on a collision."""
+    low = (1 << hcfg.flag_shift) - 1
+    return hid != base_id and (hid & low) == (base_id & low)
 
 
 def copy_fanout_ids(plan: Plan):

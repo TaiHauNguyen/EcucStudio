@@ -128,7 +128,8 @@ class BusInput:
 @dataclass
 class HeaderSettings:
     extended_flag: bool = False     # always set bit 31 for extended CAN ids (AUTOSAR Can_IdType style)
-    flag_shift: int = 29            # collision flags k << 29, k = 1..7 (bits a 29-bit CAN id never uses)
+    flag_shift: int = 29            # older versions added collision flags k << 29 (bits a 29-bit CAN id never uses);
+                                    # such kept header ids become the CAN id again (a collision is an error now)
 
 
 @dataclass
@@ -140,8 +141,8 @@ class Options:
     eth_routes: bool = True         # CAN <-> Ethernet routes (node RX -> Ethernet, node TX <- Ethernet)
     can_routes: bool = True         # CAN <-> CAN routes: a message the node receives on one bus and sends on another
     can_match_id: bool = True       # CAN <-> CAN: also pair renamed messages (same CAN id, length and layout)
-    eth_fanout: bool = True         # ETH -> CAN: a message the node sends on several buses (same CAN id, length and
-                                    # layout) is one Ethernet PDU forwarded to every bus (1:N)
+    eth_fanout: bool = True         # ETH -> CAN: the same CAN id from the same Ethernet node on several buses (same
+                                    # length) is one Ethernet PDU forwarded to every bus (1:N)
     eth_no_com: bool = True         # DBC files imported in DaVinci: Com does not send the CAN PDUs fed from Ethernet
                                     # (written to the .vsde file of the DBC converter, see vsde.py)
     dbc_imported: bool = False      # no base file: the DBC files are imported in the DaVinci project of the ECU, the

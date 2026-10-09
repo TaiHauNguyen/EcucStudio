@@ -14,6 +14,20 @@ from ..arxml import local, q
 
 PHYSICAL_CHANNELS = ("CAN-PHYSICAL-CHANNEL", "ETHERNET-PHYSICAL-CHANNEL", "LIN-PHYSICAL-CHANNEL",
                      "FLEXRAY-PHYSICAL-CHANNEL")
+ANY = "*"                       # partner of a socket connection without remote address: any node
+
+
+def link_key(sender: str, receiver: str) -> tuple[str, str]:
+    """Scope of a header id: the PDUs one socket (node) sends to another. The receiver tells them apart by the header
+    id only (SoAd: per socket connection), so it is unique per link; to / from another node is another link."""
+    return (sender, receiver)
+
+
+def link_owners(used: dict, key: tuple[str, str], hid: int) -> list:
+    """Owners of header id *hid* on link *key* in *used* ({link: {header id: owner}}); a link with ANY node meets
+    every link of that socket."""
+    meets = lambda a, b: a == b or ANY in (a, b)
+    return [ids[hid] for (s, r), ids in used.items() if hid in ids and meets(s, key[0]) and meets(r, key[1])]
 
 
 @dataclass
@@ -413,21 +427,21 @@ class Base:
 
     def header_id_keys(self, socket: "Socket", connection: "SoConnection", pdu_triggering: str | None,
                        ecu: str) -> list[tuple[str, str]]:
-        """Scopes in which a header id sent / received over *connection* of the ECU's *socket* must be unique:
-        ("rx", socket) for PDUs the ECU receives, ("tx", socket) plus ("rx", remote socket) for PDUs it sends
-        (unknown direction: both)."""
+        """Links (sending socket, receiving socket) on which a header id sent / received over *connection* of the
+        ECU's *socket* must be unique: (remote, socket) for PDUs the ECU receives, (socket, remote) for PDUs it sends
+        (unknown direction: both). A connection without remote address links with ANY node."""
         d = self.pdu_direction(pdu_triggering, ecu) if pdu_triggering else None
+        remotes = connection.remotes or [ANY]
         keys = []
         if d in ("IN", None):
-            keys.append(("rx", socket.path))
+            keys += [link_key(r, socket.path) for r in remotes]
         if d in ("OUT", None):
-            keys.append(("tx", socket.path))
-            keys += [("rx", r) for r in connection.remotes]
+            keys += [link_key(socket.path, r) for r in remotes]
         return keys
 
     def header_id_scopes(self, sockets: list | None = None) -> dict:
-        """{scope key: {header id: [SO-CON-I-PDU-IDENTIFIER paths]}} of the sockets owned by an ECU connector
-        (all Ethernet channels when *sockets* is None)."""
+        """{link (sending socket, receiving socket): {header id: [SO-CON-I-PDU-IDENTIFIER paths]}} of the sockets
+        owned by an ECU connector (all Ethernet channels when *sockets* is None)."""
         ids = self.header_ids()
         if sockets is None:
             sockets = [s for ch in self.eth_channels() for s in ch.sockets]

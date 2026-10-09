@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from .. import arxml
 from ..arxml import local, q
 from . import xmlorder
-from .base import Base
+from .base import ANY, Base, link_owners
 from .xmlorder import E, R, T
 
 BUS_KIND = {"CAN-PHYSICAL-CHANNEL": "CAN", "ETHERNET-PHYSICAL-CHANNEL": "ETH", "LIN-PHYSICAL-CHANNEL": "LIN",
@@ -364,14 +364,14 @@ class GatewayModel:
         """Inconsistencies of the gateway configuration in the file."""
         b = self.base
         out = []
+        sock = lambda p: "any node" if p == ANY else p.rsplit("/", 1)[-1]
         for key, by_id in b.header_id_scopes([s for ch in self.channels for s in ch.sockets]).items():
             for hid, id_paths in by_id.items():
                 pts = {self.ids[p].pdu_triggering for p in id_paths}
                 if len(pts) > 1:
-                    what = "received on" if key[0] == "rx" else "sent from"
                     names = ", ".join(sorted(p.rsplit("/", 1)[-1] for p in pts if p))
-                    out.append(f"Header id 0x{hid:08X} is used by {len(pts)} PDUs {what} socket "
-                               f"{key[1].rsplit('/', 1)[-1]}: {names}")
+                    out.append(f"Header id 0x{hid:08X} is used by {len(pts)} PDUs sent from socket {sock(key[0])} "
+                               f"to {sock(key[1])}: {names}")
         for p, h in self.ids.items():
             if not self.connections_of(p):
                 out.append(f"Header id {p.rsplit('/', 1)[-1]} ({h.header_id if h.header_id is not None else '-'}) "
@@ -399,9 +399,9 @@ class GatewayModel:
                 if c.path not in conns:
                     continue
                 for key in b.header_id_keys(s, c, h.pdu_triggering, ecu):
-                    for other in scopes.get(key, {}).get(value, []):
-                        if other != id_path and self.ids[other].pdu_triggering != h.pdu_triggering:
-                            out.add(other)
+                    for others in link_owners(scopes, key, value):
+                        out |= {o for o in others
+                                if o != id_path and self.ids[o].pdu_triggering != h.pdu_triggering}
         return sorted(out)
 
     def set_header_id(self, id_path: str, value) -> None:
@@ -410,7 +410,7 @@ class GatewayModel:
             raise EditError("A header id is a 32-bit number (e.g. 0x123).")
         clash = self.id_conflicts(id_path, value)
         if clash:
-            raise EditError(f"Header id 0x{value:08X} is already used on the same socket by "
+            raise EditError(f"Header id 0x{value:08X} is already used between the same sockets by "
                             + ", ".join(self._pdu_name(c) for c in clash) + ".")
         el = self.base.el(id_path)
         old = self.ids[id_path].header_id

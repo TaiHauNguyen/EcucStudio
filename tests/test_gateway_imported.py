@@ -34,7 +34,10 @@ class ImportedTest(unittest.TestCase):
     def config(self):
         cfg = GatewayConfig(base="", output=os.path.join(self.tmp, "Gw_CanEthGateway.arxml"), ecu="GwInst")
         cfg.options.dbc_imported = True
-        cfg.buses = [BusInput(dbc=DBC, node="GwEcu"), BusInput(dbc=CHASSIS, node="GwEcu")]
+        # header ids entered where a CAN id would be twice on one link: ExtSameId (extended 0x100, like EngineData),
+        # Chassis/GwCommand (0x300, like Body/BrakeStatus extended 0x300)
+        cfg.buses = [BusInput(dbc=DBC, node="GwEcu", messages={"ExtSameId": {"header_id": "0x1001"}}),
+                     BusInput(dbc=CHASSIS, node="GwEcu", messages={"GwCommand": {"header_id": "0x1300"}})]
         e = cfg.ethernet
         e.vlan_id, e.ecu_ip = 20, "10.0.20.1"
         e.can_to_eth = SocketSide(local_port=50000, remote_ip="10.0.20.2", remote_port=50001)
@@ -127,8 +130,12 @@ class ImportedTest(unittest.TestCase):
             self.assertEqual(fh.read(), v1)
         with open(res.extension, "rb") as fh:
             self.assertEqual(fh.read(), x1)
-        # without CAN -> CAN routes the existing .vsde file is emptied (the DaVinci project may list it)
+        # without CAN -> CAN routes the existing .vsde file is emptied (the DaVinci project may list it); the messages
+        # come from Ethernet then: EngineData (0x100) next to ExtSameId (extended 0x100) and GW_BrakeStatus (extended
+        # 0x300) next to Body/GwCommand (0x300) need their own header ids
         cfg2.options.can_routes = False
+        cfg2.buses[1].messages.update({"EngineData": {"header_id": "0x1100"},
+                                       "GW_BrakeStatus": {"header_id": "0x1301"}})
         generate(make_plan(cfg2))
         self.assertEqual(vsde.read(res.extension), [])
 
@@ -193,7 +200,8 @@ class ImportedTest(unittest.TestCase):
         self.assertEqual(refs, ["Gw", "Gw_BusA", "Gw_BusB"])
 
     def test_eth_to_can_fanout(self):
-        """The central node sends one Ethernet PDU, the zone ECU forwards it to two CAN buses (ETH -> CAN 1:N)."""
+        """The central node sends one Ethernet PDU, the zone ECU forwards it to every CAN bus with that CAN id
+        (ETH -> CAN 1:N): the same CAN id from the same Ethernet node is one message."""
         from ecucstudio.gateway.regen import config_from_file
 
         def dbc(bus, start, length=8):
@@ -213,43 +221,49 @@ class ImportedTest(unittest.TestCase):
         cfg.options.can_routes = False
         cfg.buses = [BusInput(dbc=dbc("BusA", 0), node="Zone"), BusInput(dbc=dbc("BusB", 0), node="Zone"),
                      BusInput(dbc=dbc("BusC", 8, 12), node="Zone")]      # BusC: other signal layout / length
-        cfg.buses[1].messages = {"OwnCmd": {"eth_pdu": "OwnCmd_B"}}       # own PDU chosen by the user
+        # own Ethernet PDU chosen by the user: then also an own header id (0x12D twice on one link is an error)
+        cfg.buses[1].messages = {"OwnCmd": {"eth_pdu": "OwnCmd_B", "header_id": "0x112D"}}
+        plan = make_plan(cfg)
+        # LenCmd has another length on BusC: not one Ethernet PDU, and the CAN id 0x12F from the same node twice
+        self.assertEqual(plan.errors, [
+            "ETH->CAN BusC/LenCmd: header id 0x0000012F (CAN id 0x12F) is already used by BusA/LenCmd from 10.0.20.2 "
+            "to GwInst (not 1:N with BusA/LenCmd: length differs (BusA 8, BusC 12)): two PDUs with one header id on "
+            "one link. Disable one of them or enter another header id."])
+        r = {x.key: x for x in plan.routes}
+        ln = r["BusC/LenCmd"]
+        self.assertIsNone(ln.fanout_of)
+        self.assertEqual(ln.header_note, "conflict: 0x0000012F used by BusA/LenCmd")
+        self.assertIs(r["BusB/LenCmd"].fanout_of, r["BusA/LenCmd"])
+        # with a header id of its own BusC/LenCmd is fine
+        cfg.buses[2].messages = {"LenCmd": {"header_id": "0x112F"}}
         plan = make_plan(cfg)
         self.assertEqual(plan.errors, [])
         r = {x.key: x for x in plan.routes}
         a, b, c = r["BusA/HpcCmd"], r["BusB/HpcCmd"], r["BusC/HpcCmd"]
         self.assertIsNone(a.fanout_of)
         self.assertIs(b.fanout_of, a)
-        self.assertIsNone(c.fanout_of)                                   # layout differs: own PDU
-        self.assertTrue(any(w.startswith("BusC/HpcCmd: same CAN id as BusA/HpcCmd but not one Ethernet PDU (signal "
-                                         "layout differs") for w in plan.warnings), plan.warnings)
-        self.assertTrue(any("right click -> 1:N with the same CAN id" in w for w in plan.warnings))
-        # the user forwards HpcCmd of BusC from the same Ethernet PDU anyway (same length, other layout): warning stays
+        self.assertIs(c.fanout_of, a)                   # same CAN id and sender: one message, also with another layout
+        self.assertIn("1:N although the signal layout differs from BusA in the DBC files", c.notes)
+        self.assertTrue(any(w.startswith("ETH -> CAN 1:N: the DBC files define another signal layout on 1 bus(es) "
+                                         "(BusC/HpcCmd)") for w in plan.warnings), plan.warnings)
+        self.assertIn("1:N: forwarded to BusA, BusB, BusC", a.notes)
+        self.assertEqual(r["BusC/LenCmd"].header_id, 0x112F)
+        self.assertEqual((b.eth_pdu, b.header_id), (a.eth_pdu, a.header_id))
+        self.assertEqual((c.eth_pdu, c.header_id, c.header_note), (a.eth_pdu, 0x12C, "same as BusA/HpcCmd (1:N)"))
+        self.assertIsNone(r["BusB/OwnCmd"].fanout_of)
+        self.assertEqual(r["BusB/OwnCmd"].fanout_reason, "not 1:N with BusA/OwnCmd: own Ethernet PDU / header id chosen")
+        self.assertIs(r["BusC/OwnCmd"].fanout_of, r["BusA/OwnCmd"])
+        # 1:N switched off for one bus: an own Ethernet PDU, but the CAN id from the same node is an error
         cfg_f = self.config()
         cfg_f.options.can_routes = False
-        cfg_f.buses = [BusInput(dbc=b.dbc, node="Zone") for b in cfg.buses]
-        cfg_f.buses[2].messages = {"HpcCmd": {"fanout": True}, "LenCmd": {"fanout": True}}
+        cfg_f.buses = [BusInput(dbc=x.dbc, node="Zone", messages=dict(x.messages)) for x in cfg.buses]
         cfg_f.buses[1].messages = {"OwnCmd": {"fanout": False}}
         pf = make_plan(cfg_f)
-        self.assertEqual(pf.errors, [])
         rf = {x.key: x for x in pf.routes}
-        self.assertIs(rf["BusC/HpcCmd"].fanout_of, rf["BusA/HpcCmd"])
-        self.assertIs(rf["BusB/HpcCmd"].fanout_of, rf["BusA/HpcCmd"])
-        self.assertTrue(any(w.startswith("BusC/HpcCmd: gets the Ethernet PDU of BusA/HpcCmd although the signal "
-                                         "layout differs") for w in pf.warnings), pf.warnings)
-        self.assertIsNone(rf["BusC/LenCmd"].fanout_of)                  # other length: never
-        self.assertIsNone(rf["BusB/OwnCmd"].fanout_of)                  # 1:N off for it
+        self.assertIsNone(rf["BusB/OwnCmd"].fanout_of)
         self.assertIn("own Ethernet PDU chosen (1:N off)", rf["BusB/OwnCmd"].fanout_reason)
-        self.assertIs(rf["BusC/OwnCmd"].fanout_of, rf["BusA/OwnCmd"])
-        # other length: own Ethernet PDU, the header note tells why the flag was added
-        ln = r["BusC/LenCmd"]
-        self.assertIsNone(ln.fanout_of)
-        self.assertIn("not 1:N with BusA/LenCmd: length differs (BusA 8, BusC 12)", ln.header_note)
-        self.assertTrue(ln.header_note.startswith("flag 1 added"))
-        self.assertEqual((b.eth_pdu, b.header_id), (a.eth_pdu, a.header_id))
-        self.assertNotEqual(c.eth_pdu, a.eth_pdu)
-        self.assertIsNone(r["BusB/OwnCmd"].fanout_of)
-        self.assertIs(r["BusC/OwnCmd"].fanout_of, r["BusA/OwnCmd"])
+        self.assertEqual(len(pf.errors), 1, pf.errors)
+        self.assertTrue(pf.errors[0].startswith("ETH->CAN BusB/OwnCmd: header id 0x0000012D"), pf.errors)
         # GenMsgILSupport = No: DaVinci imports it without PDU triggering -> not routed
         self.assertFalse(r["BusA/NoIl"].enabled)
         self.assertIn("GenMsgILSupport", r["BusA/NoIl"].reason)
@@ -272,11 +286,13 @@ class ImportedTest(unittest.TestCase):
         generate(plan)
         with open(res.output, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), text)
-        # option off: an Ethernet PDU per bus
+        # option off: an Ethernet PDU per bus, so the CAN ids from the same node clash (errors)
         cfg2.options.eth_fanout = False
         plan = make_plan(cfg2)
         self.assertTrue(all(x.fanout_of is None for x in plan.routes))
         self.assertNotEqual(r["BusA/HpcCmd"].eth_pdu, {x.key: x for x in plan.routes}["BusB/HpcCmd"].eth_pdu)
+        self.assertTrue(any(e.startswith("ETH->CAN BusB/HpcCmd: header id 0x0000012C") for e in plan.errors),
+                        plan.errors)
 
     def test_one_ecu_of_the_network(self):
         """DBC files of the whole network -> gateway file of one target ECU (gateway only): ECU -> ECU over Ethernet,

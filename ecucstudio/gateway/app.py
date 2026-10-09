@@ -723,7 +723,8 @@ class GatewayApp:
             if any(w not in text for w in words) or (only != "all" and row[0] != only):
                 continue
             off = isinstance(r, (Route, CanRoute, SignalRoute)) and not r.enabled
-            t.insert("", "end", iid=str(i), values=row, tags=("off",) if off else ())
+            bad = isinstance(r, Route) and r.enabled and r.header_clash      # header id twice on one link
+            t.insert("", "end", iid=str(i), values=row, tags=("off",) if off else (("bad",) if bad else ()))
             self._route_by_iid[str(i)] = r
             shown += 1
         self.rcount.config(text=f"{shown} of {len(items)} route(s)" if items else "")

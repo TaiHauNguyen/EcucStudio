@@ -227,7 +227,7 @@ class TopologyWindow:
         f.rowconfigure(0, weight=1)
         f.columnconfigure(0, weight=1)
         t.tag_configure("off", foreground="#9e9e9e")
-        t.tag_configure("flag", foreground=COLORS["warning"])
+        t.tag_configure("conflict", foreground=COLORS["error"])
         t.tag_configure("new", foreground=COLORS["info"])
         t.tag_configure("removed", foreground=COLORS["error"])
         t.tag_configure("band", background="#f3f6f9")
@@ -813,7 +813,7 @@ class TopologyWindow:
             self.t_cross.insert("", "end", iid=str(i), values=row, tags=tags)
             self._cross_by_iid[str(i)] = c
         for i, row in enumerate(contract_rows(tp)):
-            tags = ("flag",) if str(row[-1]).startswith("flag") else ()
+            tags = ("conflict",) if str(row[-1]).startswith("conflict") else ()
             self.t_contract.insert("", "end", iid=str(i), values=row, tags=tags)
         self.fill_routes()
 
@@ -829,7 +829,8 @@ class TopologyWindow:
             return
         for k, (r, row) in enumerate(report.route_items(plan)):
             off = getattr(r, "enabled", True) is False
-            tags = ("removed",) if row[1] == "removed" else (("off",) if off else ())
+            tags = ("removed",) if row[1] == "removed" else (("off",) if off else (
+                ("conflict",) if getattr(r, "header_clash", "") else ()))
             t.insert("", "end", iid=str(k), values=row, tags=tags)
             self._route_by_iid[str(k)] = r
 

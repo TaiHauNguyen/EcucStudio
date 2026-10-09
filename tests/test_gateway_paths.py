@@ -16,6 +16,10 @@ FIX = os.path.join(HERE, "fixtures")
 DBC = os.path.join(FIX, "gateway_demo.dbc")
 CHASSIS = os.path.join(FIX, "gateway_chassis.dbc")
 TOPO = os.path.join(FIX, "topology")
+# header ids entered where a CAN id would be twice on one link (ExtSameId: extended 0x100 like EngineData;
+# Chassis/GwCommand: 0x300 like Body/BrakeStatus extended 0x300)
+BODY_IDS = {"ExtSameId": {"header_id": "0x1001"}}
+CHASSIS_IDS = {"GwCommand": {"header_id": "0x1300"}}
 
 try:
     import cantools  # noqa: F401
@@ -44,7 +48,8 @@ class PathReportTest(unittest.TestCase):
         return {(p.names, p.origin, p.destination): p for p in rep.paths}
 
     def test_one_gateway(self):
-        plan = _plan(self.tmp, [BusInput(dbc=DBC, node="GwEcu"), BusInput(dbc=CHASSIS, node="GwEcu")])
+        plan = _plan(self.tmp, [BusInput(dbc=DBC, node="GwEcu", messages=BODY_IDS),
+                                BusInput(dbc=CHASSIS, node="GwEcu", messages=CHASSIS_IDS)])
         rep = paths.report_of_plan(plan)
         r = self.rows(rep)
         # EngineData (0x100): received on Body, sent on Chassis (CAN -> CAN) and to Ethernet (1:N)
@@ -76,8 +81,9 @@ class PathReportTest(unittest.TestCase):
     def test_two_gateways_on_one_bus(self):
         """GwEcu forwards EngineData from Body to Chassis; a second gateway (Steering) takes it from Chassis to
         Ethernet: one path through both gateways."""
-        p1 = _plan(self.tmp, [BusInput(dbc=DBC, node="GwEcu"), BusInput(dbc=CHASSIS, node="GwEcu")], "gw1")
-        p2 = _plan(self.tmp, [BusInput(dbc=CHASSIS, node="Steering")], "gw2")
+        p1 = _plan(self.tmp, [BusInput(dbc=DBC, node="GwEcu", messages=BODY_IDS),
+                              BusInput(dbc=CHASSIS, node="GwEcu", messages=CHASSIS_IDS)], "gw1")
+        p2 = _plan(self.tmp, [BusInput(dbc=CHASSIS, node="Steering", messages=BODY_IDS)], "gw2")
         rep = paths.build_report({"GwEcu": p1, "Steering": p2}, (), "two gateways")
         chain = [p for p in rep.paths if p.names == "EngineData" and p.gateways == ["GwEcu", "Steering"]]
         self.assertEqual(len(chain), 1)
@@ -114,7 +120,7 @@ class PathReportTest(unittest.TestCase):
     def test_cli(self):
         from ecucstudio.gateway import cli
         cfg = GatewayConfig(base="", output=os.path.join(self.tmp, "gw.arxml"),
-                            buses=[BusInput(dbc=DBC, node="GwEcu")])
+                            buses=[BusInput(dbc=DBC, node="GwEcu", messages=BODY_IDS)])
         apply(cfg, suggest(cfg))
         conf = os.path.join(self.tmp, "gw.json")
         cfg.save(conf)

@@ -206,10 +206,11 @@ Mở: menu **Tools → CAN Gateway Generator (CAN-Ethernet, CAN-CAN)…**, `run.
 | Kênh CAN | dùng kênh có sẵn trong base (frame tìm theo CAN ID, chỉ thêm port nếu thiếu) hoặc tạo CAN cluster mới từ DBC (baud rate từ DBC hoặc nhập) |
 | Ethernet (nhập tay hoặc **Suggest values**) | VLAN (có sẵn hoặc tạo mới), connector của ECU, IP local; mỗi chiều chọn socket có sẵn hoặc nhập port local + IP/port remote để tạo socket mới; header ID set. Nút *Suggest values* / lệnh `gateway suggest` điền các ô trống từ nội dung file (kênh ECU đang dùng, IP trống kế tiếp, node đối tác, cặp port trống, MAC) kèm lý do |
 
-**Header ID**: = CAN ID đệm 0 thành 32 bit (`0x123` → `0x00000123`). Nếu trùng với PDU khác được nhận trên
-cùng socket (tính cả PDU có sẵn trong base) tool tự đặt cờ ở bit 29..31 (`k << 29`, k = 1..7 — CAN ID 29 bit
-không dùng các bit này) và báo warning. Header ID nhập tay trong bảng route không bao giờ bị đổi, trùng thì
-báo lỗi. Tùy chọn: luôn đặt bit 31 cho ID extended (kiểu `Can_IdType`).
+**Header ID**: = CAN ID đệm 0 thành 32 bit (`0x123` → `0x00000123`), duy nhất trên từng cặp node gửi → node nhận
+(tính cả PDU có sẵn trong base). Cùng CAN ID, cùng node gửi, cùng node nhận thì báo lỗi cho message đó (tool không
+tự thêm cờ); cùng CAN ID tới / từ node khác thì không sao. ETH→CAN: cùng CAN ID từ cùng node gửi trên nhiều bus là
+một PDU Ethernet forward ra mọi bus (1:N). Header ID nhập tay trong bảng route không bao giờ bị đổi, trùng thì báo
+lỗi. Tùy chọn: luôn đặt bit 31 cho ID extended (kiểu `Can_IdType`).
 
 **Output**: base + phần tử mới, phần còn lại của file giữ nguyên từng byte; kèm
 `<output>_gateway_routes.csv`. Phần tử được ghi theo thứ tự schema AUTOSAR và theo phong cách của base

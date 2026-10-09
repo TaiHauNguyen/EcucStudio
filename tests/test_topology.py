@@ -5,10 +5,12 @@ ZoneA (Sensor bus, reference only), ZoneB (Power + Chassis buses), ZoneC (Body b
 - DoorState:  ZoneC receives it on Body, ZoneB sends it on Power        -> ZoneC -> ZoneB directly
 - VehSpeed:   ZoneA and ZoneB receive it, ZoneC sends it                 -> N:1, not routed without a link
 - GearPos:    ZoneB receives it on Power and sends it on Chassis         -> CAN -> CAN inside ZoneB
-- RadarObj (ZoneA) and PowerState (ZoneB) both have CAN id 0x300 and go to Central -> flag at Central
+- RadarObj (ZoneA) and PowerState (ZoneB) both have CAN id 0x300 and go to Central -> two links (ZoneA -> Central,
+  ZoneB -> Central): both keep 0x300
 """
 import contextlib
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -111,10 +113,12 @@ class TopologyTest(unittest.TestCase):
         # CAN -> CAN inside ZoneB stays
         self.assertEqual([(x.src.message.name, x.dst.bus.name) for x in tp.plans["ZoneB"].enabled_can_routes],
                          [("GearPos", "Chassis")])
-        # Central receives from every zone on one socket: 0x300 and 0x150 collide
+        # Central receives from every zone: the same CAN id from another zone is another link, no clash
         self.assertEqual(tp.header_ids["ZoneA/Sensor/RadarObj"], 0x300)
-        self.assertEqual(tp.header_ids["ZoneB/Power/PowerState"], 0x20000300)
-        self.assertEqual(tp.header_ids["ZoneB/Chassis/VehSpeed"], 0x20000150)
+        self.assertEqual(tp.header_ids["ZoneB/Power/PowerState"], 0x300)
+        self.assertEqual(tp.header_ids["ZoneA/Sensor/VehSpeed"], 0x150)
+        self.assertEqual(tp.header_ids["ZoneB/Chassis/VehSpeed"], 0x150)
+        self.assertFalse(any("flag" in w for w in tp.warnings), tp.warnings)
         rows = {(r[0], r[2], r[8]): r for r in contract_rows(tp)}
         self.assertEqual(rows[("ZoneB", "WheelSpeed", "ZoneC")][9], "10.0.60.13:50001")
         self.assertEqual(rows[("ZoneB", "WheelSpeed", "ZoneC")][10], "Body/WheelSpeed")
@@ -161,13 +165,24 @@ class TopologyTest(unittest.TestCase):
         for name, r in generate_topology(tp):
             with open(r.output, "rb") as fh:
                 self.assertEqual(fh.read(), before[name], name)
-        # without ZoneA, PowerState would get 0x300 again: the lock file keeps 0x20000300 for the other ECUs
+        # a header id of the lock file is kept for every ECU; a collision flag of an older version (bits 29..31)
+        # becomes the CAN id again
+        with open(t.lock_path, encoding="utf-8") as fh:
+            lock = json.load(fh)
+        self.assertEqual(lock["header_ids"]["ZoneB/Power/PowerState"], "0x00000300")
+        lock["header_ids"]["ZoneB/Power/PowerState"] = "0x00001300"
+        lock["header_ids"]["ZoneB/Chassis/VehSpeed"] = "0x20000150"
+        with open(t.lock_path, "w", encoding="utf-8") as fh:
+            json.dump(lock, fh)
         t2 = TopologyConfig.load(t.path)
         t2.ecus = t2.ecus[1:]
         tp = make_topology_plan(t2)
-        self.assertEqual(tp.header_ids["ZoneB/Power/PowerState"], 0x20000300)
-        r = next(x for x in tp.plans["ZoneB"].routes if x.message.name == "PowerState")
-        self.assertEqual(r.header_note, "kept (lock file)")
+        self.assertEqual(tp.errors, [])
+        r = {x.message.name: x for x in tp.plans["ZoneB"].routes if x.direction == "CAN->ETH"}
+        self.assertEqual((r["PowerState"].header_id, r["PowerState"].header_note), (0x1300, "kept (lock file)"))
+        self.assertEqual((r["VehSpeed"].header_id, r["VehSpeed"].header_note), (0x150, ""))
+        self.assertTrue(any("collision flag" in w and "ZoneB/Chassis/VehSpeed 0x20000150 -> 0x00000150" in w
+                            for w in tp.warnings), tp.warnings)
 
     def test_links_and_options(self):
         t = self.topology()

@@ -43,7 +43,8 @@ class OneSocketTest(unittest.TestCase):
         cfg = GatewayConfig(base="", output=os.path.join(self.tmp, "GwEcu_Gw.arxml"), ecu="GwEcu")
         cfg.options.dbc_imported = True
         cfg.options.can_routes = False
-        cfg.buses = [BusInput(dbc=DBC, node="GwEcu")]
+        # ExtSameId (extended 0x100) would be the second 0x100 to Central (EngineData): a header id is entered
+        cfg.buses = [BusInput(dbc=DBC, node="GwEcu", messages={"ExtSameId": {"header_id": "0x1001"}})]
         cfg.ethernet.vlan_id = 9
         cfg.ethernet.default_peer = "Central"
         cfg.ethernet.one_socket = True
@@ -98,6 +99,10 @@ class OneSocketTest(unittest.TestCase):
         self.assertTrue(any(r.direction == "CAN->ETH" for r in plan.enabled_routes))
         self.assertTrue(any(r.direction == "ETH->CAN" for r in plan.enabled_routes))
         self.assertEqual(len(ids), len(plan.enabled_routes))                # both directions on one connection
+        # header ids of the two directions are two links: GwCommand (0x300, ETH -> CAN) next to BrakeStatus
+        # (extended 0x300, CAN -> ETH) is fine
+        r = {x.message.name: x for x in plan.enabled_routes}
+        self.assertEqual((r["GwCommand"].header_id, r["BrakeStatus"].header_id), (0x300, 0x300))
         # regeneration: same file; a configuration without the key (older version) keeps two sockets
         from ecucstudio.gateway.regen import config_from_file
         with open(res.output, "rb") as fh:

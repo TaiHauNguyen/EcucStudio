@@ -48,9 +48,17 @@ def index(path):
     return root, idx
 
 
+def ids(base=True) -> dict:
+    """Header ids a user enters for the CAN id 0x100 of the fixture DBC: EngineData and ExtSameId (extended) both have
+    it, and the base file already sends LampCmd with header id 0x100 on the same connection. One header id twice on
+    one link is an error (test_plan_routes_and_header_ids); the other tests use these ids."""
+    return ({"EngineData": {"header_id": "0x1000"}, "ExtSameId": {"header_id": "0x1001"}} if base
+            else {"ExtSameId": {"header_id": "0x1001"}})
+
+
 def config(out, **eth):
     cfg = GatewayConfig(base=BASE, output=out)
-    cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+    cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", messages=ids()))
     cfg.ethernet.can_to_eth = SocketSide(local_socket="SA_GwEcu_Tx", remote_socket="SA_Tester_Rx")
     cfg.ethernet.eth_to_can = SocketSide(local_port=42001, remote_ip="10.0.10.2", remote_port=42001)
     for k, v in eth.items():
@@ -114,13 +122,12 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(len(plan.enabled_routes), 5)
         self.assertEqual(r["GwCommand"].direction, ETH_TO_CAN)
         self.assertEqual(r["EngineData"].direction, CAN_TO_ETH)
-        # header id = CAN id padded to 32 bit, flag in bits 29..31 when it collides on the socket
+        # header id = CAN id padded to 32 bit; one entered by the user is kept
         self.assertEqual(r["DoorStatus"].header_id, 0x200)
         self.assertEqual(r["BrakeStatus"].header_id, 0x300)
-        self.assertEqual(r["EngineData"].header_id, 0x20000100)      # 0x100 is used by an existing PDU
-        self.assertEqual(r["ExtSameId"].header_id, 0x40000100)       # 0x100 and flag 1 are taken
-        self.assertEqual(r["GwCommand"].header_id, 0x300)            # other socket / direction
-        self.assertEqual(sum("already used" in w for w in plan.warnings), 2)
+        self.assertEqual((r["EngineData"].header_id, r["EngineData"].header_note), (0x1000, "set by user"))
+        self.assertEqual(r["ExtSameId"].header_id, 0x1001)
+        self.assertEqual(r["GwCommand"].header_id, 0x300)            # other link (direction): no clash
         # the bus "Body" exists in the base file: its channel and frames are reused
         self.assertEqual(plan.buses[0].channel, "/Topology/Clusters/Body_Cluster/Body")
         self.assertFalse(plan.buses[0].new_cluster)
@@ -128,6 +135,34 @@ class GatewayTest(unittest.TestCase):
         self.assertTrue(r["EngineData"].can_side_new)
         self.assertTrue(plan.gateway_new)
         self.assertEqual(plan.id_set, "/Topology/Clusters/VLAN10_Ids")
+        # without the entered ids the CAN id 0x100 is three times on the link GwEcu -> Tester (LampCmd of the base
+        # file, EngineData, ExtSameId): an error for each message, no flag is added
+        cfg = config(self.out)
+        cfg.buses[0].messages = {}
+        plan = make_plan(cfg)
+        r = {x.message.name: x for x in plan.routes}
+        self.assertEqual(len(plan.errors), 2, plan.errors)
+        for name, e in zip(("EngineData", "ExtSameId"), plan.errors):
+            self.assertTrue(e.startswith(f"CAN->ETH Body/{name}: header id 0x00000100"), e)
+            self.assertIn("already used by LampCmd_Eth_PT from GwEcu to SA_Tester_Rx", e)
+            self.assertEqual(r[name].header_clash, e)
+            self.assertEqual(r[name].header_note, "conflict: 0x00000100 used by LampCmd_Eth_PT")
+        self.assertFalse(any("flag" in w for w in plan.warnings), plan.warnings)
+        self.assertEqual(r["DoorStatus"].header_id, 0x200)
+
+    def test_same_can_id_to_another_node(self):
+        """CAN -> ETH: the same CAN id to another node is another link (fine); to the same node it is an error."""
+        cfg = self._peers(self.out, EngineData={"eth_peers": ["Central"]}, ExtSameId={"eth_peers": ["ZoneB"]})
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        r = {x.message.name: x for x in plan.routes}
+        self.assertEqual((r["EngineData"].header_id, r["ExtSameId"].header_id), (0x100, 0x100))
+        generate(plan)
+        cfg = self._peers(self.out, EngineData={"eth_peers": ["Central", "ZoneB"]}, ExtSameId={"eth_peers": ["ZoneB"]})
+        plan = make_plan(cfg)
+        self.assertEqual(len(plan.errors), 1, plan.errors)
+        self.assertIn("ExtSameId: header id 0x00000100", plan.errors[0])
+        self.assertIn("already used by Body/EngineData from GwEcu to ZoneB", plan.errors[0])
 
     def test_user_header_id_collision_is_an_error(self):
         cfg = config(self.out)
@@ -138,7 +173,9 @@ class GatewayTest(unittest.TestCase):
     def test_extended_flag_option(self):
         cfg = config(self.out)
         cfg.header.extended_flag = True
+        del cfg.buses[0].messages["ExtSameId"]                         # bit 31: no clash with 0x100
         plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
         r = {x.message.name: x for x in plan.routes}
         self.assertEqual(r["BrakeStatus"].header_id, 0x80000300)
         self.assertEqual(r["ExtSameId"].header_id, 0x80000100)
@@ -186,7 +223,7 @@ class GatewayTest(unittest.TestCase):
         # header ids and socket connections
         ids = {p.rsplit("/", 1)[-1]: int(e.findtext(q("HEADER-ID")))
                for p, e in idx.items() if local(e) == "SO-CON-I-PDU-IDENTIFIER"}
-        self.assertEqual(ids["EngineData_oBody_Eth_ID"], 0x20000100)
+        self.assertEqual(ids["EngineData_oBody_Eth_ID"], 0x1000)
         conn = idx["/Topology/Clusters/EthCluster/Eth_VLAN10/SA_GwEcu_Tx/GwEcu_to_Tester"]
         refs = [x.text for x in conn.iter(q("SO-CON-I-PDU-IDENTIFIER-REF"))]
         self.assertEqual(len(refs), 5)       # existing LampCmd + 4 CAN -> ETH routes
@@ -281,7 +318,7 @@ class GatewayTest(unittest.TestCase):
     # ------------------------------------------------------------------ base file without Ethernet
     def _can_only(self, **eth):
         cfg = GatewayConfig(base=CAN_ONLY, output=self.out)
-        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", messages=ids(False)))
         cfg.ethernet.can_to_eth = SocketSide(local_port=42000, remote_ip="10.0.20.2", remote_port=42000)
         cfg.ethernet.eth_to_can = SocketSide(local_port=42001, remote_ip="10.0.20.2", remote_port=42001)
         for k, v in eth.items():
@@ -484,7 +521,7 @@ class GatewayTest(unittest.TestCase):
     def test_suggest_with_existing_ethernet(self):
         from ecucstudio.gateway.suggest import apply, suggest
         cfg = GatewayConfig(base=BASE, output=self.out)
-        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", messages=ids()))
         sugg = {x.field: x.value for x in suggest(cfg)}
         self.assertEqual(sugg["ethernet.channel"], "/Topology/Clusters/EthCluster/Eth_VLAN10")
         self.assertNotIn("ethernet.ecu_ip", sugg)                      # the ECU already has an address
@@ -499,7 +536,7 @@ class GatewayTest(unittest.TestCase):
     def test_suggest_without_ethernet(self):
         from ecucstudio.gateway.suggest import apply, suggest
         cfg = GatewayConfig(base=CAN_ONLY, output=self.out)
-        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", messages=ids(False)))
         cfg.ethernet.vlan_id = 30
         sugg = {x.field: x.value for x in suggest(cfg)}
         self.assertEqual(sugg["ethernet.ecu_ip"], "192.168.30.1")
@@ -513,7 +550,7 @@ class GatewayTest(unittest.TestCase):
 
     def test_suggest_keeps_user_values_and_new_vlan(self):
         from ecucstudio.gateway.suggest import apply, suggest
-        cfg = GatewayConfig(base=BASE, output=self.out, buses=[BusInput(dbc=DBC, node="GwEcu")])
+        cfg = GatewayConfig(base=BASE, output=self.out, buses=[BusInput(dbc=DBC, node="GwEcu", messages=ids())])
         cfg.ethernet.new_channel = True
         cfg.ethernet.can_to_eth.local_port = 4000
         sugg = suggest(cfg)
@@ -660,7 +697,7 @@ class GatewayTest(unittest.TestCase):
     # ------------------------------------------------------------------ regenerating an imported gateway file
     def _dbc_only(self, out):
         cfg = GatewayConfig(base="", output=out)
-        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", messages=ids(False)))
         e = cfg.ethernet
         e.vlan_id, e.ecu_ip = 20, "10.0.20.1"
         e.can_to_eth = SocketSide(local_port=42000, remote_ip="10.0.20.2", remote_port=42000)
@@ -690,12 +727,18 @@ class GatewayTest(unittest.TestCase):
         from ecucstudio.gateway.regen import config_from_file
         generate(make_plan(self._dbc_only(self.out)))
         before = {r.eth.name: r.eth.ids[0].header_id for r in GatewayModel(self.out).routes}
-        self.assertEqual(before["ExtSameId_oBody_Eth"], 0x20000100)      # flag because EngineData has 0x100
+        self.assertEqual(before["ExtSameId_oBody_Eth"], 0x1001)          # entered: EngineData has 0x100
         cfg, _ = config_from_file(self.out)
         cfg.buses[0].messages["EngineData"] = {"enabled": False}       # remove a message
-        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", new_channel=True, bus="Chassis"))   # add a bus
+        # add a bus (the same DBC: its CAN ids are on the same link again, so header ids are entered for them)
+        cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", new_channel=True, bus="Chassis", messages={
+            "DoorStatus": {"header_id": "0x1200"}, "BrakeStatus": {"header_id": "0x1300"},
+            "ExtSameId": {"header_id": "0x1101"}}))
         plan = make_plan(cfg)
         self.assertEqual(plan.errors, [])
+        r = {(x.bus.name, x.message.name): x for x in plan.routes}
+        # the same CAN id from the same Ethernet node on both buses is one message: one Ethernet PDU (1:N)
+        self.assertIs(r[("Chassis", "GwCommand")].fanout_of, r[("Body", "GwCommand")])
         self.assertEqual([p.eth_pdu for p in plan.removed], ["EngineData_oBody_Eth"])
         changes = collections.Counter(r.change for r in plan.enabled_routes)
         self.assertEqual(changes, {"kept": 4, "new": 5})
@@ -703,7 +746,7 @@ class GatewayTest(unittest.TestCase):
         after = {r.eth.name: r.eth.ids[0].header_id for r in GatewayModel(self.out).routes}
         self.assertNotIn("EngineData_oBody_Eth", after)
         for name in ("DoorStatus_oBody_Eth", "ExtSameId_oBody_Eth", "BrakeStatus_oBody_Eth", "GwCommand_oBody_Eth"):
-            self.assertEqual(after[name], before[name], name)              # kept, even 0x20000100
+            self.assertEqual(after[name], before[name], name)              # kept
         self.assertNotIn(after["EngineData_oChassis_Eth"], {after["DoorStatus_oBody_Eth"], after["ExtSameId_oBody_Eth"]})
         root, idx = index(self.out)
         self.assertNotIn("/Communication/PDUs/EngineData_oBody_Eth", idx)
@@ -719,6 +762,23 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(len(plan.removed), 5)
         generate(plan)
         self.assertNotIn("/Topology/Clusters/Chassis_Cluster", index(self.out)[1])
+
+    def test_regen_drops_old_collision_flags(self):
+        """A header id with a collision flag of an older version (bits 29..31) becomes the CAN id again."""
+        from ecucstudio.gateway.existing import GatewayModel
+        from ecucstudio.gateway.regen import config_from_file
+        generate(make_plan(self._dbc_only(self.out)))
+        m = GatewayModel(self.out)
+        m.set_header_id(m.find_routes("DoorStatus_oBody_Eth")[0].eth.ids[0].path, "0x20000200")
+        m.save()
+        cfg, _ = config_from_file(self.out)
+        plan = make_plan(cfg)
+        self.assertEqual(plan.errors, [])
+        r = {x.message.name: x for x in plan.routes}
+        self.assertEqual((r["DoorStatus"].header_id, r["DoorStatus"].header_note), (0x200, ""))
+        self.assertEqual((r["ExtSameId"].header_id, r["ExtSameId"].header_note), (0x1001, "set by user"))
+        self.assertTrue(any("collision flag" in w and "Body/DoorStatus 0x20000200 -> 0x00000200" in w
+                            for w in plan.warnings), plan.warnings)
 
     def _imported(self, gen_cfg: GatewayConfig, dpa: str):
         """Simulate the DaVinci import of the gateway file generated with *gen_cfg*: the project's communication
@@ -807,7 +867,8 @@ class GatewayTest(unittest.TestCase):
         if not eth:
             cfg.buses.append(BusInput(dbc=DBC, node="GwEcu"))
             cfg.options.eth_routes = False
-        cfg.buses.append(BusInput(dbc=CHASSIS, node="GwEcu"))
+        # Chassis/GwCommand (0x300) goes to the same node as Body/BrakeStatus (extended 0x300): a header id is entered
+        cfg.buses.append(BusInput(dbc=CHASSIS, node="GwEcu", messages={"GwCommand": {"header_id": "0x1300"}}))
         return cfg
 
     def _can_maps(self, path):
@@ -914,8 +975,9 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(c.match, "renamed: same CAN id and length")
         cfg.options.can_match_id = False
         self.assertNotIn("Body/EngineData->Chassis/EngData_Fwd", {c.key for c in make_plan(cfg).can_routes})
-        # received on two buses: N:1 is not routed until a link chooses the source
-        cfg = self._two_buses(self.out)
+        # received on two buses: N:1 is not routed until a link chooses the source (CAN -> CAN only: Body2 has the
+        # CAN ids of Body, they cannot go to the same Ethernet node again)
+        cfg = self._two_buses(self.out, eth=False)
         cfg.buses.append(BusInput(dbc=DBC, node="GwEcu", new_channel=True, bus="Body2"))
         can = {c.key: c for c in make_plan(cfg).can_routes}
         c = next(c for c in can.values() if c.dst.message.name == "EngineData" and c.dst.bus.name == "Chassis")
@@ -974,7 +1036,7 @@ class GatewayTest(unittest.TestCase):
                                           SocketSide(remote_ip="10.0.20.3", remote_port=42001)))
         cfg.buses[0].messages = messages or {"EngineData": {"eth_peers": ["Central", "ZoneB"]},
                                              "DoorStatus": {"eth_peers": ["ZoneB"]},
-                                             "ExtSameId": {"eth_peers": ["ZoneB"]},
+                                             "ExtSameId": {"eth_peers": ["ZoneB"], "header_id": "0x1001"},
                                              "GwCommand": {"eth_peer": "ZoneB"}}
         return cfg
 
@@ -988,8 +1050,8 @@ class GatewayTest(unittest.TestCase):
         self.assertEqual(set(plan.sides), {(CAN_TO_ETH, "Central"), (CAN_TO_ETH, "ZoneB"), (ETH_TO_CAN, "ZoneB")})
         # one sending port for every peer: the local socket is shared
         self.assertEqual(plan.sides[(CAN_TO_ETH, "Central")].local, plan.sides[(CAN_TO_ETH, "ZoneB")].local)
-        # ExtSameId (0x100) leaves the same local socket as EngineData (0x100): flag
-        self.assertEqual(r["ExtSameId"].header_id, 0x20000100)
+        # ExtSameId (0x100) goes to ZoneB like EngineData (0x100): a header id is entered for it
+        self.assertEqual(r["ExtSameId"].header_id, 0x1001)
         res = generate(plan)
         root, idx = self._refs_resolve(res.output)
         ch = "/Topology/Clusters/EthernetCluster/Channel_VLAN20"
@@ -1084,11 +1146,11 @@ class GatewayTest(unittest.TestCase):
                      ' SG_ Counter : 8|4@1+ (1,0) [0|15] "" ZoneB\n\n'
                      'BA_DEF_ "DBName" STRING ;\nBA_DEF_DEF_ "DBName" "";\nBA_ "DBName" "Cabin";\n')
         cfg = config(self.out)
-        cfg.buses[0].messages = {"EngineData": {"enabled": False}, "GwCommand": {"enabled": False}}
+        cfg.buses[0].messages = dict(ids(), EngineData={"enabled": False}, GwCommand={"enabled": False})
         generate(make_plan(cfg))                                        # the file made before, without both
         cfg2, _ = config_from_file(self.out)
         cfg2.options.only_previous = True                              # keep only the messages of the file ...
-        cfg2.buses[0].messages = {}
+        cfg2.buses[0].messages = {"EngineData": ids()["EngineData"]}
         plan = make_plan(cfg2)
         r = {x.message.name: x for x in plan.routes}
         self.assertFalse(r["EngineData"].enabled)

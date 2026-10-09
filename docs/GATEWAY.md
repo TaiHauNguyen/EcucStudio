@@ -56,6 +56,8 @@ default nodes* lấy lại. Đổi vai trò: chọn node → *Set as HPC*, hoặ
 | dòng signal giữa hai ECU | ECU nguồn gửi nguyên message tới ECU đích; signal gateway ở ECU đích (PDU Ethernet → signal CAN) **chưa được sinh**, report ghi `not supported` |
 | HW-Accelerator = 1 | vẫn route (bỏ tick ở trang 3 để để lại cho LLCE / PFE) |
 | message không có trong bảng | chỉ lên HPC / chỉ lấy từ HPC; giữa các ECU tool **không** tự ghép theo tên |
+| header ID | = CAN ID (đệm 0 lên 32 bit), duy nhất trên từng **cặp node gửi → node nhận**. Cùng CAN ID tới / từ node khác: không sao. Cùng CAN ID, cùng node gửi, cùng node nhận: **ERROR** (tool không tự thêm cờ), dòng route màu đỏ, Header note `conflict: …` |
+| cùng CAN ID trên nhiều bus, cùng node gửi (ETH → CAN) | là **một** message: một PDU Ethernet, một header ID, forward ra mọi bus đó (1:N, mục 3.5), không cần dòng routing table. Khác độ dài thì không gộp được: ERROR |
 
 Ví dụ: ZoneA có BusA, BusB; ZoneB có BusC; HPC là Central.
 
@@ -351,7 +353,7 @@ Chọn node cho message trên bảng route (sau **Analyze**):
 - Chọn nhiều dòng cùng chiều → chuột phải → **Ethernet peers…**.
 
 Message gửi tới nhiều node (1:N) có **một** PDU Ethernet và **một** header ID; header ID đó phải còn trống trên
-socket gửi của ECU và trên socket nhận của mọi node đích. DaVinci tạo một SoAdPduRoute với một PduRouteDest cho mỗi
+từng cặp ECU → node đích (cùng CAN ID tới node khác thì không sao, mục *Quy tắc header ID*). DaVinci tạo một SoAdPduRoute với một PduRouteDest cho mỗi
 node (đã kiểm chứng với DaVinci 5.24). Phần tử tạo thêm cho mỗi node: NETWORK-ENDPOINT `NEP_<node>` (nếu IP chưa
 có), socket remote `SA_<node>_CanGw_Rx` / `_Tx`, và STATIC-SOCKET-CONNECTION từ local socket tới đó.
 
@@ -380,37 +382,36 @@ cùng VLAN. Thêm DBC của bus thuộc zone khác vào **CAN buses** và chọn
 ### 3.5 Một message Ethernet ra nhiều bus CAN (ETH → CAN 1:N)
 
 Ví dụ HPC gửi `HpcCmd` (CAN ID 0x12C) cho zone ECU; zone ECU gửi message này trên cả BusA và BusB (cùng CAN ID, cùng
-độ dài, cùng layout signal trong hai DBC):
+độ dài; frame CAN thường hay CAN FD không quan trọng):
 
-- **có routing table** (mục 17, cửa sổ chính): cùng CAN ID trên hai bus chỉ là **một** message khi một dòng
-  *message* của bảng có message đó trên cả hai bus (một bus là `S` và bus kia là `D`, hoặc cả hai là `D`). Không có
-  dòng nào nối thì là **hai** message: mỗi bus một PDU Ethernet và header ID riêng (header thường có flag, Header note
-  ghi `two messages: no routing table row links them`). Bảng nối mà DBC ghi layout signal khác nhau thì vẫn gộp
-  (PduR chuyển nguyên byte) và có WARNING nhắc kiểm tra DBC. **Không có routing table**: gộp khi cùng CAN ID, cùng độ
-  dài và cùng layout signal;
+- cùng CAN ID **từ cùng một node gửi** là **một** message (header ID = CAN ID, node gửi không thể gửi hai PDU khác
+  nhau cùng header ID): tool luôn gộp, có hay không có routing table, kể cả khi DBC ghi layout signal hoặc tên message
+  khác nhau (PduR chuyển nguyên byte; layout khác thì có note và WARNING nhắc kiểm tra DBC, tên khác thì có INFO);
 - tool tạo **một** PDU Ethernet và **một** header ID (tên theo bus đầu tiên, ví dụ `HpcCmd_oBusA_Eth`, header
   `0x0000012C`); HPC chỉ gửi một lần;
 - GATEWAY có hai `I-PDU-MAPPING` từ PDU-TRIGGERING Ethernet đó tới PDU-TRIGGERING của BusA và BusB; DaVinci tạo một
   PduR routing path SoAd → CanIf (BusA) + CanIf (BusB);
 - bảng route: dòng bus đầu ghi *1:N: forwarded to BusA, BusB*, dòng còn lại ghi *1:N: Ethernet PDU of BusA/HpcCmd*,
   cùng PDU Ethernet và header ID;
-- cùng CAN ID nhưng khác độ dài, khác layout signal, khác nguồn Ethernet, hoặc được chọn tên PDU Ethernet / header ID
-  riêng bằng tay: bus đó có PDU Ethernet và header ID riêng (thường thêm flag, ví dụ `0x200000D9`). Tool báo WARNING
-  và ghi lý do vào cột **Header note** / **Remark**, ví dụ `flag 1 added (0x000000D9 used by …); not 1:N with
-  BusA/X: length differs (BusA 8, BusB 12)`;
-- tự chọn cho từng CAN ID: chuột phải một dòng ETH->CAN → **1:N with the same CAN id…**. Hộp thoại liệt kê signal
+- cùng CAN ID từ **node gửi khác** (ví dụ một bus lấy từ HPC, bus kia lấy từ zone khác): hai message, mỗi cái một PDU
+  Ethernet, cùng header ID trên hai cặp gửi → nhận khác nhau, không lỗi;
+- cùng CAN ID, cùng node gửi nhưng **khác độ dài**, hoặc bus đó được chọn tên PDU Ethernet riêng bằng tay: bus đó có
+  PDU Ethernet riêng, nên header ID trùng trên cùng cặp gửi → nhận: **ERROR**, cột **Header note** ghi
+  `conflict: 0x… used by …`, Remark ghi lý do, ví dụ `not 1:N with BusA/X: length differs (BusA 8, BusC 12)`. Sửa
+  DBC, tắt một route, hoặc nhập header ID riêng cho bus đó;
+- cửa sổ generator một ECU: chuột phải một dòng ETH->CAN → **1:N with the same CAN id…**. Hộp thoại liệt kê signal
   của message trên từng bus (start bit, độ dài, byte order), signal khác layout tô màu cam. Chọn:
-  - **One Ethernet PDU for all these buses (1:N)**: gộp cả khi khác layout signal (độ dài phải bằng nhau). PduR
-    chuyển nguyên PDU, PDU Ethernet theo layout của bus đầu tiên, node nhận trên bus kia đọc byte theo layout của
-    nó. WARNING vẫn hiện để nhắc;
-  - **An own Ethernet PDU and header id per bus**: không gộp, kể cả khi giống hệt;
-  - **Automatic**: như mặc định (có routing table: theo bảng; không có: cùng độ dài và layout).
+  - **One Ethernet PDU for all these buses (1:N)**: gộp (độ dài phải bằng nhau). PduR chuyển nguyên PDU, PDU
+    Ethernet theo layout của bus đầu tiên, node nhận trên bus kia đọc byte theo layout của nó. WARNING vẫn hiện để
+    nhắc;
+  - **An own Ethernet PDU per bus**: không gộp; khi đó phải nhập header ID riêng cho từng bus, nếu không là ERROR;
+  - **Automatic**: như mặc định (cùng CAN ID, cùng node gửi, cùng độ dài).
 
   Lựa chọn lưu trong cấu hình (`messages.<tên>.fanout` = `true` / `false`), sinh lại vẫn giữ;
 - mạng nhiều ECU (mục 13): zone ECU nhận message từ ECU khác và forward ra hai bus của nó cũng dùng một PDU, header
   ID theo ECU gửi;
-- sinh lại giữ nguyên tên PDU và header ID. Bỏ chọn **ETH -> CAN 1:N** ở tab Options thì mỗi bus một PDU Ethernet
-  như trước.
+- sinh lại giữ nguyên tên PDU và header ID. Bỏ chọn **ETH -> CAN 1:N** ở tab Options thì mỗi bus một PDU Ethernet,
+  khi đó cùng CAN ID từ cùng node gửi là ERROR.
 
 ### 3.6 Bảng Ethernet nodes (giá trị mặc định)
 
@@ -441,7 +442,7 @@ Mỗi giá trị được điền có một dòng INFO "Filled from Ethernet nod
   điền tab Ethernet và file không có phần Ethernet nào.
 - **CAN -> CAN routes**: ghép message giữa các bus (mục 12, mặc định bật).
   - **also pair renamed messages**: ghép cả message bị đổi tên nhưng cùng CAN ID và độ dài (mặc định bật).
-- **ETH -> CAN 1:N**: message ECU gửi trên nhiều bus (cùng CAN ID, độ dài, layout signal) là **một** PDU Ethernet,
+- **ETH -> CAN 1:N**: cùng CAN ID từ cùng một node Ethernet trên nhiều bus (cùng độ dài) là **một** PDU Ethernet,
   được forward ra mọi bus đó (mục 3.5, mặc định bật).
 - **ETH -> CAN: Com does not send…**: DBC import trong DaVinci, Com không gửi các message nhận từ Ethernet
   (file `.vsde`, mục 12.2, mặc định bật).
@@ -474,7 +475,7 @@ Bảng route (một dòng là một message):
 | CAN ID, Frame, Length, Cycle ms | thông tin từ DBC (hoặc từ base nếu frame đã có) |
 | CAN PDU / Ethernet PDU | tên PDU hai đầu gateway |
 | Peer | node Ethernet nhận (CAN->ETH, có thể nhiều node) hoặc gửi (ETH->CAN) PDU, mục 3.3 |
-| Header ID | SoAd header ID (dòng cam = đã tự thêm cờ vì trùng) |
+| Header ID | SoAd header ID (dòng đỏ = trùng trên cùng cặp gửi → nhận: ERROR, Header note `conflict: …`) |
 | Remark | lý do tắt, frame dùng lại từ base, 1:N / N:1, chênh lệch độ dài… |
 
 Thao tác trên bảng:
@@ -488,21 +489,27 @@ Mọi thay đổi trên bảng được lưu vào cấu hình và áp dụng l�
 
 Khung thông báo bên dưới:
 
-- **ERROR**: chưa generate được (ví dụ thiếu port, IP sai, header ID nhập tay bị trùng).
-- **WARNING**: vẫn generate được, nhưng cần đọc. Ví dụ: header ID bị thêm cờ, ECU có nhiều connector,
+- **ERROR**: chưa generate được (ví dụ thiếu port, IP sai, header ID trùng trên cùng cặp gửi → nhận).
+- **WARNING**: vẫn generate được, nhưng cần đọc. Ví dụ: header ID cũ có cờ được đổi lại thành CAN ID, ECU có nhiều
+  connector,
   route N:1, độ dài PDU trong DBC khác trong base.
 - **INFO**: ví dụ dùng lại kênh CAN cùng tên.
 
 ### Quy tắc header ID
 
 - Header ID = CAN ID đệm 0 thành 32 bit: `0x123` → `0x00000123`, `0x18FF1234` → `0x18FF1234`.
-- Header ID chỉ cần duy nhất ở **phía nhận** trên cùng socket:
-  - chiều CAN→ETH: so với các PDU đang gửi từ socket local đó, và các PDU socket remote đang nhận;
-  - chiều ETH→CAN: so với các PDU socket local đang nhận;
+- Header ID chỉ cần duy nhất trên từng **cặp gửi → nhận** (socket gửi → socket nhận, tức một socket connection
+  của SoAd; phía nhận phân biệt các PDU của một node gửi bằng header ID):
+  - chiều CAN→ETH: so với các PDU ECU gửi tới **cùng** node đích. Cùng CAN ID gửi tới node khác: không sao;
+  - chiều ETH→CAN: so với các PDU **cùng** node gửi tới ECU. Cùng CAN ID từ node gửi khác: không sao;
+  - header ID gửi và nhận là hai bảng riêng (hai chiều không ảnh hưởng nhau);
   - tính cả các PDU có sẵn trong file base.
-- Nếu trùng: tool đặt cờ `k << 29` (k = 1..7, ở bit 29..31 mà CAN ID 29 bit không dùng), lấy giá trị nhỏ nhất
-  còn trống, rồi báo warning. Ví dụ `0x100` đã có → `0x20000100`; nếu cả giá trị đó cũng đã có → `0x40000100`.
+- Trùng (cùng CAN ID, cùng node gửi, cùng node nhận) thì báo **ERROR** cho message đó, tool **không** tự thêm cờ.
+  Ví dụ zone nhận `0x100` trên BusA và BusB và cả hai đều lên HPC. Sửa: tắt một route, hoặc nhập header ID riêng.
+  Chiều ETH→CAN cùng CAN ID từ cùng node gửi được gộp thành 1:N (mục 3.5) nên không trùng.
 - Header ID nhập tay không bao giờ bị đổi; nếu trùng thì báo ERROR.
+- Header ID có cờ chống trùng (`k << 29`, bit 29..31) do phiên bản cũ thêm, còn giữ trong file sinh lần trước hoặc
+  file lock: tool đổi lại thành CAN ID và báo WARNING (báo cho các node Ethernet khác); còn trùng thì ERROR như trên.
 
 ## 6. **Generate network ARXML**
 
@@ -578,8 +585,9 @@ Tool đảm bảo route giữ nguyên ra **y hệt** lần trước:
 
 - Phần tử của file cũ được trừ khỏi base trước khi tính. Ở chế độ project, `Communication.arxml` của DaVinci đã
   chứa chúng sau lần import trước; nếu không trừ, tool sẽ coi các route đó là "đã có sẵn".
-- Route giữ nguyên dùng lại **đúng tên PDU Ethernet** và **header ID cũ**, kể cả header ID có cờ chống trùng. Vì vậy
-  đường dẫn và UUID không đổi. Route mới không được dùng các header ID đó.
+- Route giữ nguyên dùng lại **đúng tên PDU Ethernet** và **header ID cũ**, vì vậy đường dẫn và UUID không đổi. Route
+  mới không được dùng các header ID đó. Riêng header ID có cờ chống trùng do phiên bản cũ thêm được đổi lại thành
+  CAN ID (WARNING).
 - Không thay đổi gì thì file sinh lại giống từng byte.
 
 Đã kiểm chứng bằng DaVinci 5.24 trên một bản copy project (bỏ 2 message, thêm 1 bus CAN có 22 message):
@@ -695,6 +703,8 @@ python -m ecucstudio gateway generate gateway.json
 - Kênh mới / ECU chưa nối (mục 3.1): `new_channel`, `cluster`, `vlan_id` (`null` = untagged), `channel_name`,
   `ecu_ip`, `ecu_netmask`, `controller`, `mac`. Base không có Ethernet thì tự tạo kênh, chỉ cần `ecu_ip`
   (và `vlan_id` nếu là VLAN).
+- `header.extended_flag`: đặt bit 31 cho CAN ID extended; `header.flag_shift`: chỉ dùng để nhận ra header ID có cờ
+  chống trùng của phiên bản cũ (được đổi lại thành CAN ID).
 - `messages`: chỉnh từng message theo tên trong DBC. `enabled` tắt/bật route, `header_id` đặt header ID tay,
   `eth_pdu` đổi tên PDU Ethernet, `eth_peers` (CAN->ETH, danh sách) / `eth_peer` (ETH->CAN) chọn node Ethernet.
 - `default_peer` / `peers` (mục 3.3): tên node của `can_to_eth` / `eth_to_can`, và các node khác. Trường local
@@ -708,7 +718,7 @@ python -m ecucstudio gateway generate gateway.json
 | Thông báo | Cách xử lý |
 |---|---|
 | `… Communication.arxml does not exist` | project chưa import DBC / chưa Update: import DBC trong DaVinci, Update, lưu project |
-| Editor: `Header id 0x… is already used on the same socket by …` | chọn giá trị khác, hoặc đổi header ID của PDU kia trước |
+| Editor: `Header id 0x… is already used between the same sockets by …` | chọn giá trị khác, hoặc đổi header ID của PDU kia trước |
 | `select the CAN channel of the project` | chọn kênh CAN trong hộp thoại bus (chế độ project) |
 | DaVinci: `UUID is not unique in these two files` hoặc `Duplicate shortname 'System'` | file bổ sung tạo bằng phiên bản cũ của tool: cập nhật (`git pull`) và Generate lại |
 | `Select the output file (there is no base file)` | chưa chọn *Output file* khi không có file base |
@@ -720,7 +730,7 @@ python -m ecucstudio gateway generate gateway.json
 | `Select the Ethernet channel (VLAN)` | ECU nối với nhiều VLAN: chọn kênh ở tab Ethernet |
 | `enter the local UDP port` / `enter the remote UDP port` / `enter the remote IP address` | nhập đủ port, IP cho socket mới, hoặc chọn socket có sẵn |
 | `the connector has no network endpoint` | chọn **Local endpoint** (IP của ECU) |
-| `header id 0x… is already used by …` (ERROR) | header ID nhập tay bị trùng: đổi giá trị hoặc xoá để tool tự gán |
+| `header id 0x… is already used by … from A to B: two PDUs with one header id on one link` (ERROR) | cùng CAN ID hai lần từ node A tới node B (ví dụ cùng message nhận trên hai bus rồi cùng lên HPC), hoặc header ID nhập tay trùng: tắt một route, sửa DBC / routing table, hoặc nhập header ID khác |
 | `node '…' is not in …` | tên node không có trong DBC: chọn lại ở hộp thoại DBC |
 | `… is not a valid DBC file: …` | file không phải DBC hoặc bị hỏng; xem dòng/cột trong thông báo. (Bản cũ báo `Invalid syntax at line 1, column 1: ">>!<<ï»¿VERSION"` với DBC lưu kèm BOM UTF-8 — đã sửa, cập nhật tool bằng `git pull`) |
 | Warning `remote endpoint … is an address of <ECU> itself` | IP remote đang là IP của chính ECU: nhập IP của node bên kia |
@@ -753,8 +763,8 @@ Bấm tiêu đề cột để sắp xếp.
 
 - **Double-click / Edit…**: sửa **header ID** và **socket connection** của route.
   - Header ID nhập dạng `0x1A2B` hoặc số thập phân.
-  - Tool kiểm tra trùng như khi generate: duy nhất trên socket nhận (chiều ETH→CAN), và trên socket gửi lẫn socket
-    nhận phía bên kia (chiều CAN→ETH). Trùng thì báo lỗi và không đổi gì.
+  - Tool kiểm tra trùng như khi generate: duy nhất trên từng cặp socket gửi → socket nhận của các connection mà
+    header ID đó dùng. Trùng thì báo lỗi và không đổi gì.
   - Socket connection chỉ được chọn trong các connection của connector đang gửi/nhận PDU đó.
 - **Delete Routes… / phím Delete** (chọn được nhiều dòng):
   - Xoá I-PDU-MAPPING của route.
@@ -780,7 +790,7 @@ Bấm tiêu đề cột để sắp xếp.
 - Tiêu đề cửa sổ có `*` khi còn thay đổi chưa lưu. Đóng cửa sổ hoặc mở file khác khi chưa lưu thì tool hỏi lại.
 - Phần không sửa của file giữ nguyên từng byte. **Reload** bỏ các thay đổi chưa lưu.
 - Khi mở file, tool kiểm tra và báo trong khung log:
-  - header ID trùng trên cùng socket;
+  - header ID trùng trên cùng cặp socket gửi → nhận;
   - header ID không gắn socket connection nào;
   - header ID trỏ tới PDU-TRIGGERING không có trong file.
 
@@ -947,9 +957,9 @@ thì không route). Message nhiều ECU cùng nhận (N:1) không được route
 - Hai đầu dùng chung **tên PDU Ethernet** (theo bên gửi, ví dụ `WheelSpeed_oChassis_Eth`), **header ID**, IP và
   port: một socket thì file của ZoneB có connection `SA_ZoneB_CanGw ↔ SA_ZoneC_CanGw` và file của ZoneC có
   `SA_ZoneC_CanGw ↔ SA_ZoneB_CanGw` (hai socket: `SA_ZoneB_CanGw_Tx → SA_ZoneC_CanGw_Rx`), cùng identifier.
-- Header ID được cấp **một lần cho cả mạng**: duy nhất trên socket gửi và trên **mọi socket nhận** (socket nhận của
-  default peer nhận từ mọi ECU, nên CAN ID trùng giữa hai zone sẽ được thêm cờ), tính cả ID base các ECU đã dùng.
-  Thứ tự: nhập tay → file lock → file sinh lần trước → tự động.
+- Header ID được cấp **một lần cho cả mạng**: = CAN ID, duy nhất trên từng **cặp ECU gửi → node nhận** (hai zone gửi
+  cùng CAN ID lên default peer là hai cặp khác nhau: không sao), tính cả ID base các ECU đã dùng. Trùng trên một cặp
+  thì ERROR (không thêm cờ). Thứ tự: nhập tay → file lock → file sinh lần trước → tự động.
 
 Bảng bên dưới:
 

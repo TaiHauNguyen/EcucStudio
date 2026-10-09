@@ -291,8 +291,8 @@ class RouteDialog(tk.Toplevel):
         self.result = None
         m = route.message
         dialog_header(self, f"{route.direction}  {m.name}  ({m.id_text})",
-                      "Leave the header id empty to use the CAN id (a flag is added automatically when it "
-                      "collides). A header id entered here is never changed.")
+                      "Leave the header id empty to use the CAN id (twice on one link is an error, no flag is "
+                      "added). A header id entered here is never changed.")
         f = ttk.Frame(self, padding=10)
         f.pack(fill="both")
         over = route.bus.cfg.messages.get(m.name, {})
@@ -522,13 +522,14 @@ class FanoutDialog(tk.Toplevel):
         text.configure(state="disabled")
         self.choice = tk.StringVar(value={True: "on", False: "off"}.get(current, "auto"))
         for value, label in (("on", "One Ethernet PDU for all these buses (1:N), also when the signal layout differs"),
-                             ("off", "An own Ethernet PDU and header id per bus"),
-                             ("auto", "Automatic: linked by the routing table (without a table: same length and "
-                                      "signal layout)")):
+                             ("off", "An own Ethernet PDU per bus (enter another header id for each: the same "
+                                     "header id twice on one link is an error)"),
+                             ("auto", "Automatic: one Ethernet PDU when the CAN id, the Ethernet sender and the "
+                                      "length are the same")):
             ttk.Radiobutton(f, text=label, value=value, variable=self.choice).pack(anchor="w")
         lengths = {r.length for r in routes}
         if len(lengths) > 1:
-            ttk.Label(f, text="The lengths differ: 1:N is not possible (" +
+            ttk.Label(f, text="The lengths differ: 1:N is not possible, the header ids clash (" +
                       ", ".join(f"{r.bus.name} {r.length}" for r in routes) + ").",
                       foreground="#b03a00").pack(anchor="w", pady=(6, 0))
         bb = ttk.Frame(self, padding=(10, 0, 10, 10))
@@ -1100,8 +1101,8 @@ class GatewayWindow:
         ttk.Checkbutton(o, text="CAN -> CAN: also pair renamed messages (same CAN id and length)",
                         variable=self.v_canmatchid).pack(anchor="w", padx=(18, 0), pady=(0, 6))
         self.v_fanout = tk.BooleanVar(value=True)
-        ttk.Checkbutton(o, text="ETH -> CAN 1:N: a message sent on several buses (same CAN id, length and layout)\n"
-                                "is one Ethernet PDU forwarded to every bus",
+        ttk.Checkbutton(o, text="ETH -> CAN 1:N: the same CAN id from the same Ethernet node on several buses\n"
+                                "is one Ethernet PDU forwarded to every bus (same length needed)",
                         variable=self.v_fanout).pack(anchor="w", pady=(0, 6))
         self.v_nocom = tk.BooleanVar(value=True)
         ttk.Checkbutton(o, text="ETH -> CAN: Com does not send the CAN PDUs fed from Ethernet (DBC files imported\n"
@@ -1113,9 +1114,9 @@ class GatewayWindow:
         self.v_fibex = tk.BooleanVar(value=True)
         ttk.Checkbutton(o, text="Set bit 31 for extended CAN ids (Can_IdType style)",
                         variable=self.v_extflag).pack(anchor="w")
-        ttk.Label(o, text="Header id = CAN id (zero padded to 32 bit). On a collision a flag\n"
-                          "is set in bits 29..31 and a warning is shown.", foreground="#666666").pack(anchor="w",
-                                                                                                    pady=(0, 6))
+        ttk.Label(o, text="Header id = CAN id (zero padded to 32 bit), unique per link (sender -> receiver).\n"
+                          "The same CAN id twice on one link is an error (no flag is added).",
+                  foreground="#666666").pack(anchor="w", pady=(0, 6))
         ttk.Label(o, text="Ethernet PDU content:").pack(anchor="w")
         ttk.Radiobutton(o, text="same signal layout as the CAN PDU", value="copy",
                         variable=self.v_sigs).pack(anchor="w", padx=12)
@@ -1163,7 +1164,7 @@ class GatewayWindow:
         self.t_routes.pack(side="left", fill="both", expand=True)
         ys.pack(side="left", fill="y")
         self.t_routes.tag_configure("off", foreground="#9e9e9e")
-        self.t_routes.tag_configure("flag", foreground=COLORS["warning"])
+        self.t_routes.tag_configure("conflict", foreground=COLORS["error"])
         self.t_routes.tag_configure("new", foreground=COLORS["info"])
         self.t_routes.tag_configure("removed", foreground=COLORS["error"])
         self.t_routes.bind("<Double-1>", lambda _e: self.edit_route())
@@ -1999,8 +2000,8 @@ class GatewayWindow:
         for i, (r, row) in enumerate((r, row) for r, row in items if isinstance(r, (Route, CanRoute, SignalRoute))):
             if not r.enabled:
                 tags = ("off",)
-            elif isinstance(r, Route) and r.header_note.startswith("flag"):
-                tags = ("flag",)
+            elif isinstance(r, Route) and r.header_clash:
+                tags = ("conflict",)
             else:
                 tags = ("new",) if r.change == "new" else ()
             t.insert("", "end", iid=str(i), values=row, tags=tags)

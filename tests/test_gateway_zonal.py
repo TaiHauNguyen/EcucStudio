@@ -173,6 +173,68 @@ class ZonalTest(unittest.TestCase):
         finally:
             rt.tearDown()
 
+    def test_same_can_id_from_the_hpc_is_one_message(self):
+        """The HPC sends a message the zone ECU sends on three buses (same CAN id, classic and FD frames): one Ethernet
+        PDU with the CAN id as header id, forwarded to every bus (1:N), although no routing table row links them. A CAN
+        id the zone receives on two buses goes to the HPC twice on one link: an error (no flag is added)."""
+        from ecucstudio.gateway.base import Base
+        t = self.tmp
+
+        def bus(name, fd, twice=True):
+            msgs = [(420, "SeatCmd", 8, "ZoneC", _sigs("Seat", "SeatSig"))]
+            if twice:
+                msgs.append((400, "Twice", 8, "Seat", _sigs("ZoneC", "TwiceSig")))
+            path = _dbc(t, name, ["ZoneC", "Seat"], msgs)
+            if fd:                                                      # SeatCmd is a CAN FD frame there
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                text = text.replace('BA_DEF_ "DBName" STRING ;\n', (
+                    'BA_DEF_ BO_ "VFrameFormat" ENUM "StandardCAN","ExtendedCAN","reserved","reserved","reserved",'
+                    '"reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved",'
+                    '"reserved","StandardCAN_FD","ExtendedCAN_FD";\nBA_DEF_ "DBName" STRING ;\n'))
+                text = text.replace('BA_DEF_DEF_ "DBName" "";\n',
+                                    'BA_DEF_DEF_ "VFrameFormat" "StandardCAN";\nBA_DEF_DEF_ "DBName" "";\n')
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write(text + 'BA_ "VFrameFormat" BO_ 420 14;\n')
+            return path
+        cfg = TopologyConfig(name="seat", one_socket=True, routing_table=self.cfg.routing_table, table_hw=True,
+                             default_peer="Central")
+        cfg.cross.also_to_default_peer = True
+        cfg.peers.append(PeerNode(name="Central", ip="10.0.9.1", tx_port=41100))
+        g = GatewayConfig(output=os.path.join(t, "ZoneC_Gateway.arxml"), ecu="ZoneC",
+                          buses=[BusInput(dbc=bus("BusX", False), node="ZoneC"),
+                                 BusInput(dbc=bus("BusY", True), node="ZoneC"),
+                                 BusInput(dbc=bus("BusZ", True, twice=False), node="ZoneC")])
+        g.options.dbc_imported = True
+        cfg.ecus.append(EcuNode(name="ZoneC", ip="10.0.9.4", tx_port=41400, gateway=g))
+        tp = make_topology_plan(cfg)
+        self.assertEqual(tp.errors, [
+            "ZoneC/BusY/Twice: header id 0x00000190 (CAN id 0x190) is already used by ZoneC/BusX/Twice from ZoneC to "
+            "Central: two PDUs with one header id on one link. Disable one of them or enter another header id."])
+        r = {x.key: x for x in tp.plans["ZoneC"].routes if x.direction == "ETH->CAN"}
+        x, y, z = r["BusX/SeatCmd"], r["BusY/SeatCmd"], r["BusZ/SeatCmd"]
+        self.assertTrue(y.message.fd and not x.message.fd)
+        self.assertIsNone(x.fanout_of)
+        self.assertIs(y.fanout_of, x)
+        self.assertIs(z.fanout_of, x)
+        self.assertEqual([v.header_id for v in (x, y, z)], [0x1A4] * 3)
+        self.assertEqual(y.header_note, "same as BusX/SeatCmd (1:N)")
+        self.assertIn("1:N: forwarded to BusX, BusY, BusZ", x.notes)
+        self.assertFalse(any("flag" in w for w in tp.warnings), tp.warnings)
+        # with a header id of its own for the second Twice the file is generated: one Ethernet PDU for SeatCmd
+        g.buses[1].messages = {"Twice": {"header_id": "0x1190"}}
+        tp = make_topology_plan(cfg)
+        self.assertEqual(tp.errors, [])
+        res = dict(generate_topology(tp))
+        out = Base(res["ZoneC"].output)
+        ids = {p.rsplit("/", 1)[-1]: h.header_id for p, h in out.header_ids().items()}
+        self.assertEqual(ids["SeatCmd_oBusX_Eth_ID"], 0x1A4)
+        self.assertNotIn("SeatCmd_oBusY_Eth_ID", ids)
+        maps = [out.ref(m, "SOURCE-I-PDU-REF") for m in out.root.iter("{http://autosar.org/schema/r4.0}I-PDU-MAPPING")
+                if "SeatCmd" in out.refs(m, "TARGET-I-PDU-REF")[0]]
+        self.assertEqual(len(maps), 3)
+        self.assertEqual(len(set(maps)), 1)                             # one Ethernet PDU, three CAN buses
+
     def test_main_window_model(self):
         """gateway/zonal.py: what the main window does with the network, the DBC files and the routing table."""
         from ecucstudio.gateway import dbcread, nodes, routing_table, zonal

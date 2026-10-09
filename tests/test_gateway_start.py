@@ -15,6 +15,10 @@ FIX = os.path.join(HERE, "fixtures")
 BASE = os.path.join(FIX, "gateway_base.arxml")
 DBC = os.path.join(FIX, "gateway_demo.dbc")
 CHASSIS = os.path.join(FIX, "gateway_chassis.dbc")
+# header ids entered where a CAN id would be twice on one link (ExtSameId: extended 0x100 like EngineData;
+# Chassis/GwCommand: 0x300 like Body/BrakeStatus extended 0x300)
+BODY_IDS = {"ExtSameId": {"header_id": "0x1001"}}
+CHASSIS_IDS = {"GwCommand": {"header_id": "0x1300"}}
 
 try:
     import cantools  # noqa: F401
@@ -88,6 +92,7 @@ class StartTest(unittest.TestCase):
         cfg = start.config_for_dbcs([(DBC, "GwEcu"), (CHASSIS, "GwEcu")], out, "GwEcu",
                                     start.DAVINCI_SCHEMAS["5.24 or older"])
         self.assertEqual(cfg.schema, "AUTOSAR_00049")
+        cfg.buses[0].messages, cfg.buses[1].messages = dict(BODY_IDS), dict(CHASSIS_IDS)
         apply(cfg, suggest(cfg))
         plan = make_plan(cfg)
         self.assertEqual(plan.errors, [])
@@ -117,6 +122,7 @@ class StartTest(unittest.TestCase):
     def test_case_update(self):
         out = os.path.join(self.tmp, "GwEcu_Gateway.arxml")
         cfg = start.config_for_dbcs([(DBC, "GwEcu")], out, "GwEcu", "AUTOSAR_00052")
+        cfg.buses[0].messages = dict(BODY_IDS)
         apply(cfg, suggest(cfg))
         generate(make_plan(cfg))
         info = start.read_update(out)
@@ -124,7 +130,7 @@ class StartTest(unittest.TestCase):
         self.assertEqual([b.node for b in info.cfg.buses], ["GwEcu"])
         self.assertEqual(info.routes, 5)
         # add a bus, keep only the messages of the file on the old one
-        info.cfg.buses.append(BusInput(dbc=CHASSIS, node="GwEcu"))
+        info.cfg.buses.append(BusInput(dbc=CHASSIS, node="GwEcu", messages=dict(CHASSIS_IDS)))
         info.cfg.options.only_previous = True
         plan = make_plan(info.cfg)
         self.assertEqual(plan.errors, [])
