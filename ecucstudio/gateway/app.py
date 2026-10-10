@@ -246,7 +246,6 @@ class GatewayApp:
         nf = ttk.LabelFrame(f, text="Network settings", padding=8)
         nf.pack(fill="x", pady=(8, 0))
         self.v_vlan, self.v_mask = tk.StringVar(), tk.StringVar()
-        self.v_one = tk.BooleanVar()
         ttk.Label(nf, text="VLAN id:").pack(side="left")
         e = ttk.Entry(nf, textvariable=self.v_vlan, width=6)
         e.pack(side="left", padx=(4, 16))
@@ -254,7 +253,8 @@ class GatewayApp:
                    "untagged")
         ttk.Label(nf, text="Netmask:").pack(side="left")
         ttk.Entry(nf, textvariable=self.v_mask, width=16).pack(side="left", padx=(4, 16))
-        ttk.Checkbutton(nf, text="One socket per node for both directions", variable=self.v_one).pack(side="left")
+        ttk.Label(nf, text="Ports: every node sends from and receives on its port base (one socket per node)",
+                  foreground="#666666").pack(side="left")
         rules = ttk.LabelFrame(f, text="How the routes are made", padding=8)
         rules.pack(fill="x", pady=(8, 0))
         ttk.Label(rules, justify="left", foreground="#333333", text=(
@@ -876,7 +876,7 @@ class GatewayApp:
         c = self.cfg
         c.ethernet.vlan_id = _int(self.v_vlan.get()) if self.v_vlan.get().strip() else None
         c.ethernet.netmask = self.v_mask.get().strip() or "255.255.255.0"
-        c.one_socket = self.v_one.get()
+        c.one_socket = True
         c.routing_table = self.v_table.get().strip()
         c.table_hw = self.v_hw.get()
         e = c.ecu(self._shown_target) if self._shown_target else None
@@ -890,7 +890,6 @@ class GatewayApp:
         c = self.cfg
         self.v_vlan.set("" if c.ethernet.vlan_id is None else str(c.ethernet.vlan_id))
         self.v_mask.set(c.ethernet.netmask or "255.255.255.0")
-        self.v_one.set(c.one_socket)
         self.v_table.set(c.routing_table)
         self.v_hw.set(c.table_hw)
         self.changed(store=False)

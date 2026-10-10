@@ -173,6 +173,23 @@ class ZonalTest(unittest.TestCase):
         finally:
             rt.tearDown()
 
+    def test_ports_are_the_port_base_of_each_node(self):
+        """Main window: a node sends from and receives on its port base (also for a network file saved with two
+        sockets per node): ZoneA -> Central is 41200 -> 41100, ZoneA -> ZoneB 41200 -> 41300, ZoneB -> ZoneA 41300 ->
+        41200. The CANoe test plays Central and ZoneB on their port base."""
+        from ecucstudio.gateway import capl_test, zonal
+        from ecucstudio.gateway.planner import CAN_TO_ETH, ETH_TO_CAN
+        self.cfg.one_socket = False
+        tplan = make_topology_plan(zonal.planning_config(self.cfg))
+        self.assertEqual(tplan.errors, [])
+        sides = tplan.plans["ZoneA"].sides
+        for (d, peer), port in (((CAN_TO_ETH, "Central"), 41100), ((CAN_TO_ETH, "ZoneB"), 41300),
+                                ((ETH_TO_CAN, "ZoneB"), 41300)):
+            self.assertEqual((sides[(d, peer)].local_port, sides[(d, peer)].remote_port), (41200, port), (d, peer))
+        self.assertEqual(tplan.plans["ZoneB"].sides[(ETH_TO_CAN, "ZoneA")].remote_port, 41200)
+        tm = capl_test.build(tplan.plans["ZoneA"])
+        self.assertEqual([(s.ip, s.port) for s in tm.socks], [("10.0.9.3", 41300), ("10.0.9.1", 41100)])
+
     def test_same_can_id_from_the_hpc_is_one_message(self):
         """The HPC sends a message the zone ECU sends on three buses (same CAN id, classic and FD frames): one Ethernet
         PDU with the CAN id as header id, forwarded to every bus (1:N), although no routing table row links them. A CAN

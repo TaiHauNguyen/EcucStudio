@@ -326,6 +326,7 @@ def planning_config(t: TopologyConfig, dbs: dict | None = None) -> TopologyConfi
     p.path = t.path
     p.cross.also_to_default_peer = True       # the rules of the main window, also for network files made before
     p.cross.from_default_peer = True
+    p.one_socket = True                       # every node sends from and receives on its port base
     for e in list(p.ecus):
         if not e.gateway.buses:
             p.ecus.remove(e)

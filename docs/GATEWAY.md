@@ -37,7 +37,7 @@ cần làm tiếp (nút **Show** mở đúng trang). Mọi thứ lưu trong mộ
 
 | Trang | Làm gì |
 |---|---|
-| **1 Network** | các node Ethernet: một HPC và các ECU zonal (tên, MAC, IPv4, port); VLAN, netmask, một socket cho hai chiều |
+| **1 Network** | các node Ethernet: một HPC và các ECU zonal (tên, MAC, IPv4, port base); VLAN, netmask. Mỗi node gửi **và** nhận trên port base của nó (một socket / node): A → B là `port A → port B`, ví dụ HPC 50100 → zone 50200 |
 | **2 CAN buses (DBC)** | *Add DBC files…* (chọn nhiều file một lần). Tool tìm node gateway và ECU của từng DBC (node trùng tên ECU, thuộc tính `ECU` của node, tên ECU là một từ của tên node, hoặc node đã gán ở DBC khác); double-click để sửa node / ECU / cột routing table. Dòng màu cam là chưa đủ |
 | **3 Routing table** | file Excel (hoặc CSV) của khách hàng. Bảng *Network columns*: cột mạng nào là bus nào của ECU nào; bảng *Rows*: mỗi dòng đi đường nào (CAN → CAN trong một ECU, ECU → ECU qua Ethernet, LIN, lỗi …), có ô lọc |
 | **4 Generate** | ECU cần sinh file, tên *ECU instance in DaVinci*, file ra; **Analyze**, **Generate**, **Message report** |
