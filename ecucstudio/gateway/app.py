@@ -37,6 +37,14 @@ def _int(text):
         return None
 
 
+def _float(text, default):
+    try:
+        v = float(str(text).strip())
+        return v if v > 0 else default
+    except ValueError:
+        return default
+
+
 def _settings():
     from ..settings import Settings
     return Settings()
@@ -585,6 +593,36 @@ class GatewayApp:
         ttk.Button(of, text="Browse…", command=self.browse_out).pack(side="left", padx=4)
         self.out_hint = ttk.Label(top, text="", foreground="#666666")
         self.out_hint.grid(row=3, column=1, sticky="w")
+        # PDU collection of the target ECU: several CAN -> ETH PDUs in one UDP datagram (SoAd nPdu)
+        cf = ttk.Frame(top)
+        cf.grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.v_col_on = tk.BooleanVar(value=False)
+        cb = ttk.Checkbutton(cf, text="PDU collection (CAN -> ETH: several PDUs in one UDP datagram)",
+                             variable=self.v_col_on)
+        cb.pack(side="left")
+        Tooltip(cb, "The PDUs this ECU sends over Ethernet wait in the SoAd buffer of the socket connection and leave "
+                    "together in one UDP datagram (each PDU keeps its header). Off: one datagram per PDU. DaVinci "
+                    "derives SoAdSocketnPduUdpTxBufferMin, SoAdSocketUdpTriggerTimeout and SoAdTxUdpTriggerMode "
+                    "(TRIGGER_NEVER = collected, TRIGGER_ALWAYS = sent at once). Column ETH send shows it per route.")
+        ttk.Label(cf, text="timeout ms:").pack(side="left", padx=(12, 2))
+        self.v_col_timeout = tk.StringVar(value="5")
+        e_t = ttk.Entry(cf, textvariable=self.v_col_timeout, width=5)
+        e_t.pack(side="left")
+        Tooltip(e_t, "A collected PDU is sent at the latest after this time (use the SoAd main function period or a "
+                     "multiple of it)")
+        ttk.Label(cf, text="buffer bytes:").pack(side="left", padx=(12, 2))
+        self.v_col_buffer = tk.StringVar(value="1400")
+        e_b = ttk.Entry(cf, textvariable=self.v_col_buffer, width=6)
+        e_b.pack(side="left")
+        Tooltip(e_b, "Maximum UDP payload, PDU headers included (<= 1472 avoids IP fragmentation)")
+        self.v_col_mode = tk.StringVar(value="all")
+        ttk.Radiobutton(cf, text="collect every PDU", value="all", variable=self.v_col_mode).pack(side="left",
+                                                                                                   padx=(12, 0))
+        ttk.Radiobutton(cf, text="send at once: event messages and cycle <=", value="cycle",
+                        variable=self.v_col_mode).pack(side="left", padx=(8, 2))
+        self.v_col_cycle = tk.StringVar(value="20")
+        ttk.Entry(cf, textvariable=self.v_col_cycle, width=5).pack(side="left")
+        ttk.Label(cf, text="ms").pack(side="left", padx=(2, 0))
         bf = ttk.Frame(f)
         bf.pack(fill="x", pady=8)
         ttk.Button(bf, text="Analyze", command=self.analyze).pack(side="left")
@@ -655,6 +693,12 @@ class GatewayApp:
         self.v_target.set(self.cfg.target)
         self._shown_target = self.cfg.target
         e = self.cfg.ecu(self.cfg.target) if self.cfg.target else None
+        col = e.gateway.ethernet.collection if e is not None else None
+        self.v_col_on.set(bool(col and col.enabled))
+        self.v_col_timeout.set(f"{col.timeout_ms:g}" if col else "5")
+        self.v_col_buffer.set(str(col.buffer) if col else "1400")
+        self.v_col_mode.set(col.mode if col and col.mode in ("all", "cycle") else "all")
+        self.v_col_cycle.set(str(col.immediate_cycle_ms) if col else "20")
         if e is None:
             self.v_inst.set("")
             self.v_out.set("")
@@ -883,6 +927,12 @@ class GatewayApp:
         if e is not None:                   # the fields show this ECU (the target may just have changed)
             e.gateway.ecu = self.v_inst.get().strip()
             e.gateway.output = self.v_out.get().strip()
+            col = e.gateway.ethernet.collection
+            col.enabled = self.v_col_on.get()
+            col.timeout_ms = _float(self.v_col_timeout.get(), 5)
+            col.buffer = min(_int(self.v_col_buffer.get()) or 1400, 1472)
+            col.mode = self.v_col_mode.get()
+            col.immediate_cycle_ms = _int(self.v_col_cycle.get()) or 20
         if self.v_target.get():
             c.target = self.v_target.get()
 

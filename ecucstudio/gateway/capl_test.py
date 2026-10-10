@@ -663,7 +663,10 @@ def capl_text(tm: TestModule, source: str = "", collect_ms: float = 0) -> str:
     sock_rows = "\n".join(f"//   {i:>2}  {s.ip}:{s.port}  ({s.label})" for i, s in enumerate(socks))
     ips = sorted({s.ip for s in socks})
     problems = "".join(f"// !! {x}\n" for x in tm.problems)
-    arm = "\n".join(f"  {'if' if i == 0 else 'else if'} (k == {i}) UdpReceiveFrom(gSock[{i}], gRx{i}, elcount(gRx{i}));"
+    collect = (f"// PDU collection of {tm.ecu} is on: a CAN -> ETH PDU may come up to {collect_ms:g} ms later, together "
+               f"with others in one\n// UDP datagram (the test splits the datagram by PDU header and waits {collect_ms:g} "
+               f"ms longer).\n" if collect_ms else "")
+    arm ="\n".join(f"  {'if' if i == 0 else 'else if'} (k == {i}) UdpReceiveFrom(gSock[{i}], gRx{i}, elcount(gRx{i}));"
                     for i in range(len(socks))) or "  ;"
     rx_bufs = "\n".join(f"  char  gRx{i}[1600];" for i in range(len(socks)))
     groups, calls = [], []
@@ -693,7 +696,7 @@ def capl_text(tm: TestModule, source: str = "", collect_ms: float = 0) -> str:
 //   4. {tm.ecu} awake and communicating (KL15, network management) before the test starts.
 // Each test case sends its own data pattern (bytes depend on the test number), so a frame of another route fails.
 // CAN -> ETH and ETH -> CAN are tried twice (the first frame may wait for ARP).
-{problems}{_SEP}
+{collect}{problems}{_SEP}
 
 includes
 {{

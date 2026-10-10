@@ -173,6 +173,32 @@ class ZonalTest(unittest.TestCase):
         finally:
             rt.tearDown()
 
+    def test_pdu_collection_of_the_target_ecu(self):
+        """Main window: PDU collection is set per ECU in the network file; the plan, the gateway file and the CANoe test
+        follow it."""
+        from ecucstudio.gateway import capl_test, zonal
+        from ecucstudio.gateway.planner import CAN_TO_ETH
+        col = self.cfg.ecus[0].gateway.ethernet.collection
+        col.enabled, col.timeout_ms = True, 8
+        back = TopologyConfig.from_dict(self.cfg.to_dict())
+        self.assertEqual((back.ecus[0].gateway.ethernet.collection.enabled,
+                          back.ecus[0].gateway.ethernet.collection.timeout_ms), (True, 8))
+        back.target = "ZoneA"
+        tplan = make_topology_plan(zonal.planning_config(back))
+        self.assertEqual(tplan.errors, [])
+        tx = [r for r in tplan.plans["ZoneA"].enabled_routes if r.direction == CAN_TO_ETH]
+        self.assertTrue(tx and all(r.eth_send == "collect" for r in tx))
+        self.assertTrue(all(not r.eth_send for r in tplan.plans["ZoneB"].routes))     # ZoneB: not switched on
+        res = dict(generate_topology(tplan))
+        with open(res["ZoneA"].output, encoding="utf-8") as fh:
+            self.assertIn("<PDU-COLLECTION-TRIGGER>NEVER</PDU-COLLECTION-TRIGGER>", fh.read())
+        path = os.path.join(self.tmp, "ZoneA_test.can")
+        capl_test.write_test_module(tplan.plans["ZoneA"], path)
+        with open(path, encoding="cp1252") as fh:
+            text = fh.read()
+        self.assertIn("PDU collection of ZoneA is on", text)
+        self.assertIn(f"const dword kTimeoutEth = {capl_test.TIMEOUT_MS + 8};", text)
+
     def test_ports_are_the_port_base_of_each_node(self):
         """Main window: a node sends from and receives on its port base (also for a network file saved with two
         sockets per node): ZoneA -> Central is 41200 -> 41100, ZoneA -> ZoneB 41200 -> 41300, ZoneB -> ZoneA 41300 ->
