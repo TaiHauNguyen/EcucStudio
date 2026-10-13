@@ -1466,11 +1466,15 @@ class Planner:
 
         Not one PDU: another length, or an own Ethernet PDU / header id chosen for a bus (override "eth_pdu" /
         "header_id", or "fanout": false). That bus keeps its own Ethernet PDU; when its header id is then twice on the
-        same link, the header id assignment reports an error."""
+        same link, the header id assignment reports an error.
+
+        Another length forwarded anyway: "fanout": true on a bus (chosen by the user after checking the DBC files) makes
+        every length one Ethernet PDU. It gets the longest length (that bus keeps the PDU); a shorter CAN PDU gets the
+        first bytes (PduR hands the length over, CanIf truncates: CanIfTxPduTruncation)."""
         plan = self.plan
         for r in plan.routes:
             r.fanout_of, r.fanout_reason = None, ""
-        groups = collections.OrderedDict()
+        items, forced = [], set()
         for r in plan.enabled_routes:
             if r.direction != ETH_TO_CAN or r.can_problem:
                 continue
@@ -1479,16 +1483,28 @@ class Planner:
             # the buses that have the same choice
             chosen = (over.get("eth_pdu") or "", str(over.get("header_id") if over.get("header_id") is not None
                                                      else ""), r.key if over.get("fanout") is False else "")
-            m = r.message
-            groups.setdefault((m.can_id, m.extended, r.length, tuple(r.peers)) + chosen, []).append(r)
-        n, layout, renamed = 0, [], []
-        for rs in groups.values():
+            family = (r.message.can_id, r.message.extended, tuple(r.peers)) + chosen
+            items.append((family, r))
+            if over.get("fanout") is True:
+                forced.add(family)
+        groups = collections.OrderedDict()
+        for family, r in items:                     # key: CAN id, extended, length ("any" when forced), sender, choice
+            length = "any" if family in forced else r.length
+            groups.setdefault(family[:2] + (length,) + family[2:], []).append(r)
+        n, layout, renamed, cut = 0, [], [], []
+        for key, rs in groups.items():
+            if key[2] == "any":                     # the longest bus keeps the Ethernet PDU
+                rs = sorted(rs, key=lambda x: -x.length)
             first, members = rs[0], []
             for r in rs[1:]:
                 if r.bus is first.bus:
                     continue                        # the CAN id twice on one bus: two PDUs (header ids clash)
                 members.append(r)
-                if pair_problem(first, r)[0]:       # same length: only the signal layout can differ
+                if r.length != first.length:
+                    r.notes.append(f"1:N with another length (chosen): the Ethernet PDU has {first.length} bytes, "
+                                   f"{r.bus.name} gets the first {r.length} (CanIf truncates)")
+                    cut.append(f"{r.key} {r.length} of {first.length}")
+                elif pair_problem(first, r)[0]:     # same length: only the signal layout can differ
                     r.notes.append(f"1:N although the signal layout differs from {first.bus.name} in the DBC files")
                     layout.append(r.key)
                 if r.message.name != first.message.name:
@@ -1526,6 +1542,11 @@ class Planner:
                 r.notes.append(r.fanout_reason)
         if n:
             self.info(f"ETH -> CAN 1:N: {n} Ethernet PDU(s) forwarded to several CAN buses (one PDU, one header id).")
+        if cut:
+            self.warn(f"ETH -> CAN 1:N with another length (chosen by the user): {', '.join(cut[:4])}"
+                      f"{' ...' if len(cut) > 4 else ''} bytes. The Ethernet PDU has the longest length; PduR hands it to "
+                      f"CanIf, which sends only the first bytes on the shorter bus: keep CanIfTxPduTruncation = true "
+                      f"(default) and the PduR length handling of the path at UNUSED / IGNORE.")
         if layout:
             self.warn(f"ETH -> CAN 1:N: the DBC files define another signal layout on {len(layout)} bus(es) "
                       f"({', '.join(layout[:4])}{' ...' if len(layout) > 4 else ''}): forwarded unchanged. Check the "

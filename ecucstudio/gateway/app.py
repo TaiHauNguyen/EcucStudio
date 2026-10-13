@@ -796,7 +796,35 @@ class GatewayApp:
         m.add_command(label="Enable", command=lambda: self.set_routes(True))
         m.add_command(label="Disable", command=lambda: self.set_routes(False))
         m.add_command(label="Automatic (remove my setting)", command=lambda: self.set_routes(None))
+        group = self._fanout_group()
+        if group:
+            m.add_separator()
+            m.add_command(label="1:N: one Ethernet PDU for this CAN id, also with another length…",
+                          command=lambda: self.set_fanout(group, True))
+            m.add_command(label="1:N: automatic (only the same length)", command=lambda: self.set_fanout(group, None))
         m.tk_popup(e.x_root, e.y_root)
+
+    def _fanout_group(self) -> list:
+        """ETH -> CAN routes of the CAN id and sender of the selected route on several buses, or []."""
+        plan = self.tplan.plans.get(self.cfg.target) if self.tplan is not None else None
+        sel = [self._route_by_iid.get(i) for i in self.t_routes.selection()]
+        sel = [r for r in sel if isinstance(r, Route)]
+        return zonal.fanout_group(plan, sel[0]) if plan is not None and sel else []
+
+    def set_fanout(self, routes, value):
+        """The user's 1:N choice for one CAN id (kept in the network file)."""
+        if value:
+            m0 = routes[0].message
+            lengths = ", ".join(f"{r.bus.name} {r.length}" for r in routes)
+            longest = max(r.length for r in routes)
+            if not messagebox.askokcancel(TITLE, (
+                    f"{m0.name} ({m0.id_text}) from {routes[0].peers[0]}: {lengths} bytes.\n\n"
+                    f"One Ethernet PDU of {longest} bytes is forwarded to every bus. A bus with a shorter CAN PDU "
+                    f"gets the first bytes (CanIf truncates; keep CanIfTxPduTruncation = true).\n\n"
+                    f"Only when the DBC files of these buses really describe the same message."), parent=self.win):
+                return
+        zonal.set_fanout(self.cfg, self.cfg.target, routes, value)
+        self.analyze()
 
     def set_routes(self, value):
         """Switch the selected routes of the target ECU on / off (kept in the network file)."""

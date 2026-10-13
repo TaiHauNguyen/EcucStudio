@@ -341,6 +341,37 @@ def planning_config(t: TopologyConfig, dbs: dict | None = None) -> TopologyConfi
     return p
 
 
+def fanout_group(plan, r) -> list:
+    """ETH -> CAN routes of *plan* with the CAN id and the Ethernet sender of route *r*, on at least two buses (one
+    message: 1:N), else []."""
+    if getattr(r, "direction", "") != "ETH->CAN" or not r.peers:
+        return []
+    same = [x for x in plan.enabled_routes if x.direction == r.direction and not x.can_problem and x.peers[:1] ==
+            r.peers[:1] and (x.message.can_id, x.message.extended) == (r.message.can_id, r.message.extended)]
+    return same if len({x.bus.name for x in same}) > 1 else []
+
+
+def set_fanout(t: TopologyConfig, ecu: str, routes: list, value: bool | None):
+    """1:N choice of the user for *routes* (ETH -> CAN of ECU *ecu*): True = one Ethernet PDU also with another length,
+    None = automatic (kept in the network file as message override "fanout")."""
+    e = t.ecu(ecu)
+    if e is None:
+        return
+    for r in routes:
+        b = next((x for x in e.gateway.buses if x.dbc and r.bus.cfg.dbc and os.path.normcase(os.path.abspath(x.dbc))
+                  == os.path.normcase(os.path.abspath(r.bus.cfg.dbc))), None)
+        if b is None:
+            continue
+        over = dict(b.messages.get(r.message.name, {}))
+        over.pop("fanout", None)
+        if value is not None:
+            over["fanout"] = value
+        if over:
+            b.messages[r.message.name] = over
+        else:
+            b.messages.pop(r.message.name, None)
+
+
 def missing(t: TopologyConfig) -> str:
     """The next thing the user has to do ('' = ready to generate)."""
     if hpc(t) is None:

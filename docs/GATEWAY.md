@@ -57,7 +57,7 @@ default nodes* lấy lại. Đổi vai trò: chọn node → *Set as HPC*, hoặ
 | HW-Accelerator = 1 | vẫn route (bỏ tick ở trang 3 để để lại cho LLCE / PFE) |
 | message không có trong bảng | chỉ lên HPC / chỉ lấy từ HPC; giữa các ECU tool **không** tự ghép theo tên |
 | header ID | = CAN ID (đệm 0 lên 32 bit), duy nhất trên từng **cặp node gửi → node nhận**. Cùng CAN ID tới / từ node khác: không sao. Cùng CAN ID, cùng node gửi, cùng node nhận: **ERROR** (tool không tự thêm cờ), dòng route màu đỏ, Header note `conflict: …` |
-| cùng CAN ID trên nhiều bus, cùng node gửi (ETH → CAN) | là **một** message: một PDU Ethernet, một header ID, forward ra mọi bus đó (1:N, mục 3.5), không cần dòng routing table. Khác độ dài thì không gộp được: ERROR |
+| cùng CAN ID trên nhiều bus, cùng node gửi (ETH → CAN) | là **một** message: một PDU Ethernet, một header ID, forward ra mọi bus đó (1:N, mục 3.5), không cần dòng routing table. Khác độ dài: ERROR; đã kiểm tra DBC và vẫn muốn route thì chuột phải dòng đó → *1:N: one Ethernet PDU for this CAN id, also with another length…* (PDU Ethernet dài nhất, bus ngắn hơn nhận các byte đầu) |
 
 Ví dụ: ZoneA có BusA, BusB; ZoneB có BusC; HPC là Central.
 
@@ -398,7 +398,14 @@ Ví dụ HPC gửi `HpcCmd` (CAN ID 0x12C) cho zone ECU; zone ECU gửi message 
 - cùng CAN ID, cùng node gửi nhưng **khác độ dài**, hoặc bus đó được chọn tên PDU Ethernet riêng bằng tay: bus đó có
   PDU Ethernet riêng, nên header ID trùng trên cùng cặp gửi → nhận: **ERROR**, cột **Header note** ghi
   `conflict: 0x… used by …`, Remark ghi lý do, ví dụ `not 1:N with BusA/X: length differs (BusA 8, BusC 12)`. Sửa
-  DBC, tắt một route, hoặc nhập header ID riêng cho bus đó;
+  DBC, tắt một route, nhập header ID riêng cho bus đó, hoặc **vẫn route 1:N** (dưới đây);
+- **vẫn route 1:N khi khác độ dài** (người dùng đã kiểm tra DBC): cửa sổ chính, chuột phải dòng ETH->CAN →
+  *1:N: one Ethernet PDU for this CAN id, also with another length…* (hỏi lại, liệt kê độ dài từng bus); cửa sổ
+  generator một ECU: *1:N with the same CAN id…* → *One Ethernet PDU…*. Lưu thành `messages.<tên>.fanout = true`.
+  PDU Ethernet lấy **độ dài dài nhất** (bus đó giữ PDU), node gửi gửi một lần; bus có PDU CAN ngắn hơn nhận các
+  byte đầu: PduR chuyển nguyên độ dài, CanIf cắt theo độ dài PDU CAN (`CanIfTxPduTruncation = true`, mặc định; độ dài
+  handling của PduR để UNUSED / IGNORE). Remark ghi `1:N with another length (chosen): …`, có một WARNING nhắc lại.
+  *1:N: automatic (only the same length)* bỏ lựa chọn này;
 - cửa sổ generator một ECU: chuột phải một dòng ETH->CAN → **1:N with the same CAN id…**. Hộp thoại liệt kê signal
   của message trên từng bus (start bit, độ dài, byte order), signal khác layout tô màu cam. Chọn:
   - **One Ethernet PDU for all these buses (1:N)**: gộp (độ dài phải bằng nhau). PduR chuyển nguyên PDU, PDU

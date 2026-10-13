@@ -173,6 +173,58 @@ class ZonalTest(unittest.TestCase):
         finally:
             rt.tearDown()
 
+    def test_same_can_id_other_length_one_pdu_when_chosen(self):
+        """ETH -> CAN, the same CAN id from the HPC with 8 bytes on one bus and 16 on two others: an error, until the
+        user chooses 1:N anyway. Then one Ethernet PDU of 16 bytes goes to all three buses (the 8-byte bus gets the
+        first 8: CanIf truncates); the CANoe test expects each bus with its own length."""
+        from ecucstudio.gateway import capl_test, zonal
+        from ecucstudio.gateway.base import Base
+        t = self.tmp
+
+        def bus(name, length):
+            return _dbc(t, name, ["ZoneC", "Seat"], [(746, "TempInfo", length, "ZoneC",
+                                                      _sigs("Seat", *[f"T{i}" for i in range(length)]))])
+        cfg = TopologyConfig(name="len", one_socket=True, default_peer="Central", target="ZoneC")
+        cfg.peers.append(PeerNode(name="Central", ip="10.0.9.1", tx_port=41100))
+        g = GatewayConfig(output=os.path.join(t, "ZoneC_Gateway.arxml"), ecu="ZoneC",
+                          buses=[BusInput(dbc=bus("BusS", 8), node="ZoneC"), BusInput(dbc=bus("BusC", 16), node="ZoneC"),
+                                 BusInput(dbc=bus("BusP", 16), node="ZoneC")])
+        cfg.ecus.append(EcuNode(name="ZoneC", ip="10.0.9.4", tx_port=41400, gateway=g))
+        tp = make_topology_plan(zonal.planning_config(cfg))
+        self.assertEqual(len(tp.errors), 1, tp.errors)
+        self.assertIn("length differs (BusS 8, BusC 16)", tp.errors[0])
+        plan = tp.plans["ZoneC"]
+        group = zonal.fanout_group(plan, next(r for r in plan.routes if r.key == "BusC/TempInfo"))
+        self.assertEqual([r.bus.name for r in group], ["BusS", "BusC", "BusP"])
+        zonal.set_fanout(cfg, "ZoneC", group, True)                       # the user checked the DBC files
+        self.assertEqual(g.buses[0].messages, {"TempInfo": {"fanout": True}})
+        tp = make_topology_plan(zonal.planning_config(TopologyConfig.from_dict(cfg.to_dict())))
+        self.assertEqual(tp.errors, [])
+        r = {x.key: x for x in tp.plans["ZoneC"].routes if x.direction == "ETH->CAN"}
+        s, c, p = r["BusS/TempInfo"], r["BusC/TempInfo"], r["BusP/TempInfo"]
+        self.assertIsNone(c.fanout_of)                                     # the longest bus keeps the Ethernet PDU
+        self.assertIs(s.fanout_of, c)
+        self.assertIs(p.fanout_of, c)
+        self.assertEqual([x.header_id for x in (s, c, p)], [0x2EA] * 3)
+        self.assertIn("1:N with another length (chosen): the Ethernet PDU has 16 bytes, BusS gets the first 8 "
+                      "(CanIf truncates)", s.notes)
+        self.assertTrue(any(w.startswith("[ZoneC] ETH -> CAN 1:N with another length (chosen by the user): "
+                                         "BusS/TempInfo 8 of 16") for w in tp.warnings), tp.warnings)
+        res = dict(generate_topology(tp))
+        out = Base(res["ZoneC"].output)
+        eth = next(e for path, e in out.by_path.items() if path.endswith("/TempInfo_oBusC_Eth"))
+        self.assertEqual(eth.findtext("{http://autosar.org/schema/r4.0}LENGTH"), "16")
+        maps = [out.ref(m, "SOURCE-I-PDU-REF") for m in out.root.iter("{http://autosar.org/schema/r4.0}I-PDU-MAPPING")
+                if "TempInfo" in out.refs(m, "TARGET-I-PDU-REF")[0]]
+        self.assertEqual((len(maps), len(set(maps))), (3, 1))
+        text = capl_test.capl_text(capl_test.build(tp.plans["ZoneC"]))
+        self.assertIn(", 0x2EA, 0, 8);", text)                             # BusS: 8 bytes expected
+        self.assertIn("0x000002EA, 16,", text)                              # one datagram of 16 bytes
+        # back to automatic: the error again
+        zonal.set_fanout(cfg, "ZoneC", group, None)
+        self.assertEqual(g.buses[0].messages, {})
+        self.assertEqual(len(make_topology_plan(zonal.planning_config(cfg)).errors), 1)
+
     def test_pdu_collection_of_the_target_ecu(self):
         """Main window: PDU collection is set per ECU in the network file; the plan, the gateway file and the CANoe test
         follow it."""

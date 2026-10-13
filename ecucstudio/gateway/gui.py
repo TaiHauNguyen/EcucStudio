@@ -521,7 +521,8 @@ class FanoutDialog(tk.Toplevel):
             text.insert("end", "\n")
         text.configure(state="disabled")
         self.choice = tk.StringVar(value={True: "on", False: "off"}.get(current, "auto"))
-        for value, label in (("on", "One Ethernet PDU for all these buses (1:N), also when the signal layout differs"),
+        for value, label in (("on", "One Ethernet PDU for all these buses (1:N), also when the signal layout or the "
+                                    "length differs"),
                              ("off", "An own Ethernet PDU per bus (enter another header id for each: the same "
                                      "header id twice on one link is an error)"),
                              ("auto", "Automatic: one Ethernet PDU when the CAN id, the Ethernet sender and the "
@@ -529,8 +530,9 @@ class FanoutDialog(tk.Toplevel):
             ttk.Radiobutton(f, text=label, value=value, variable=self.choice).pack(anchor="w")
         lengths = {r.length for r in routes}
         if len(lengths) > 1:
-            ttk.Label(f, text="The lengths differ: 1:N is not possible, the header ids clash (" +
-                      ", ".join(f"{r.bus.name} {r.length}" for r in routes) + ").",
+            ttk.Label(f, text="The lengths differ (" + ", ".join(f"{r.bus.name} {r.length}" for r in routes) +
+                      "): automatic = the header ids clash. One Ethernet PDU: it gets the longest length, a shorter "
+                      "bus the first bytes (CanIf truncates).",
                       foreground="#b03a00").pack(anchor="w", pady=(6, 0))
         bb = ttk.Frame(self, padding=(10, 0, 10, 10))
         bb.pack(fill="x")
