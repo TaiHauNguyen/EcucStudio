@@ -148,6 +148,27 @@ class Writer:
             if not cr.vsde:                 # the DBC converter makes the others (extension file)
                 self.can_route(cr)
         self.fibex_refs()
+        self.check_mappings()
+
+    def check_mappings(self):
+        """Every enabled CAN <-> Ethernet route has its I-PDU-MAPPING in the GATEWAY (1:N: from the Ethernet PDU of
+        the route that owns it); a missing one stops the generation."""
+        p, b = self.p, self.b
+        gw = b.el(p.gateway) if p.gateway else None
+        if gw is None:
+            return
+        have = {(b.ref(m, "SOURCE-I-PDU-REF"), t) for m in gw.iter(q("I-PDU-MAPPING"))
+                for t in b.refs(m, "TARGET-I-PDU-REF")}
+        missing = []
+        for r in p.enabled_routes:
+            eth_pt = self._eth_pts.get(id(r.fanout_of if r.fanout_of is not None else r))
+            can_pt = self._can_pts.get(id(r))
+            pair = (can_pt, eth_pt) if r.direction == CAN_TO_ETH else (eth_pt, can_pt)
+            if not eth_pt or not can_pt or pair not in have:
+                missing.append(f"{r.direction} {r.key}")
+        if missing:
+            raise ValueError(f"I-PDU-MAPPING missing in the gateway for {len(missing)} route(s): "
+                             + ", ".join(missing[:10]) + (" ..." if len(missing) > 10 else ""))
 
     # ------------------------------------------------------------------ CAN bus
     def bus(self, bp):

@@ -18,6 +18,7 @@ import dataclasses
 import math
 import os
 import re
+import string
 from dataclasses import dataclass, field
 
 from .. import arxml
@@ -108,6 +109,8 @@ class Route:
     no_com: bool = False        # ETH->CAN: Com of the ECU does not send the CAN PDU (.vsde file of the DBC files)
     fanout_reason: str = ""     # ETH->CAN: why it does not share the Ethernet PDU of the same CAN id on another bus
     eth_send: str = ""          # CAN->ETH with PDU collection: "immediate" (TRIGGER_ALWAYS) | "collect" ("" = off)
+    eth_wanted: str = ""        # Ethernet PDU name before it was made unique (1:N: the owner of the PDU gets it)
+    name_fields: dict = field(default_factory=dict)     # fields of the naming patterns of this route
     eth_send_why: str = ""
 
     @property
@@ -832,6 +835,9 @@ class Planner:
             prev = self.previous.match(can_pt, direction, eth_name)
             if prev is not None and not over.get("eth_pdu"):
                 eth_name = prev.eth_pdu                     # same name -> same paths and UUIDs as before
+                clean = _without_suffix(prev.eth_pdu, naming.eth_pdu, fields)
+                if clean and f"{pdu_pkg}/{clean}" not in b.by_path:
+                    eth_name = clean                        # "_1_1" added by older versions on every generation
             bus_known = any(x.can_pt.startswith(bp.channel + "/") for x in self.previous.routes)
             if "enabled" not in over and opts.only_previous and bus_known:
                 if prev is None and r.enabled:
@@ -855,15 +861,16 @@ class Planner:
         # ETH->CAN 1:N in the previous file: the other buses had the same Ethernet PDU (they share it again)
         shared = (prev is not None and any(x.prev is not None and x.prev.eth_pdu == prev.eth_pdu for x in plan.routes)
                   or bool(over.get("eth_pdu")) and any(x.eth_pdu == eth_name for x in plan.routes))
+        r.eth_wanted, r.name_fields = eth_name, fields
         r.eth_pdu = self._unique(pdu_pkg, eth_name, "Ethernet PDU", quiet=shared)
         r.eth_pt_name = self._unique(plan.eth_channel, fmt(naming.pdu_triggering, pdu=r.eth_pdu, **fields),
-                                     "PDU triggering")
+                                     "PDU triggering", quiet=shared)
         if opts.eth_signals == "copy":
             if r.can_signals:
                 r.eth_signals = [
                     SignalSpec(name=self._unique(self._package("I-SIGNAL"),
                                                  fmt(naming.eth_signal, sig=s.mapping, eth_pdu=r.eth_pdu, **fields),
-                                                 "Signal"),
+                                                 "Signal", quiet=shared),
                                system_signal=s.system_signal, mapping=s.mapping, start=s.start, length=s.length,
                                little_endian=s.little_endian, signed=s.signed, is_float=s.is_float,
                                initial=s.initial, transfer=s.transfer)
@@ -1512,6 +1519,7 @@ class Planner:
                     renamed.append(r.key)
             if not members:
                 continue
+            self._own_shared_name(first, members)
             for r in members:
                 r.fanout_of = first
                 r.eth_pdu, r.eth_pt_name, r.eth_signals = first.eth_pdu, first.eth_pt_name, []
@@ -1555,6 +1563,27 @@ class Planner:
             self.info(f"ETH -> CAN 1:N: {len(renamed)} message(s) have another name than the message with the same "
                       f"CAN id from the same Ethernet node on another bus ({', '.join(renamed[:4])}"
                       f"{' ...' if len(renamed) > 4 else ''}): one message, forwarded unchanged.")
+
+    def _own_shared_name(self, owner: Route, members: list):
+        """1:N: the route that keeps the Ethernet PDU gets the name the group shares (from the previous file). A route
+        planned before it holds that name now (the owner got "<name>_1"): the names of the group are given back and
+        the owner takes them, so the name stays the same on every generation."""
+        if owner.eth_pdu == owner.eth_wanted or not any(x.eth_pdu == owner.eth_wanted for x in members):
+            return
+        naming, plan = self.cfg.naming, self.plan
+        pdu_pkg, sig_pkg = self._package("I-SIGNAL-I-PDU"), self._package("I-SIGNAL")
+        for x in [owner] + members:
+            self._taken.discard(f"{pdu_pkg}/{x.eth_pdu}")
+            self._taken.discard(f"{plan.eth_channel}/{x.eth_pt_name}")
+            for sg in x.eth_signals:
+                self._taken.discard(f"{sig_pkg}/{sg.name}")
+        f = owner.name_fields
+        owner.eth_pdu = self._unique(pdu_pkg, owner.eth_wanted, "Ethernet PDU", quiet=True)
+        owner.eth_pt_name = self._unique(plan.eth_channel, fmt(naming.pdu_triggering, pdu=owner.eth_pdu, **f),
+                                         "PDU triggering", quiet=True)
+        owner.eth_signals = [dataclasses.replace(sg, name=self._unique(
+            sig_pkg, fmt(naming.eth_signal, sig=sg.mapping, eth_pdu=owner.eth_pdu, **f), "Signal", quiet=True))
+            for sg in owner.eth_signals]
 
     # ------------------------------------------------------------------ buses of other ECUs (over Ethernet)
     def _plan_remote_routes(self):
@@ -2023,6 +2052,17 @@ class Planner:
             pkg = self._package("GATEWAY")
             name = self._unique(pkg, fmt(self.cfg.naming.gateway, ecu=plan.ecu_name), "Gateway")
             plan.gateway, plan.gateway_new = f"{pkg}/{name}", True
+
+
+def _without_suffix(name: str, pattern: str, fields: dict) -> str:
+    """*name* without trailing "_1", "_2" ... when the rest is a name of *pattern* (any bus), else ''."""
+    clean = re.sub(r"(_\d+)+$", "", name)
+    if clean == name:
+        return ""
+    rx = "".join(re.escape(lit) + ("" if key is None else r"\w+" if key == "bus" else re.escape(sanitize(str(
+        fields.get(key, ""))) if key in fields else r"\w+"))
+        for lit, key, _spec, _conv in string.Formatter().parse(pattern))
+    return clean if re.fullmatch(rx, clean) else ""
 
 
 def header_base_id(m: dbcread.Message, hcfg) -> int:

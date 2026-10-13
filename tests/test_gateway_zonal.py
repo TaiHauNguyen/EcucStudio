@@ -220,6 +220,20 @@ class ZonalTest(unittest.TestCase):
         text = capl_test.capl_text(capl_test.build(tp.plans["ZoneC"]))
         self.assertIn(", 0x2EA, 0, 8);", text)                             # BusS: 8 bytes expected
         self.assertIn("0x000002EA, 16,", text)                              # one datagram of 16 bytes
+        # generated again over the previous file: the same Ethernet PDU name every time (no "_1" added), all kept;
+        # a name that older versions let grow ("_1_1") becomes the clean one again
+        for grown in (False, False, True):
+            if grown:
+                with open(g.output, encoding="utf-8") as fh:
+                    text = fh.read().replace("TempInfo_oBusC_Eth", "TempInfo_oBusC_Eth_1_1")
+                with open(g.output, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            tp = make_topology_plan(zonal.planning_config(cfg))
+            self.assertEqual(tp.errors, [])
+            rs = [x for x in tp.plans["ZoneC"].routes if x.message.name == "TempInfo"]
+            self.assertEqual({(x.eth_pdu, x.eth_pt_name, x.change) for x in rs},
+                             {("TempInfo_oBusC_Eth", "TempInfo_oBusC_Eth_PT", "kept")})
+            generate_topology(tp)
         # back to automatic: the error again
         zonal.set_fanout(cfg, "ZoneC", group, None)
         self.assertEqual(g.buses[0].messages, {})
