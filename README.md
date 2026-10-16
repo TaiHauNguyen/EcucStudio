@@ -249,15 +249,17 @@ python scripts\remove_can_clusters.py network.arxml CAN0 CAN2 CAN4 -o network_wi
 - Bỏ theo: cluster + channel (frame / PDU / signal triggering), CAN connector + port của ECU trên bus đó, controller;
   frame, PDU (cả SECURED-I-PDU), I-SIGNAL, SYSTEM-SIGNAL, PDU group không còn ai dùng; mapping PDU→frame,
   signal→PDU; FIBEX-ELEMENT, mapping của SYSTEM, gateway I-PDU-MAPPING / I-SIGNAL-MAPPING trỏ vào phần đã bỏ.
-- Phần routing sang bus khác / Ethernet chỉ để đi tới / từ bus bị bỏ (đầu kia của gateway I-PDU-MAPPING, kèm PDU
-  Ethernet, SO-CON-I-PDU-IDENTIFIER, signal) cũng bị bỏ; `--keep-partners` để giữ lại.
+- Phần gateway chỉ để đi tới / từ bus bị bỏ cũng bị bỏ: đầu kia của gateway I-PDU-MAPPING (PDU trên bus khác / Ethernet,
+  kèm SO-CON-I-PDU-IDENTIFIER, SECURED-I-PDU SecOC và SECURE-COMMUNICATION-PROPS của nó, signal) và của I-SIGNAL-MAPPING
+  (signal được route vào PDU Ethernet còn lại: bỏ triggering + mapping trong PDU); `--keep-partners` để giữ lại.
+  Signal mất hết I-SIGNAL-TRIGGERING thì ra khỏi PDU (không để lại PDU có signal thiếu triggering).
 - ECU, cluster khác, kiểu dữ liệu… giữ nguyên; ghi file như file vào (khai báo XML, CRLF). Report liệt kê số
   phần tử bỏ theo loại và mọi phần tử bỏ nằm ngoài CAN cluster để kiểm tra. `--dry-run` chỉ báo, không ghi.
 
 `scripts/check_network.py network.arxml --ecu /Topology/HardwareComponents/<ECU>` kiểm tra file network trước khi
 import: tham chiếu không có đích, PDU triggering của ECU có signal mà không có I-SIGNAL-TRIGGERING (DaVinci báo
 `ISignalTriggering not available` ở bước *Create ECU configuration*, có thể dừng với lỗi nội bộ BaseEcuC), triggering
-/ mapping thiếu tham chiếu, port không ai dùng.
+/ mapping thiếu tham chiếu, gateway I-PDU-MAPPING / I-SIGNAL-MAPPING thiếu nguồn hoặc đích, port không ai dùng.
 
 ## An toàn dữ liệu
 

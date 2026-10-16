@@ -75,6 +75,73 @@ class RemoveCanClustersTest(unittest.TestCase):
         with open(self.net, "rb") as a, open(out, "rb") as b:
             self.assertEqual(a.readline(), b.readline())
 
+    def add_signal_gateway(self):
+        """Body/EngineSpeed is routed as signal into a second signal of the Ethernet PDU LampCmd_Eth (which stays)."""
+        ns = "{http://autosar.org/schema/r4.0}"
+        tree = etree.parse(self.net)
+        root, path_of = tree.getroot(), {}
+
+        def walk(el, p):
+            sn = el.find(ns + "SHORT-NAME")
+            if sn is not None and sn.text:
+                p = p + "/" + sn.text
+                path_of[p] = el
+            for c in el:
+                if isinstance(c.tag, str):
+                    walk(c, p)
+        walk(root, "")
+
+        def sub(parent, tag, text=None, **attrs):
+            el = etree.SubElement(parent, ns + tag, **attrs)
+            el.text = text
+            return el
+        sig = sub(path_of["/Communication/Signals"].find(ns + "ELEMENTS"), "I-SIGNAL")
+        sub(sig, "SHORT-NAME", "FromBody")
+        sub(sig, "LENGTH", "16")
+        maps = path_of["/Communication/PDUs/LampCmd_Eth"].find(ns + "I-SIGNAL-TO-PDU-MAPPINGS")
+        m = sub(maps, "I-SIGNAL-TO-I-PDU-MAPPING")
+        sub(m, "SHORT-NAME", "FromBody")
+        sub(m, "I-SIGNAL-REF", "/Communication/Signals/FromBody", DEST="I-SIGNAL")
+        ch = path_of["/Topology/Clusters/EthCluster/Eth_VLAN10"]
+        st = sub(ch.find(ns + "I-SIGNAL-TRIGGERINGS"), "I-SIGNAL-TRIGGERING")
+        sub(st, "SHORT-NAME", "FromBody_ST")
+        sub(st, "I-SIGNAL-REF", "/Communication/Signals/FromBody", DEST="I-SIGNAL")
+        refs = path_of["/Topology/Clusters/EthCluster/Eth_VLAN10/LampCmd_Eth_PT"].find(ns + "I-SIGNAL-TRIGGERINGS")
+        sub(sub(refs, "I-SIGNAL-TRIGGERING-REF-CONDITIONAL"), "I-SIGNAL-TRIGGERING-REF",
+            "/Topology/Clusters/EthCluster/Eth_VLAN10/FromBody_ST", DEST="I-SIGNAL-TRIGGERING")
+        gw = path_of["/Topology/Ecus/Gateway_GwEcu"]
+        sm = sub(sub(gw, "SIGNAL-MAPPINGS"), "I-SIGNAL-MAPPING")
+        sub(sm, "SOURCE-SIGNAL-REF", "/Topology/Clusters/Body_Cluster/Body/EngineSpeed_oEngineData_oBody_ST",
+            DEST="I-SIGNAL-TRIGGERING")
+        sub(sm, "TARGET-SIGNAL-REF", "/Topology/Clusters/EthCluster/Eth_VLAN10/FromBody_ST", DEST="I-SIGNAL-TRIGGERING")
+        tree.write(self.net, xml_declaration=True, encoding="UTF-8")
+
+    def test_signal_gateway_partner(self):
+        """A signal routed from the removed bus into an Ethernet PDU that stays leaves that PDU (triggering, mapping,
+        signal); the PDU keeps its other signals and never a signal without triggering."""
+        check = importlib.util.module_from_spec(importlib.util.spec_from_file_location(
+            "check_network", os.path.join(os.path.dirname(SCRIPT), "check_network.py")))
+        check.__spec__.loader.exec_module(check)
+        self.add_signal_gateway()
+        out = os.path.join(self.tmp, "out.arxml")
+        self.assertEqual(self.run_main(self.net, "Body", "-o", out)[0], 0)
+        _, after = index(out)
+        for p in ("/Topology/Clusters/EthCluster/Eth_VLAN10/FromBody_ST", "/Communication/PDUs/LampCmd_Eth/FromBody",
+                  "/Communication/Signals/FromBody"):
+            self.assertNotIn(p, after, p)
+        for p in ("/Topology/Clusters/EthCluster/Eth_VLAN10/LampCmd_Eth_PT", "/Communication/PDUs/LampCmd_Eth/LampCmd",
+                  "/Topology/Clusters/EthCluster/Eth_VLAN10/LampCmd_ST"):
+            self.assertIn(p, after, p)
+        self.assertEqual(check.File(out).missing_signal_triggerings(None), [])
+        self.assertEqual(index(out)[0].findall(".//{*}I-SIGNAL-MAPPING"), [])
+        # keeping the partners: the signal stays in the Ethernet PDU with its triggering (only the mapping goes)
+        keep = os.path.join(self.tmp, "keep.arxml")
+        self.assertEqual(self.run_main(self.net, "Body", "--keep-partners", "-o", keep)[0], 0)
+        _, kept = index(keep)
+        self.assertIn("/Topology/Clusters/EthCluster/Eth_VLAN10/FromBody_ST", kept)
+        self.assertEqual(check.File(keep).missing_signal_triggerings(None), [])
+        self.assertEqual(check.File(keep).broken_gateway_mappings(), [])
+
     def test_keep_partners_dry_run_and_errors(self):
         out = os.path.join(self.tmp, "keep.arxml")
         code, _ = self.run_main(self.net, "Body_Cluster", "--keep-partners", "-o", out)

@@ -12,9 +12,12 @@ path (case is ignored). Removed with it, repeated until nothing changes:
   I-SIGNAL-TO-I-PDU mappings, PDU triggerings of other channels (e.g. Ethernet) carrying a removed PDU, socket
   connection PDU identifiers of those triggerings, secured PDUs of a removed payload, gateway I-PDU-MAPPINGs, SYSTEM
   data mappings, FIBEX element references, PDU group / port / connector references ...
-* gateway partners: a gateway I-PDU-MAPPING that loses one end takes the PDU triggering at its other end (on a
-  bus / Ethernet channel that stays) when no other mapping uses it - the routing to / from the removed bus
+* gateway partners: a gateway I-PDU-MAPPING (I-SIGNAL-MAPPING) that loses one end takes the PDU (signal)
+  triggering at its other end (on a bus / Ethernet channel that stays) when no other mapping uses it - the routing
+  to / from the removed bus, with its Ethernet PDU, socket PDU identifiers and SecOC secured PDU
   (--keep-partners: keep them)
+* a signal left without any I-SIGNAL-TRIGGERING leaves the PDUs that map it (a PDU triggering never keeps a signal
+  without triggering: DaVinci "ISignalTriggering not available")
 * elements nobody uses any more (they were used before): PDU / signal triggerings, CAN frames, PDUs, I-SIGNALs,
   I-SIGNAL groups, SYSTEM signals (groups), frame / I-PDU / I-SIGNAL ports, CAN controllers, frame triggerings left
   without PDU triggering and I-SIGNAL-I-PDU groups left without PDU. References inside the SYSTEM (FIBEX elements,
@@ -36,8 +39,8 @@ from lxml import etree
 # removed when nothing (but weak references) refers to them any more and something did before
 GC_TYPES = {"PDU-TRIGGERING", "I-SIGNAL-TRIGGERING", "CAN-FRAME", "I-SIGNAL", "I-SIGNAL-GROUP", "SYSTEM-SIGNAL",
             "SYSTEM-SIGNAL-GROUP", "FRAME-PORT", "I-PDU-PORT", "I-SIGNAL-PORT", "CAN-COMMUNICATION-CONTROLLER",
-            "I-SIGNAL-I-PDU", "NM-PDU", "N-PDU", "DCM-I-PDU", "SECURED-I-PDU", "CONTAINER-I-PDU", "MULTIPLEXED-I-PDU", "GENERAL-PURPOSE-PDU",
-            "GENERAL-PURPOSE-I-PDU", "USER-DEFINED-PDU", "USER-DEFINED-I-PDU", "XCP-PDU"}
+            "I-SIGNAL-I-PDU", "NM-PDU", "N-PDU", "DCM-I-PDU", "SECURED-I-PDU", "CONTAINER-I-PDU",
+            "MULTIPLEXED-I-PDU", "GENERAL-PURPOSE-PDU", "GENERAL-PURPOSE-I-PDU", "USER-DEFINED-PDU", "USER-DEFINED-I-PDU", "XCP-PDU"}
 # references inside these do not keep their target alive (lists of what exists / is switched together, gateway
 # mappings: a mapping that loses one end goes)
 WEAK_OWNERS = {"SYSTEM", "I-SIGNAL-I-PDU-GROUP", "GATEWAY"}
@@ -151,7 +154,7 @@ class Network:
     def in_mapping(el) -> bool:
         p = el
         while p is not None:
-            if isinstance(p.tag, str) and local(p) == "I-PDU-MAPPING":
+            if isinstance(p.tag, str) and local(p) in ("I-PDU-MAPPING", "I-SIGNAL-MAPPING"):
                 return True
             p = p.getparent()
         return False
@@ -165,6 +168,9 @@ class Network:
         had = {p for p, el in self.by_path.items() if (local(el) == "I-SIGNAL-I-PDU-GROUP" and el.find(
             ".//{*}I-SIGNAL-I-PDU-REF") is not None) or (local(el).endswith("FRAME-TRIGGERING") and el.find(
             ".//{*}PDU-TRIGGERING-REF") is not None)}
+        # signals with a triggering now: a signal that loses all of them leaves its PDUs too (else DaVinci:
+        # "ISignalTriggering not available" for a PDU that keeps the signal)
+        triggered = {(st.findtext("{*}I-SIGNAL-REF") or "").strip() for st in self.root.iter("{*}I-SIGNAL-TRIGGERING")}
         seed = list(clusters)
         for c in clusters:                              # the CAN connectors of the ECUs on its channels
             for r in self.by_path[c].iter("{*}COMMUNICATION-CONNECTOR-REF"):
@@ -174,7 +180,7 @@ class Network:
         for p in dict.fromkeys(seed):
             if self.by_path[p].getparent() is not None:
                 self.remove(self.by_path[p])
-        ends = set()                                    # PDU triggerings of gateway mappings that lost the other end
+        ends = set()                        # triggerings of gateway mappings (PDU / signal) that lost the other end
         while True:
             self.reindex()
             changed = False
@@ -183,9 +189,9 @@ class Network:
                 if target in gone and ref.getparent() is not None:
                     item = self.item_of(ref)
                     if item is not None and item.getparent() is not None:
-                        if local(item) == "I-PDU-MAPPING":
+                        if local(item) in ("I-PDU-MAPPING", "I-SIGNAL-MAPPING"):
                             ends |= {(r.text or "").strip() for r in item.iter() if isinstance(r.tag, str)
-                                     and r.get("DEST") == "PDU-TRIGGERING"}
+                                     and r.get("DEST") in ("PDU-TRIGGERING", "I-SIGNAL-TRIGGERING")}
                         self.remove(item)
                         changed = True
             if changed:
@@ -200,6 +206,14 @@ class Network:
                 ends.clear()
                 if changed:
                     continue
+            still = {(st.findtext("{*}I-SIGNAL-REF") or "").strip() for st in self.root.iter("{*}I-SIGNAL-TRIGGERING")}
+            for m in list(self.root.iter("{*}I-SIGNAL-TO-I-PDU-MAPPING")):
+                sig = (m.findtext("{*}I-SIGNAL-REF") or "").strip()
+                if sig in triggered and sig not in still and m.getparent() is not None:
+                    self.remove(m)
+                    changed = True
+            if changed:
+                continue
             now = self.strong_refs()
             for p, el in list(self.by_path.items()):
                 t = local(el)
@@ -245,8 +259,8 @@ def main(argv=None) -> int:
     ap.add_argument("--list", action="store_true", help="list the CAN clusters of the file")
     ap.add_argument("--dry-run", action="store_true", help="only report what would be removed")
     ap.add_argument("--keep-partners", action="store_true",
-                    help="keep the PDU triggerings on other buses / Ethernet that were only routed to / from the "
-                         "removed clusters (gateway I-PDU-MAPPING partners)")
+                    help="keep the PDU / signal triggerings on other buses / Ethernet that were only routed to / "
+                         "from the removed clusters (gateway I-PDU-MAPPING / I-SIGNAL-MAPPING partners)")
     a = ap.parse_args(argv)
     net = Network(a.network)
     if a.list or not a.clusters:

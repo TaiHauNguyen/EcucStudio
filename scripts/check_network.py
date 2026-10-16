@@ -6,6 +6,7 @@
 * PDU triggerings (of the ECU, with --ecu) whose PDU maps signals without an I-SIGNAL-TRIGGERING in that PDU
   triggering: DaVinci's "Create ECU configuration" (BaseEcuC) logs "ISignalTriggering not available" for each, and
   may stop with an internal error (NullPointerException)
+* gateway I-PDU-MAPPINGs / I-SIGNAL-MAPPINGs without source or target
 * triggerings / mappings without their defining reference, frame triggerings without PDU triggering, CAN connectors
   without controller, ports nobody references, empty lists
 
@@ -76,6 +77,17 @@ class File:
                 out.append((p, self.path_of[pdu], miss))
         return out
 
+    def broken_gateway_mappings(self) -> list[tuple[str, str]]:
+        """GATEWAY I-PDU-MAPPINGs / I-SIGNAL-MAPPINGs without source or target: (what, the end that is there)."""
+        out = []
+        for m in self.root.iter("{*}I-PDU-MAPPING", "{*}I-SIGNAL-MAPPING"):
+            refs = {ln(r): (r.text or "").strip() for r in m.iter() if isinstance(r.tag, str) and r.get("DEST")}
+            src = refs.get("SOURCE-I-PDU-REF") or refs.get("SOURCE-SIGNAL-REF")
+            dst = refs.get("TARGET-I-PDU-REF") or refs.get("TARGET-SIGNAL-REF")
+            if not src or not dst:
+                out.append((f"{ln(m)} without {'source' if not src else 'target'}", src or dst or "?"))
+        return out
+
     def structure(self) -> list[tuple[str, str]]:
         probs, t = [], self.text
         for p, el in self.by_path.items():
@@ -132,6 +144,11 @@ def main(argv=None) -> int:
     for pt, pdu, miss in m[:a.max]:
         print(f"  {pt}\n      PDU {pdu}: {len(miss)} signal(s), e.g. {miss[0]}")
     found += len(m)
+    g = f.broken_gateway_mappings()
+    print(f"Gateway mappings without source or target: {len(g)}")
+    for what, end in g[:a.max]:
+        print(f"  {what}: {end}")
+    found += len(g)
     s = f.structure()
     c = collections.Counter(k for k, _ in s)
     print(f"Structure: {sum(c.values())}" + (f" ({dict(c)})" if c else ""))
