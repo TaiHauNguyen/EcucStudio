@@ -254,6 +254,11 @@ python scripts\remove_can_clusters.py network.arxml CAN0 CAN2 CAN4 -o network_wi
 - ECU, cluster khác, kiểu dữ liệu… giữ nguyên; ghi file như file vào (khai báo XML, CRLF). Report liệt kê số
   phần tử bỏ theo loại và mọi phần tử bỏ nằm ngoài CAN cluster để kiểm tra. `--dry-run` chỉ báo, không ghi.
 
+`scripts/check_network.py network.arxml --ecu /Topology/HardwareComponents/<ECU>` kiểm tra file network trước khi
+import: tham chiếu không có đích, PDU triggering của ECU có signal mà không có I-SIGNAL-TRIGGERING (DaVinci báo
+`ISignalTriggering not available` ở bước *Create ECU configuration*, có thể dừng với lỗi nội bộ BaseEcuC), triggering
+/ mapping thiếu tham chiếu, port không ai dùng.
+
 ## An toàn dữ liệu
 
 - Chỉ ghi các file ECUC đã sửa; phần không sửa giữ nguyên từng byte (đã test trên 70 file của project).
