@@ -235,6 +235,25 @@ python -m ecucstudio gateway generate gateway.json [-o network_gw.arxml]
 Cấu hình (`gateway.json`) lưu đường dẫn tương đối, các lựa chọn Ethernet, mẫu đặt tên và các route bị
 tắt / header ID nhập tay, để chạy lại từ file base gốc.
 
+## Script: xoá CAN cluster khỏi file network
+
+`scripts/remove_can_clusters.py` (chỉ cần `lxml`) bỏ một hoặc nhiều CAN cluster khỏi system description (network
+ARXML, ví dụ export từ PREEvision) cùng những gì chỉ chúng dùng:
+
+```bat
+python scripts\remove_can_clusters.py network.arxml --list
+python scripts\remove_can_clusters.py network.arxml CAN0 CAN2 CAN4 -o network_without_CAN0_CAN2_CAN4.arxml
+```
+
+- Tên cluster: short name, short name bỏ `_Cluster`, tên channel hoặc path (không phân biệt hoa thường).
+- Bỏ theo: cluster + channel (frame / PDU / signal triggering), CAN connector + port của ECU trên bus đó, controller;
+  frame, PDU (cả SECURED-I-PDU), I-SIGNAL, SYSTEM-SIGNAL, PDU group không còn ai dùng; mapping PDU→frame,
+  signal→PDU; FIBEX-ELEMENT, mapping của SYSTEM, gateway I-PDU-MAPPING / I-SIGNAL-MAPPING trỏ vào phần đã bỏ.
+- Phần routing sang bus khác / Ethernet chỉ để đi tới / từ bus bị bỏ (đầu kia của gateway I-PDU-MAPPING, kèm PDU
+  Ethernet, SO-CON-I-PDU-IDENTIFIER, signal) cũng bị bỏ; `--keep-partners` để giữ lại.
+- ECU, cluster khác, kiểu dữ liệu… giữ nguyên; ghi file như file vào (khai báo XML, CRLF). Report liệt kê số
+  phần tử bỏ theo loại và mọi phần tử bỏ nằm ngoài CAN cluster để kiểm tra. `--dry-run` chỉ báo, không ghi.
+
 ## An toàn dữ liệu
 
 - Chỉ ghi các file ECUC đã sửa; phần không sửa giữ nguyên từng byte (đã test trên 70 file của project).
