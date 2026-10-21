@@ -261,6 +261,27 @@ import: tham chiếu không có đích, PDU triggering của ECU có signal mà 
 `ISignalTriggering not available` ở bước *Create ECU configuration*, có thể dừng với lỗi nội bộ BaseEcuC), triggering
 / mapping thiếu tham chiếu, gateway I-PDU-MAPPING / I-SIGNAL-MAPPING thiếu nguồn hoặc đích, port không ai dùng.
 
+## Script: phát luồng audio AVTP (IEEE 1722 AAF) để test ECU
+
+`scripts/avtp_talker.py` (cần `numpy`, Npcap, Windows) phát luồng AAF (sine hoặc file WAV) ra card mạng PC, ví dụ
+qua media converter sang 1000BASE-T1:
+
+```bat
+python scripts\avtp_talker.py              rem GUI
+python scripts\avtp_talker.py --list       rem card mạng Npcap + MAC
+python scripts\avtp_talker.py --selftest   rem dựng thử gói (không gửi), in header
+```
+
+- Thiết lập: MAC nguồn/đích, Stream ID, VLAN (VID/PCP), presentation offset; sample rate, số kênh, bit depth
+  (16/24/32 → AAF INT_16/24/32BIT), samples/frame, link speed, số frame (0 = tới khi STOP); nguồn sine (tần số,
+  âm lượng) hoặc WAV (loop, kênh thiếu: lặp lại / im lặng, gain, không resample).
+- Nhịp gửi: Npcap send queue chế độ sync (driver giữ khoảng cách giữa các gói, ví dụ 250 µs với 12 sample/frame
+  ở 48 kHz); dự phòng busy-wait từng gói. Trạng thái: số gói, gói/s, số lần trễ.
+- "Receiver requirement" (rate / kênh / bit / samples / payload tối đa) là thứ bên nhận chấp nhận; khung "Computed"
+  tính payload, độ dài AVTP, frame trên dây, chu kỳ, gói/s, băng thông và báo có khớp requirement không.
+- `avtp_timestamp` lấy từ đồng hồ PC, không phải gPTP. Npcap cài chế độ chỉ cho Administrator thì GUI tự xin quyền
+  (UAC). Cấu hình lưu ở `%APPDATA%\avtp_talker\settings.json`.
+
 ## An toàn dữ liệu
 
 - Chỉ ghi các file ECUC đã sửa; phần không sửa giữ nguyên từng byte (đã test trên 70 file của project).
