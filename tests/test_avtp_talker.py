@@ -132,6 +132,51 @@ class AvtpTalkerTest(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_resample(self):
+        for src, dst in ((44100, 48000), (48000, 44100), (32000, 48000)):
+            with self.subTest(src=src, dst=dst):
+                x = (0.5 * np.sin(2 * np.pi * 1000.0 * np.arange(src) / src)).astype(np.float32)
+                y = at.resample(np.stack([x, -x], axis=1), src, dst)
+                self.assertEqual(y.shape, (dst, 2))
+                ref = 0.5 * np.sin(2 * np.pi * 1000.0 * np.arange(dst) / dst)
+                inner = slice(200, dst - 200)                           # skip the filter edges
+                self.assertLess(np.max(np.abs(y[inner, 0] - ref[inner])), 1e-4)
+                self.assertLess(np.max(np.abs(y[inner, 1] + ref[inner])), 1e-4)
+        same = np.ones((10, 1), np.float32)
+        self.assertIs(at.resample(same, 48000, 48000), same)
+
+    def test_audio_file_info_and_read(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            path = os.path.join(tmp, "t.wav")
+            with wave.open(path, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(44100)
+                w.writeframes((np.arange(441) * 50).astype("<i2").tobytes())
+            self.assertEqual(at.audio_info(path), (44100, 1, 441))
+            rate, data = at.read_audio(path)
+            self.assertEqual((rate, data.shape, data.dtype), (44100, (441, 1), np.float32))
+            try:
+                import soundfile
+            except ImportError:
+                return
+            flac = os.path.join(tmp, "t.flac")
+            soundfile.write(flac, data, 44100)
+            self.assertEqual(at.audio_info(flac), (44100, 1, 441))
+            self.assertLess(np.max(np.abs(at.read_audio(flac)[1] - data)), 1e-4)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_file_source_maps_channels_per_chunk(self):
+        data = np.stack([np.full(30, 0.25, np.float32), np.full(30, -0.5, np.float32)], axis=1)
+        src = at.FileSource(data, 8, "repeat", 0.5, loop=True)
+        chunk, ended = src.read(50)                                     # wraps around the 30 samples
+        self.assertEqual(chunk.shape, (50, 8))
+        self.assertFalse(ended)
+        self.assertTrue(np.allclose(chunk[:, 6], 0.125) and np.allclose(chunk[:, 7], -0.25))
+        self.assertEqual(src.data.shape, (30, 2))                       # stored at the file's channel count
+
     def test_computed_text(self):
         s = settings(vlan=True)
         text = at.computed_text(at.StreamConfig(s), at.Requirement(s))

@@ -263,8 +263,8 @@ import: tham chiếu không có đích, PDU triggering của ECU có signal mà 
 
 ## Script: phát luồng audio AVTP (IEEE 1722 AAF) để test ECU
 
-`scripts/avtp_talker.py` (cần `numpy`, Npcap, Windows) phát luồng AAF (sine hoặc file WAV) ra card mạng PC, ví dụ
-qua media converter sang 1000BASE-T1:
+`scripts/avtp_talker.py` (cần `numpy`, Npcap, Windows; file MP3 / FLAC / OGG cần thêm `pip install soundfile`) phát
+luồng AAF (sine hoặc file audio) ra card mạng PC, ví dụ qua media converter sang 1000BASE-T1:
 
 ```bat
 python scripts\avtp_talker.py              rem GUI
@@ -274,7 +274,9 @@ python scripts\avtp_talker.py --selftest   rem dựng thử gói (không gửi),
 
 - Thiết lập: MAC nguồn/đích, Stream ID, VLAN (VID/PCP), presentation offset; sample rate, số kênh, bit depth
   (16/24/32 → AAF INT_16/24/32BIT), samples/frame, link speed, số frame (0 = tới khi STOP); nguồn sine (tần số,
-  âm lượng) hoặc WAV (loop, kênh thiếu: lặp lại / im lặng, gain, không resample).
+  âm lượng) hoặc file WAV / MP3 / FLAC / OGG (loop, kênh thiếu: lặp lại / im lặng, gain). File khác sample rate
+  của stream được resample (polyphase windowed-sinc, ví dụ 44.1 → 48 kHz) khi bấm START, trừ khi tắt "Resample";
+  đỉnh tín hiệu vượt full scale thì GUI gợi ý File gain để không bị clip.
 - Nhịp gửi: Npcap send queue chế độ sync (driver giữ khoảng cách giữa các gói, ví dụ 250 µs với 12 sample/frame
   ở 48 kHz); dự phòng busy-wait từng gói. Trạng thái: số gói, gói/s, số lần trễ.
 - "Receiver requirement" (rate / kênh / bit / samples / payload tối đa) là thứ bên nhận chấp nhận; khung "Computed"

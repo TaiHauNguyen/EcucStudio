@@ -5,7 +5,9 @@
     python avtp_talker.py --list       # list Npcap devices and their MAC
     python avtp_talker.py --selftest   # build packets offline, print header and build speed
 
-Sends an AAF audio stream (sine tone or WAV file) out of a PC network card through Npcap. Packets are
+Sends an AAF audio stream (sine tone or audio file: WAV, or MP3 / FLAC / OGG through the soundfile
+package) out of a PC network card through Npcap. A file at another sample rate is resampled to the stream
+rate (windowed-sinc polyphase) unless "Resample" is off. Packets are
 paced by the Npcap send queue in synchronous mode (the driver busy-waits on the packet timestamps), so
 the gap between packets stays at samples_per_frame / sample_rate instead of following the coarse
 Windows timer. A "busy-wait per packet" mode is kept as fallback.
@@ -13,9 +15,9 @@ Windows timer. A "busy-wait per packet" mode is kept as fallback.
 The "Receiver requirement" fields (sample rate, channels, bit depth, samples per frame, max payload)
 describe what the receiver under test accepts; the "Computed" panel checks the stream against them.
 
-Needs Windows, Npcap, numpy (tkinter for the GUI). If Npcap was installed with "Restrict Npcap driver's
-access to Administrators only", the GUI restarts itself elevated (UAC). Settings are kept in
-%APPDATA%\\avtp_talker\\settings.json.
+Needs Windows, Npcap, numpy (tkinter for the GUI); soundfile only for non-WAV files. If Npcap was
+installed with "Restrict Npcap driver's access to Administrators only", the GUI restarts itself elevated
+(UAC). Settings are kept in %APPDATA%\\avtp_talker\\settings.json.
 """
 import csv
 import ctypes
@@ -256,6 +258,87 @@ def read_wav(path):
     return rate, x.reshape(-1, nch)
 
 
+def _wav_header(path):
+    """(rate, channels, frames) from the RIFF header only."""
+    with open(path, "rb") as f:
+        head = f.read(12)
+        if head[0:4] != b"RIFF" or head[8:12] != b"WAVE":
+            raise ValueError("not a RIFF/WAVE file")
+        rate = nch = block = None
+        while True:
+            ck = f.read(8)
+            if len(ck) < 8:
+                raise ValueError("missing fmt or data chunk")
+            cid, size = ck[:4], struct.unpack("<I", ck[4:])[0]
+            if cid == b"fmt ":
+                _, nch, rate, _, block = struct.unpack("<HHIIH", f.read(size)[:14])
+                if size & 1:
+                    f.read(1)
+            elif cid == b"data":
+                if rate is None:
+                    raise ValueError("data chunk before fmt chunk")
+                return rate, nch, size // block
+            else:
+                f.seek(size + (size & 1), os.SEEK_CUR)
+
+
+def _soundfile():
+    try:
+        import soundfile
+    except ImportError:
+        raise ValueError("reading MP3 / FLAC / OGG needs the soundfile package: pip install soundfile") from None
+    return soundfile
+
+
+def audio_info(path):
+    """(rate, channels, frames) of an audio file without decoding it."""
+    if path.lower().endswith(".wav"):
+        return _wav_header(path)
+    info = _soundfile().info(path)
+    return info.samplerate, info.channels, info.frames
+
+
+def read_audio(path):
+    """Decode an audio file to (rate, float32 array (n, channels)) in [-1, 1]."""
+    if path.lower().endswith(".wav"):
+        rate, data = read_wav(path)
+        return rate, data.astype(np.float32)
+    data, rate = _soundfile().read(path, dtype="float32", always_2d=True)
+    return rate, data
+
+
+def resample(x, src_rate, dst_rate, half_taps=16):
+    """Polyphase windowed-sinc (Kaiser) resampler; x is (n, channels), returns float32 (m, channels).
+
+    Output n sits at input time n * down / up. The outputs k, k + up, k + 2 up ... share one filter
+    phase and read the input with a stride of 'down', so each phase is one strided dot product."""
+    if src_rate == dst_rate:
+        return x.astype(np.float32, copy=False)
+    g = math.gcd(src_rate, dst_rate)
+    up, down = dst_rate // g, src_rate // g          # output n is at input time n * down / up
+    ratio = dst_rate / src_rate
+    cutoff = 0.95 * min(1.0, ratio)                  # relative to the input Nyquist frequency
+    half = int(math.ceil(half_taps / min(1.0, ratio)))
+    offs = np.arange(-half + 1, half + 1)            # taps around floor(input time)
+    tau = offs[None, :] - (np.arange(up) / up)[:, None]
+    window = np.i0(8.6 * np.sqrt(np.clip(1.0 - (tau / half) ** 2, 0.0, None))) / np.i0(8.6)
+    h = cutoff * np.sinc(cutoff * tau) * window
+    h = (h / h.sum(axis=1, keepdims=True)).astype(np.float32)  # unity gain for every phase
+    pad = half + 1
+    zeros = np.zeros((pad, x.shape[1]), np.float32)
+    xp = np.ascontiguousarray(np.concatenate([zeros, x.astype(np.float32, copy=False), zeros]))
+    n_out = (x.shape[0] * up) // down
+    out = np.empty((n_out, x.shape[1]), np.float32)
+    s0, s1 = xp.strides
+    for k in range(min(up, n_out)):
+        m = (n_out - k + up - 1) // up
+        start = (k * down) // up + pad + offs[0]
+        view = np.lib.stride_tricks.as_strided(xp[start:], shape=(m, len(offs), x.shape[1]),
+                                               strides=(down * s0, s0, s1), writeable=False)
+        out[k::up] = np.einsum("mtc,t->mc", view, h[(k * down) % up])
+    return out
+
+
 def map_channels(data, out_ch, missing):
     """Fit source channels to out_ch: extra channels dropped, missing ones repeated or silent."""
     nsrc = data.shape[1]
@@ -283,23 +366,32 @@ class SineSource:
         return np.repeat(x[:, None], self.channels, axis=1), False
 
 
-class WavSource:
+class FileSource:
+    """Decoded audio file; channels are mapped per chunk so a long file stays at its own channel count."""
     def __init__(self, data, channels, missing, gain, loop):
-        self.data = map_channels(data, channels, missing) * gain
+        if data.shape[0] == 0:
+            raise ValueError("audio file has no samples")
+        self.data = data
+        self.channels = channels
+        self.missing = missing
+        self.gain = gain
         self.loop = loop
         self.pos = 0
-        if self.data.shape[0] == 0:
-            raise ValueError("WAV file has no samples")
 
     def read(self, n):
         total = self.data.shape[0]
         if self.loop:
             idx = (self.pos + np.arange(n)) % total
             self.pos = (self.pos + n) % total
-            return self.data[idx], False
-        chunk = self.data[self.pos:self.pos + n]
-        self.pos += chunk.shape[0]
-        return chunk, self.pos >= total
+            chunk, ended = self.data[idx], False
+        else:
+            chunk = self.data[self.pos:self.pos + n]
+            self.pos += chunk.shape[0]
+            ended = self.pos >= total
+        return map_channels(chunk, self.channels, self.missing) * self.gain, ended
+
+
+WavSource = FileSource
 
 
 # --------------------------------------------------------------------------------------------
@@ -495,9 +587,14 @@ class Talker:
         self.threads = []
         self.reset_stats()
 
+    # Behind schedule by up to this much: send the packets that are due back-to-back (keeps the average
+    # rate exact). More than this: shift the schedule instead, to avoid a long burst at line rate.
+    CATCH_UP_NS = 5_000_000
+
     def reset_stats(self):
         self.sent = 0
-        self.late = 0
+        self.late = 0       # schedule shifted (stream lost that much time)
+        self.catch_up = 0   # batches sent partly back-to-back to get back on schedule
         self.errors = []
         self.t_start = None
         self.running = False
@@ -536,7 +633,7 @@ class Talker:
                 base = self.cfg.send_offset_ns(first) // 1000
                 rel_us = [self.cfg.send_offset_ns(first + i) // 1000 - base for i in range(len(frames))]
                 squeue, size = self.pcap.make_queue(frames, rel_us)
-                item = (squeue, size, first, len(frames))
+                item = (squeue, size, first, frames)
                 while True:
                     try:
                         self.q.put(item, timeout=0.1)
@@ -566,15 +663,23 @@ class Talker:
                 item = self.q.get()
                 if item is None:
                     break
-                squeue, size, first, count = item
+                squeue, size, first, frames = item
                 if self.stop_evt.is_set():
                     self.pcap.destroy_queue(squeue)
                     continue
                 target = t_base + self.cfg.send_offset_ns(first)
-                lateness = time.perf_counter_ns() - target
-                if lateness > 2 * self.cfg.send_offset_ns(1):
+                now = time.perf_counter_ns()
+                lateness = now - target
+                if lateness > self.CATCH_UP_NS:
                     self.late += 1
-                    t_base += lateness  # rebase instead of bursting to catch up
+                    t_base += lateness
+                elif lateness > self.cfg.send_offset_ns(1):
+                    # requeue with the packets already due at relative time 0
+                    self.catch_up += 1
+                    self.pcap.destroy_queue(squeue)
+                    rel_us = [max(0, t_base + self.cfg.send_offset_ns(first + i) - now) // 1000
+                              for i in range(len(frames))]
+                    squeue, size = self.pcap.make_queue(frames, rel_us)
                 else:
                     self._wait_until(target)
                 sent = self.pcap.transmit_queue(self.handle, squeue, sync=True)
@@ -582,7 +687,7 @@ class Talker:
                 if sent < size:
                     self._fail("pcap_sendqueue_transmit: " + self.pcap.error(self.handle))
                     continue
-                self.sent += count
+                self.sent += len(frames)
         finally:
             self._finish()
 
@@ -598,11 +703,12 @@ class Talker:
                 for i, frame in enumerate(frames):
                     target = t_base + self.cfg.send_offset_ns(first + i)
                     lateness = time.perf_counter_ns() - target
-                    if lateness > 2 * self.cfg.send_offset_ns(1):
+                    if lateness > self.CATCH_UP_NS:
                         self.late += 1
                         t_base += lateness
-                    else:
+                    elif lateness < 0:
                         self._wait_until(target)
+                    # 0 <= lateness <= CATCH_UP_NS: due already, send now to catch up
                     if self.pcap.send(self.handle, frame) != 0:
                         self._fail("pcap_sendpacket: " + self.pcap.error(self.handle))
                         break
@@ -632,7 +738,7 @@ DEFAULTS = {
     "pres_offset_ms": "2.0",
     "sample_rate": "48000", "channels": "8", "bit_depth": "32", "samples_per_frame": "12",
     "link_speed": "1000.0", "frames_to_send": "0",
-    "source": "sine", "wav_path": "", "loop": True, "missing": "repeat",
+    "source": "sine", "wav_path": "", "loop": True, "resample": True, "missing": "repeat",
     "sine_freq": "1000.0", "sine_volume": "0.2", "file_gain": "1.0",
     "mode": "sendqueue", "batch_ms": "20",
     "req_sample_rate": "48000", "req_channels": "8", "req_bit_depth": "32",
@@ -757,21 +863,23 @@ def run_gui():
     sc = section("Audio source", 2)
     rb = ttk.Frame(sc)
     ttk.Radiobutton(rb, text="Sine", value="sine", variable=v["source"]).pack(side="left")
-    ttk.Radiobutton(rb, text="WAV file", value="wav", variable=v["source"]).pack(side="left", padx=12)
+    ttk.Radiobutton(rb, text="Audio file (WAV / MP3 / FLAC / OGG)", value="wav",
+                    variable=v["source"]).pack(side="left", padx=12)
     field(sc, 0, "Source", rb)
     wf = ttk.Frame(sc)
     wf.columnconfigure(0, weight=1)
     ttk.Entry(wf, textvariable=v["wav_path"]).grid(row=0, column=0, sticky="ew")
 
     def browse():
-        p = filedialog.askopenfilename(filetypes=[("WAV", "*.wav"), ("All", "*.*")])
+        p = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3 *.flac *.ogg"), ("All", "*.*")])
         if p:
             v["wav_path"].set(p)
             v["source"].set("wav")
     ttk.Button(wf, text="Browse...", command=browse).grid(row=0, column=1, padx=(4, 0))
-    field(sc, 1, "WAV file", wf)
+    field(sc, 1, "Audio file", wf)
     lp = ttk.Frame(sc)
     ttk.Checkbutton(lp, text="Loop", variable=v["loop"]).pack(side="left")
+    ttk.Checkbutton(lp, text="Resample to stream rate", variable=v["resample"]).pack(side="left", padx=(12, 0))
     ttk.Label(lp, text="   Missing channels:").pack(side="left")
     ttk.Combobox(lp, textvariable=v["missing"], values=["repeat", "silence"], state="readonly",
                  width=9).pack(side="left")
@@ -820,13 +928,28 @@ def run_gui():
         d["device"] = selected_device()
         return d
 
-    wav_cache = {}
+    info_cache = {}
+    data_cache = {}
+    peak_cache = {}
 
-    def wav_info(path):
-        if path not in wav_cache:
-            wav_cache.clear()
-            wav_cache[path] = read_wav(path)
-        return wav_cache[path]
+    def file_info(path):
+        if path not in info_cache:
+            info_cache.clear()
+            info_cache[path] = audio_info(path)
+        return info_cache[path]
+
+    def file_data(path, rate, do_resample):
+        """Decoded (and resampled) file, kept until another file or rate is used."""
+        key = (path, rate if do_resample else None)
+        if key not in data_cache:
+            data_cache.clear()
+            status.set("Loading audio file...")
+            root.update_idletasks()
+            src_rate, data = read_audio(path)
+            data_cache[key] = resample(data, src_rate, rate) if do_resample else data
+            peak_cache[path] = float(np.abs(data_cache[key]).max())
+            refresh_info()
+        return data_cache[key]
 
     def refresh_info():
         d = snapshot()
@@ -843,14 +966,22 @@ def run_gui():
             info.set(f"Invalid setting: {e}")
         if d["source"] == "wav" and d["wav_path"]:
             try:
-                rate, data = wav_info(d["wav_path"])
+                rate, nch, frames = file_info(d["wav_path"])
+                msgs.append(f"File: {rate} Hz, {nch} channel(s), {frames / rate:.1f} s.")
                 if str(rate) != d["sample_rate"]:
-                    msgs.append(f"WARNING: WAV is {rate} Hz, not {d['sample_rate']} Hz. "
-                                f"This tool does not resample.")
-                if data.shape[1] < int(d["channels"] or 0):
-                    msgs.append(f"WAV has {data.shape[1]} channel(s); missing channels: {d['missing']}.")
-            except (OSError, ValueError) as e:
-                msgs.append(f"WAV: {e}")
+                    if d["resample"]:
+                        msgs.append(f"Resampled {rate} -> {d['sample_rate']} Hz when START is pressed.")
+                    else:
+                        msgs.append(f"WARNING: file is {rate} Hz, not {d['sample_rate']} Hz and Resample is off: "
+                                    f"it plays at the wrong speed.")
+                if nch < int(d["channels"] or 0):
+                    msgs.append(f"Missing channels: {d['missing']}.")
+                peak = peak_cache.get(d["wav_path"])
+                if peak is not None and peak * float(d["file_gain"] or 0) > 1.0:
+                    msgs.append(f"Peak {peak:.3f} x File gain {d['file_gain']} clips: "
+                                f"use File gain <= {0.99 / peak:.2f}.")
+            except (OSError, ValueError, RuntimeError) as e:
+                msgs.append(f"File: {e}")
         if not pcap.has_sendqueue and d["mode"] == "sendqueue":
             msgs.append("This wpcap.dll has no send queue API, busy-wait mode will be used.")
         warn.set("\n".join(msgs))
@@ -859,7 +990,8 @@ def run_gui():
         if talker.running or talker.t_start:
             el = max(0.0, (time.perf_counter_ns() - talker.t_start) / 1e9) if talker.t_start else 0.0
             rate = talker.sent / el if el > 0.5 else 0.0
-            txt = f"Sent {talker.sent}  |  {rate:.0f} pkt/s  |  late {talker.late}  |  {el:.1f} s"
+            txt = (f"Sent {talker.sent}  |  {rate:.0f} pkt/s  |  catch-up {talker.catch_up}  |  "
+                   f"late {talker.late}  |  {el:.1f} s")
             if talker.errors:
                 txt += "  |  " + talker.errors[-1]
             status.set(("Running: " if talker.running else "Stopped: ") + txt)
@@ -876,8 +1008,8 @@ def run_gui():
         try:
             cfg = StreamConfig(d)
             if d["source"] == "wav":
-                rate, data = wav_info(d["wav_path"])
-                source = WavSource(data, cfg.channels, d["missing"], float(d["file_gain"]), bool(d["loop"]))
+                data = file_data(d["wav_path"], cfg.rate, bool(d["resample"]))
+                source = FileSource(data, cfg.channels, d["missing"], float(d["file_gain"]), bool(d["loop"]))
             else:
                 source = SineSource(float(d["sine_freq"]), float(d["sine_volume"]), cfg.channels, cfg.rate)
             talker.start(d["device"], cfg, source, d["mode"], float(d["batch_ms"]))
