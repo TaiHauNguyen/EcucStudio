@@ -676,8 +676,30 @@ def run_gui():
         if name == s["device"]:
             dev_var.set(label)
 
+    # START / STOP bar stays at the bottom; everything else scrolls
+    bar = ttk.Frame(root, padding=8)
+    bar.pack(side="bottom", fill="x")
+    outer = ttk.Frame(root)
+    outer.pack(side="top", fill="both", expand=True)
+    canvas = tk.Canvas(outer, highlightthickness=0)
+    vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+    canvas.configure(yscrollcommand=vsb.set)
+    vsb.pack(side="right", fill="y")
+    canvas.pack(side="left", fill="both", expand=True)
+    body = ttk.Frame(canvas)
+    body.columnconfigure(0, weight=1)
+    body_win = canvas.create_window((0, 0), window=body, anchor="nw")
+    body.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfigure(body_win, width=e.width))
+
+    def on_wheel(e):
+        if body.winfo_height() > canvas.winfo_height():
+            canvas.yview_scroll(int(-e.delta / 120), "units")
+    canvas.bind_all("<MouseWheel>", on_wheel)
+    root.geometry("780x720")
+
     def section(title, row):
-        frm = ttk.LabelFrame(root, text=title, padding=8)
+        frm = ttk.LabelFrame(body, text=title, padding=8)
         frm.grid(row=row, column=0, sticky="ew", padx=8, pady=4)
         frm.columnconfigure(1, weight=1)
         return frm
@@ -785,10 +807,8 @@ def run_gui():
     comp = section("Computed", 5)
     tk.Label(comp, textvariable=info, font=("Consolas", 9), justify="left", anchor="w").grid(
         row=0, column=0, sticky="w")
-    ttk.Label(root, textvariable=warn, foreground="#c05000", padding=(10, 2), wraplength=640,
+    ttk.Label(body, textvariable=warn, foreground="#c05000", padding=(10, 2), wraplength=640,
               justify="left").grid(row=6, column=0, sticky="w")
-    bar = ttk.Frame(root, padding=8)
-    bar.grid(row=7, column=0, sticky="ew")
     start_btn = ttk.Button(bar, text="START")
     stop_btn = ttk.Button(bar, text="STOP", state="disabled")
     start_btn.pack(side="left")
