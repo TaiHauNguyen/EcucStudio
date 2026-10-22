@@ -29,14 +29,16 @@ def settings(**kw):
 
 
 class FakePcap:
-    """Records send times; the send queue is emulated by waiting on the relative timestamps."""
+    """Records (time, frame) per interface; the send queue is emulated by waiting on the relative timestamps."""
     has_sendqueue = True
 
     def __init__(self):
         self.times = []
+        self.wire = {}      # interface name -> [(time_ns, frame)]
 
     def open(self, name):
-        return 1
+        self.wire.setdefault(name, [])
+        return name
 
     def close(self, handle):
         pass
@@ -44,23 +46,44 @@ class FakePcap:
     def error(self, handle):
         return "fake"
 
+    def _record(self, handle, frame):
+        t = time.perf_counter_ns()
+        self.times.append(t)
+        self.wire[handle].append((t, frame))
+
     def send(self, handle, frame):
-        self.times.append(time.perf_counter_ns())
+        self._record(handle, frame)
         return 0
 
     def make_queue(self, frames, rel_us):
-        return list(rel_us), sum(len(f) + 16 for f in frames)
+        return list(zip(rel_us, frames)), sum(len(f) + 16 for f in frames)
 
     def transmit_queue(self, handle, squeue, sync=True):
         t0 = time.perf_counter_ns()
-        for us in squeue:
+        for us, frame in squeue:
             while time.perf_counter_ns() - t0 < us * 1000:
                 pass
-            self.times.append(time.perf_counter_ns())
+            self._record(handle, frame)
         return 1 << 30
 
     def destroy_queue(self, squeue):
         pass
+
+
+def run_talker(cfg, mode, devices="A", seed=1):
+    fake = FakePcap()
+    talker = at.Talker(fake)
+    talker.start(devices, cfg, at.SineSource(1000.0, 0.2, cfg.channels, cfg.rate), mode, 20, seed=seed)
+    deadline = time.time() + 15
+    while talker.running and time.time() < deadline:
+        time.sleep(0.02)
+    return talker, fake
+
+
+def rtag_seq(frame, vlan=False):
+    off = 12 + (4 if vlan else 0)
+    assert frame[off:off + 2] == b"\xf1\xc1"
+    return struct.unpack(">H", frame[off + 4:off + 6])[0]
 
 
 @unittest.skipUnless(HAVE_NUMPY, "numpy is not installed")
@@ -192,17 +215,73 @@ class AvtpTalkerTest(unittest.TestCase):
         for mode in ("sendqueue", "busy"):
             with self.subTest(mode=mode):
                 cfg = at.StreamConfig(settings(frames_to_send=400))
-                fake = FakePcap()
-                talker = at.Talker(fake)
-                talker.start("fake", cfg, at.SineSource(1000.0, 0.2, cfg.channels, cfg.rate), mode, 20)
-                deadline = time.time() + 10
-                while talker.running and time.time() < deadline:
-                    time.sleep(0.02)
+                talker, fake = run_talker(cfg, mode)
                 self.assertFalse(talker.running)
                 self.assertEqual(talker.errors, [])
-                self.assertEqual(talker.sent, 400)
+                self.assertEqual(talker.sent, {"A": 400, "B": 0})
                 span = (fake.times[-1] - fake.times[0]) / 1e9
                 self.assertAlmostEqual(span, 399 / 4000, delta=0.03)    # 4000 packets/s
+
+    def test_rtag(self):
+        cfg, frames = self.build(n=3, vlan=True, vid=10, pcp=3, rtag=True, rtag_seq_start="0xFFFE")
+        f = frames[0]
+        self.assertEqual(f[12:16], bytes([0x81, 0x00, 0x60, 0x0A]))             # VLAN 10, PCP 3
+        self.assertEqual(f[16:22], bytes([0xF1, 0xC1, 0x00, 0x00, 0xFF, 0xFE]))  # R-TAG after the VLAN tag
+        self.assertEqual(f[22:24], b"\x22\xf0")                                  # then the AVTP EtherType
+        self.assertEqual(f[24], 0x02)                                            # AAF header follows
+        self.assertEqual([rtag_seq(x, vlan=True) for x in frames], [0xFFFE, 0xFFFF, 0x0000])  # 16-bit wrap
+        self.assertEqual(len(f), 14 + 4 + 6 + 24 + 384)
+        cfg, frames = self.build(n=1, rtag=True)
+        self.assertEqual(frames[0][12:14], b"\xf1\xc1")                          # no VLAN: right after SMAC
+        s = settings(rtag=True)
+        self.assertIn("452 byte", at.computed_text(at.StreamConfig(s), at.Requirement(s)))  # 446 + 6
+
+    def test_replication_same_interface(self):
+        for mode in ("sendqueue", "busy"):
+            with self.subTest(mode=mode):
+                cfg = at.StreamConfig(settings(frames_to_send=200, rtag=True, replication="same"))
+                talker, fake = run_talker(cfg, mode)
+                self.assertEqual(talker.errors, [])
+                self.assertEqual(talker.sent, {"A": 200, "B": 200})
+                wire = [f for _, f in fake.wire["A"]]
+                self.assertEqual(len(wire), 400)
+                self.assertTrue(all(wire[2 * i] == wire[2 * i + 1] for i in range(200)))  # identical copies
+                self.assertEqual([rtag_seq(f) for f in wire[::2]], list(range(200)))
+
+    def test_replication_second_interface_with_drops(self):
+        for mode in ("sendqueue", "busy"):
+            with self.subTest(mode=mode):
+                cfg = at.StreamConfig(settings(frames_to_send=400, rtag=True, replication="second",
+                                               drop_a_pct=30, drop_b_pct=0))
+                talker, fake = run_talker(cfg, mode, {"A": "A", "B": "B"})
+                self.assertEqual(talker.errors, [])
+                seq_a = [rtag_seq(f) for _, f in fake.wire["A"]]
+                seq_b = [rtag_seq(f) for _, f in fake.wire["B"]]
+                self.assertEqual(seq_b, list(range(400)))                      # copy B complete
+                self.assertEqual(len(seq_a) + talker.dropped["A"], 400)
+                self.assertTrue(60 < talker.dropped["A"] < 180)                # about 30 %
+                self.assertEqual(sorted(set(seq_a) | set(seq_b)), list(range(400)))  # union has no gap
+        cfg = at.StreamConfig(settings(frames_to_send=50, replication="second", drop_a_pct=100))
+        talker, fake = run_talker(cfg, "sendqueue", {"A": "A", "B": "B"})
+        self.assertEqual((len(fake.wire["A"]), len(fake.wire["B"])), (0, 50))
+        with self.assertRaises(ValueError):
+            at.Talker(FakePcap()).start("A", cfg, at.SineSource(1.0, 0.1, 8, 48000), "sendqueue", 20)
+
+    def test_copy_b_delay(self):
+        for mode in ("sendqueue", "busy"):
+            with self.subTest(mode=mode):
+                # 2 ms delay: longer than a busy-mode batch, copies of later packets overtake copy B
+                cfg = at.StreamConfig(settings(frames_to_send=400, rtag=True, replication="same",
+                                               copy_b_delay_us=2000))
+                talker, fake = run_talker(cfg, mode)
+                self.assertEqual(talker.sent, {"A": 400, "B": 400})
+                first, second = {}, {}
+                for t, f in fake.wire["A"]:
+                    (second if rtag_seq(f) in first else first)[rtag_seq(f)] = t
+                gaps = sorted((second[k] - first[k]) / 1e6 for k in first)
+                self.assertAlmostEqual(gaps[len(gaps) // 2], 2.0, delta=0.5)   # median gap in ms
+                times = [t for t, _ in fake.wire["A"]]
+                self.assertEqual(times, sorted(times))
 
 
 if __name__ == "__main__":

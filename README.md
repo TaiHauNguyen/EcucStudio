@@ -281,6 +281,12 @@ python scripts\avtp_talker.py --selftest   rem dựng thử gói (không gửi),
   ở 48 kHz); dự phòng busy-wait từng gói. Trạng thái: số gói, gói/s, số lần trễ.
 - "Receiver requirement" (rate / kênh / bit / samples / payload tối đa) là thứ bên nhận chấp nhận; khung "Computed"
   tính payload, độ dài AVTP, frame trên dây, chu kỳ, gói/s, băng thông và báo có khớp requirement không.
+- IEEE 802.1CB (FRER, phía phát): chèn R-TAG (0xF1C1, reserved 0, sequence 16 bit, số bắt đầu chỉnh được) ngay
+  sau VLAN tag; nhân bản mỗi gói thành 2 bản giống hệt (cùng sequence): `same` = 2 bản trên cùng card mạng,
+  `second` = bản B ra card mạng thứ hai (2 đường vào ring); bản B trễ một khoảng đặt được (µs, có thể lớn hơn
+  một lô gửi); bỏ ngẫu nhiên x % bản A / bản B để kiểm tra sequence recovery phía nhận lấp đủ. Trạng thái đếm
+  riêng gói gửi / bỏ của A và B. Bên nhận phải gỡ R-TAG trước host (Egress Treatment RemoveRTag), port trên
+  đường đi cần max frame length / MAXSDU + 6 byte.
 - `avtp_timestamp` lấy từ đồng hồ PC, không phải gPTP. Npcap cài chế độ chỉ cho Administrator thì GUI tự xin quyền
   (UAC). Cấu hình lưu ở `%APPDATA%\avtp_talker\settings.json`.
 

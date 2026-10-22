@@ -15,6 +15,11 @@ Windows timer. A "busy-wait per packet" mode is kept as fallback.
 The "Receiver requirement" fields (sample rate, channels, bit depth, samples per frame, max payload)
 describe what the receiver under test accepts; the "Computed" panel checks the stream against them.
 
+IEEE 802.1CB (FRER) talker side: optional R-TAG (EtherType 0xF1C1, reserved 0, 16-bit sequence number)
+after the VLAN tag; replication of every packet as two identical copies (same sequence number) either on
+the same interface or with copy B on a second interface (two paths into a ring), copy B delayed by a set
+time; random loss of copy A / copy B to check that the listener's sequence recovery fills the gaps.
+
 Needs Windows, Npcap, numpy (tkinter for the GUI); soundfile only for non-WAV files. If Npcap was
 installed with "Restrict Npcap driver's access to Administrators only", the GUI restarts itself elevated
 (UAC). Settings are kept in %APPDATA%\\avtp_talker\\settings.json.
@@ -25,6 +30,7 @@ import json
 import math
 import os
 import queue
+import random
 import struct
 import subprocess
 import sys
@@ -38,6 +44,9 @@ import numpy as np
 # --------------------------------------------------------------------------------------------
 ETHERTYPE_AVTP = 0x22F0
 ETHERTYPE_VLAN = 0x8100
+ETHERTYPE_RTAG = 0xF1C1     # IEEE 802.1CB redundancy tag
+RTAG_LEN = 6                # EtherType + reserved (16 bit) + sequence number (16 bit)
+REPLICATION_MODES = ("off", "same", "second")  # 1 copy / 2 copies on interface A / copy B on interface B
 AVTP_SUBTYPE_AAF = 0x02
 AAF_HEADER_LEN = 24
 
@@ -424,6 +433,18 @@ class StreamConfig:
         self.link_mbps = float(s["link_speed"])
         self.frames_to_send = int(s["frames_to_send"])
         self.pres_offset_ns = int(float(s["pres_offset_ms"]) * 1_000_000)
+        # 802.1CB
+        self.rtag = bool(s.get("rtag", False))
+        self.rtag_seq_start = int(str(s.get("rtag_seq_start", "0")).strip() or "0", 0)
+        self.replication = str(s.get("replication", "off")).strip().lower()
+        self.copy_b_delay_ns = int(float(s.get("copy_b_delay_us", "0") or 0) * 1000)
+        self.drop_pct = {"A": float(s.get("drop_a_pct", "0") or 0), "B": float(s.get("drop_b_pct", "0") or 0)}
+        if not 0 <= self.rtag_seq_start <= 0xFFFF:
+            raise ValueError("R-TAG start sequence must be 0..65535 (0x0000..0xFFFF)")
+        if self.replication not in REPLICATION_MODES:
+            raise ValueError("replication must be off, same or second")
+        if self.copy_b_delay_ns < 0 or not all(0.0 <= p <= 100.0 for p in self.drop_pct.values()):
+            raise ValueError("copy B delay >= 0, drop 0..100 %")
         if self.rate not in NSR_CODES:
             raise ValueError(f"sample rate {self.rate} has no AAF nsr code")
         if self.bit_depth not in FORMAT_CODES:
@@ -443,7 +464,8 @@ class StreamConfig:
 
     @property
     def frame_len(self):
-        return max(ETH_MIN_FRAME, 14 + (4 if self.vlan else 0) + AAF_HEADER_LEN + self.payload_len)
+        return max(ETH_MIN_FRAME, 14 + (4 if self.vlan else 0) + (RTAG_LEN if self.rtag else 0)
+                   + AAF_HEADER_LEN + self.payload_len)
 
     @property
     def wire_len(self):
@@ -451,7 +473,13 @@ class StreamConfig:
 
     @property
     def bandwidth_mbps(self):
+        """One copy of the stream."""
         return self.wire_len * 8 * self.pps / 1e6
+
+    @property
+    def link_copies(self):
+        """Copies of each packet on the link of interface A."""
+        return 2 if self.replication == "same" else 1
 
     def send_offset_ns(self, n):
         """Exact send time of packet n relative to packet 0 (integer math, no drift)."""
@@ -480,20 +508,25 @@ class Requirement:
 
 def computed_text(cfg, req):
     """Summary of the stream as shown in the 'Computed' panel."""
-    util = cfg.bandwidth_mbps / cfg.link_mbps * 100.0
+    load = cfg.bandwidth_mbps * cfg.link_copies
+    util = load / cfg.link_mbps * 100.0
     pay_note = "<- matches requirement" if cfg.payload_len == req.max_payload else \
         f"<- requirement is {req.max_payload} byte"
+    tags = (", VLAN tag" if cfg.vlan else "") + (", R-TAG" if cfg.rtag else "")
     lines = [
         f"AAF payload      {cfg.payload_len:8d} byte   {pay_note}",
         f"AVTP length      {AAF_HEADER_LEN + cfg.payload_len:8d} byte  "
         f"(header {AAF_HEADER_LEN} + payload {cfg.payload_len})",
-        f"On-wire frame    {cfg.wire_len:8d} byte  (+preamble/SFD +IFG{', VLAN tag' if cfg.vlan else ''})",
+        f"On-wire frame    {cfg.wire_len:8d} byte  (+preamble/SFD +IFG{tags})",
         f"Period           {1e6 / cfg.pps:12.3f} us",
         f"Frame rate       {cfg.pps:10.1f} /s",
         f"Transmit time    {cfg.wire_len * 8 / cfg.link_mbps:12.3f} us @ {cfg.link_mbps:g} Mbps",
-        f"Bandwidth        {cfg.bandwidth_mbps:12.3f} Mbps  ({util:.2f} % of link)",
-        "",
     ]
+    if cfg.replication == "same":
+        lines.append("Copies                  2 per packet on interface A (link load x2)")
+    elif cfg.replication == "second":
+        lines.append("Copies                  2 per packet: A on interface A, B on interface B")
+    lines += [f"Bandwidth        {load:12.3f} Mbps  ({util:.2f} % of link)", ""]
     bad = req.mismatches(cfg)
     if bad:
         lines.append("DOES NOT MATCH REQUIREMENT: " + req.text())
@@ -513,6 +546,10 @@ class PacketBuilder:
         tpl = bytearray(cfg.dst + cfg.src)
         if cfg.vlan:
             tpl += struct.pack(">HH", ETHERTYPE_VLAN, (cfg.pcp << 13) | cfg.vid)
+        self.rtag_seq_off = None
+        if cfg.rtag:
+            self.rtag_seq_off = len(tpl) + 4
+            tpl += struct.pack(">HHH", ETHERTYPE_RTAG, 0, 0)  # sequence number patched per packet
         tpl += struct.pack(">H", ETHERTYPE_AVTP)
         self.avtp_off = len(tpl)
         tpl += bytes([AVTP_SUBTYPE_AAF,
@@ -568,6 +605,8 @@ class PacketBuilder:
         for i in range(npk):
             n = first + i
             h[seq_off] = n & 0xFF
+            if self.rtag_seq_off is not None:
+                struct.pack_into(">H", h, self.rtag_seq_off, (cfg.rtag_seq_start + n) & 0xFFFF)
             ts = (self.ts_base_ns + cfg.send_offset_ns(n) + cfg.pres_offset_ns) & 0xFFFFFFFF
             struct.pack_into(">I", h, ts_off, ts)
             frames.append(bytes(h) + payload[i].tobytes() + tail)
@@ -581,38 +620,71 @@ class PacketBuilder:
 # Sender (builder thread + paced transmit thread)
 # --------------------------------------------------------------------------------------------
 class Talker:
-    def __init__(self, pcap):
-        self.pcap = pcap
-        self.stop_evt = threading.Event()
-        self.threads = []
-        self.reset_stats()
+    """Paced sender. Each interface is a 'lane'; copy A goes to lane 0, copy B to lane 0 ('same') or 1 ('second').
+
+    Events are (time_ns, frame, path) with time_ns relative to the stream start. A batch only holds events
+    earlier than the first packet of the next batch; later ones (copy B delayed past the batch end) are
+    carried over, so batches never overlap in time on a lane."""
 
     # Behind schedule by up to this much: send the packets that are due back-to-back (keeps the average
     # rate exact). More than this: shift the schedule instead, to avoid a long burst at line rate.
     CATCH_UP_NS = 5_000_000
 
+    def __init__(self, pcap):
+        self.pcap = pcap
+        self.stop_evt = threading.Event()
+        self.lock = threading.Lock()
+        self.threads = []
+        self.handles = []
+        self.reset_stats()
+
     def reset_stats(self):
-        self.sent = 0
+        self.sent = {"A": 0, "B": 0}
+        self.dropped = {"A": 0, "B": 0}  # copies left out on purpose (loss injection)
         self.late = 0       # schedule shifted (stream lost that much time)
         self.catch_up = 0   # batches sent partly back-to-back to get back on schedule
         self.errors = []
         self.t_start = None
         self.running = False
 
-    def start(self, dev_name, cfg, source, mode, batch_ms):
+    @property
+    def sent_total(self):
+        return self.sent["A"] + self.sent["B"]
+
+    def start(self, devices, cfg, source, mode, batch_ms, seed=None):
+        """devices: interface name of copy A, or {'A': name, 'B': name} (B used when replication = 'second')."""
+        if isinstance(devices, str):
+            devices = {"A": devices}
         self.reset_stats()
         self.stop_evt.clear()
         self.cfg = cfg
-        self.handle = self.pcap.open(dev_name)
+        self.handles = [self.pcap.open(devices["A"])]
+        if cfg.replication == "second":
+            if not devices.get("B"):
+                self.pcap.close(self.handles[0])
+                raise ValueError("replication 'second' needs interface B")
+            try:
+                self.handles.append(self.pcap.open(devices["B"]))
+            except Exception:
+                self.pcap.close(self.handles[0])
+                raise
+        self.path_lane = {"A": 0, "B": len(self.handles) - 1}
+        self.carry = [[] for _ in self.handles]
+        self.rng = random.Random(seed)
         self.builder = PacketBuilder(cfg, source)
         self.batch = max(1, int(round(batch_ms / 1000.0 * cfg.pps)))
+        self.t_base = time.perf_counter_ns() + 50_000_000
+        self.t_start = self.t_base
         self.running = True
         if mode == "sendqueue" and self.pcap.has_sendqueue:
-            self.q = queue.Queue(maxsize=3)
-            self.threads = [threading.Thread(target=self._build_loop, daemon=True),
-                            threading.Thread(target=self._queue_send_loop, daemon=True)]
+            self.queues = [queue.Queue(maxsize=3) for _ in self.handles]
+            self.lanes_left = len(self.handles)
+            self.threads = [threading.Thread(target=self._build_loop, daemon=True)] + \
+                           [threading.Thread(target=self._queue_send_loop, args=(lane,), daemon=True)
+                            for lane in range(len(self.handles))]
         else:
             sys.setswitchinterval(0.0002)
+            self.lanes_left = 1
             self.threads = [threading.Thread(target=self._busy_send_loop, daemon=True)]
         for t in self.threads:
             t.start()
@@ -624,28 +696,60 @@ class Talker:
         self.errors.append(msg)
         self.stop_evt.set()
 
+    def _next_batch(self, count):
+        """Send events of the next batch per lane, sorted by time; None when the stream is over."""
+        cfg = self.cfg
+        frames, first = self.builder.build(count)
+        new = [[] for _ in self.handles]
+        if frames:
+            paths = ("A",) if cfg.replication == "off" else ("A", "B")
+            for i, frame in enumerate(frames):
+                t = cfg.send_offset_ns(first + i)
+                for p in paths:
+                    if cfg.drop_pct[p] > 0.0 and self.rng.random() * 100.0 < cfg.drop_pct[p]:
+                        self.dropped[p] += 1
+                        continue
+                    new[self.path_lane[p]].append((t + (cfg.copy_b_delay_ns if p == "B" else 0), frame, p))
+            cutoff = cfg.send_offset_ns(first + len(frames))
+        elif any(self.carry):
+            cutoff = None                      # end of stream: flush what was carried over
+        else:
+            return None
+        out = []
+        for lane in range(len(self.handles)):
+            ev = sorted(self.carry[lane] + new[lane], key=lambda e: e[0])  # stable: A before B at equal time
+            if cutoff is None:
+                now_ev, self.carry[lane] = ev, []
+            else:
+                now_ev = [e for e in ev if e[0] < cutoff]
+                self.carry[lane] = [e for e in ev if e[0] >= cutoff]
+            out.append(now_ev)
+        return out
+
     def _build_loop(self):
         try:
             while not self.stop_evt.is_set():
-                frames, first = self.builder.build(self.batch)
-                if not frames:
+                lanes = self._next_batch(self.batch)
+                if lanes is None:
                     break
-                base = self.cfg.send_offset_ns(first) // 1000
-                rel_us = [self.cfg.send_offset_ns(first + i) // 1000 - base for i in range(len(frames))]
-                squeue, size = self.pcap.make_queue(frames, rel_us)
-                item = (squeue, size, first, frames)
-                while True:
-                    try:
-                        self.q.put(item, timeout=0.1)
-                        break
-                    except queue.Full:
-                        if self.stop_evt.is_set():
-                            self.pcap.destroy_queue(squeue)
-                            return
+                for lane, ev in enumerate(lanes):
+                    if not ev:
+                        continue
+                    start_us = ev[0][0] // 1000
+                    squeue, size = self.pcap.make_queue([f for _, f, _ in ev], [t // 1000 - start_us for t, _, _ in ev])
+                    while True:
+                        try:
+                            self.queues[lane].put((squeue, size, ev), timeout=0.1)
+                            break
+                        except queue.Full:
+                            if self.stop_evt.is_set():
+                                self.pcap.destroy_queue(squeue)
+                                return
         except Exception as e:  # noqa: BLE001 - report any build error in the GUI
             self._fail(f"build: {e}")
         finally:
-            self.q.put(None)
+            for q in self.queues:
+                q.put(None)
 
     def _wait_until(self, target_ns):
         while True:
@@ -655,53 +759,55 @@ class Talker:
             if left > 2_000_000:
                 time.sleep((left - 1_500_000) / 1e9)
 
-    def _queue_send_loop(self):
-        t_base = time.perf_counter_ns() + 50_000_000
-        self.t_start = t_base
+    def _queue_send_loop(self, lane):
+        t_base = self.t_base
+        period = self.cfg.send_offset_ns(1)
+        handle = self.handles[lane]
         try:
             while True:
-                item = self.q.get()
+                item = self.queues[lane].get()
                 if item is None:
                     break
-                squeue, size, first, frames = item
+                squeue, size, ev = item
                 if self.stop_evt.is_set():
                     self.pcap.destroy_queue(squeue)
                     continue
-                target = t_base + self.cfg.send_offset_ns(first)
+                target = t_base + ev[0][0]
                 now = time.perf_counter_ns()
                 lateness = now - target
                 if lateness > self.CATCH_UP_NS:
                     self.late += 1
                     t_base += lateness
-                elif lateness > self.cfg.send_offset_ns(1):
+                elif lateness > period:
                     # requeue with the packets already due at relative time 0
                     self.catch_up += 1
                     self.pcap.destroy_queue(squeue)
-                    rel_us = [max(0, t_base + self.cfg.send_offset_ns(first + i) - now) // 1000
-                              for i in range(len(frames))]
-                    squeue, size = self.pcap.make_queue(frames, rel_us)
+                    squeue, size = self.pcap.make_queue([f for _, f, _ in ev],
+                                                        [max(0, t_base + t - now) // 1000 for t, _, _ in ev])
                 else:
                     self._wait_until(target)
-                sent = self.pcap.transmit_queue(self.handle, squeue, sync=True)
+                sent = self.pcap.transmit_queue(handle, squeue, sync=True)
                 self.pcap.destroy_queue(squeue)
                 if sent < size:
-                    self._fail("pcap_sendqueue_transmit: " + self.pcap.error(self.handle))
+                    self._fail("pcap_sendqueue_transmit: " + self.pcap.error(handle))
                     continue
-                self.sent += len(frames)
+                for _, _, p in ev:
+                    self.sent[p] += 1
         finally:
-            self._finish()
+            self._lane_done()
 
     def _busy_send_loop(self):
-        t_base = time.perf_counter_ns() + 50_000_000
-        self.t_start = t_base
+        t_base = self.t_base
         small = max(1, min(self.batch, 4))
         try:
             while not self.stop_evt.is_set():
-                frames, first = self.builder.build(small)
-                if not frames:
+                lanes = self._next_batch(small)
+                if lanes is None:
                     break
-                for i, frame in enumerate(frames):
-                    target = t_base + self.cfg.send_offset_ns(first + i)
+                events = sorted(((t, lane, f, p) for lane, ev in enumerate(lanes) for t, f, p in ev),
+                                key=lambda e: e[0])
+                for t, lane, frame, p in events:
+                    target = t_base + t
                     lateness = time.perf_counter_ns() - target
                     if lateness > self.CATCH_UP_NS:
                         self.late += 1
@@ -709,22 +815,28 @@ class Talker:
                     elif lateness < 0:
                         self._wait_until(target)
                     # 0 <= lateness <= CATCH_UP_NS: due already, send now to catch up
-                    if self.pcap.send(self.handle, frame) != 0:
-                        self._fail("pcap_sendpacket: " + self.pcap.error(self.handle))
+                    if self.pcap.send(self.handles[lane], frame) != 0:
+                        self._fail("pcap_sendpacket: " + self.pcap.error(self.handles[lane]))
                         break
-                    self.sent += 1
+                    self.sent[p] += 1
                     if self.stop_evt.is_set():
                         break
         except Exception as e:  # noqa: BLE001
             self._fail(f"send: {e}")
         finally:
-            self._finish()
+            self._lane_done()
 
-    def _finish(self):
-        try:
-            self.pcap.close(self.handle)
-        except Exception:  # noqa: BLE001
-            pass
+    def _lane_done(self):
+        with self.lock:
+            self.lanes_left -= 1
+            last = self.lanes_left == 0
+        if not last:
+            return
+        for h in self.handles:
+            try:
+                self.pcap.close(h)
+            except Exception:  # noqa: BLE001
+                pass
         sys.setswitchinterval(0.005)
         self.running = False
 
@@ -743,6 +855,8 @@ DEFAULTS = {
     "mode": "sendqueue", "batch_ms": "20",
     "req_sample_rate": "48000", "req_channels": "8", "req_bit_depth": "32",
     "req_samples_per_frame": "12", "req_max_payload": "384",
+    "rtag": False, "rtag_seq_start": "0", "replication": "off", "device_b": "",
+    "copy_b_delay_us": "0", "drop_a_pct": "0", "drop_b_pct": "0",
 }
 
 
@@ -778,9 +892,12 @@ def run_gui():
          for k, val in s.items()}
     dev_labels = [f"{desc}  [{name}]" for name, desc in devices]
     dev_var = tk.StringVar()
+    dev_b_var = tk.StringVar()
     for name, label in zip((d[0] for d in devices), dev_labels):
         if name == s["device"]:
             dev_var.set(label)
+        if name == s.get("device_b"):
+            dev_b_var.set(label)
 
     # START / STOP bar stays at the bottom; everything else scrolls
     bar = ttk.Frame(root, padding=8)
@@ -815,8 +932,8 @@ def run_gui():
         widget.grid(row=r, column=1, sticky="ew", pady=2)
         return widget
 
-    def selected_device():
-        label = dev_var.get()
+    def selected_device(var=None):
+        label = (var or dev_var).get()
         for (name, _), lab in zip(devices, dev_labels):
             if lab == label:
                 return name
@@ -859,8 +976,35 @@ def run_gui():
     ttk.Label(st, text="Frames to send = 0 means keep sending until STOP is pressed",
               foreground="gray").grid(row=6, column=0, columnspan=2, sticky="w")
 
+    # IEEE 802.1CB
+    cb = section("IEEE 802.1CB (FRER talker)", 2)
+    rt = ttk.Frame(cb)
+    ttk.Checkbutton(rt, text="Add R-TAG (EtherType 0xF1C1)", variable=v["rtag"]).pack(side="left")
+    ttk.Label(rt, text="   Start sequence (0..65535 or 0x..)").pack(side="left")
+    ttk.Entry(rt, textvariable=v["rtag_seq_start"], width=8).pack(side="left", padx=(4, 0))
+    field(cb, 0, "", rt)
+    rp = ttk.Frame(cb)
+    ttk.Combobox(rp, textvariable=v["replication"], values=list(REPLICATION_MODES), state="readonly",
+                 width=8).pack(side="left")
+    ttk.Label(rp, text="  off = 1 copy, same = 2 copies on interface A, second = copy B on interface B",
+              foreground="gray").pack(side="left")
+    field(cb, 1, "Replication", rp)
+    field(cb, 2, "Interface B", ttk.Combobox(cb, textvariable=dev_b_var, values=dev_labels, state="readonly",
+                                             width=70))
+    dl = ttk.Frame(cb)
+    ttk.Label(dl, text="Copy B delay (us)").pack(side="left")
+    ttk.Entry(dl, textvariable=v["copy_b_delay_us"], width=8).pack(side="left", padx=(4, 16))
+    ttk.Label(dl, text="Drop copy A (%)").pack(side="left")
+    ttk.Entry(dl, textvariable=v["drop_a_pct"], width=6).pack(side="left", padx=(4, 16))
+    ttk.Label(dl, text="Drop copy B (%)").pack(side="left")
+    ttk.Entry(dl, textvariable=v["drop_b_pct"], width=6).pack(side="left", padx=(4, 0))
+    field(cb, 3, "", dl)
+    ttk.Label(cb, text="Both copies are identical (same R-TAG sequence). Drops are random, to check that the "
+                       "listener's sequence recovery fills the gaps.",
+              foreground="gray", wraplength=700, justify="left").grid(row=4, column=0, columnspan=2, sticky="w")
+
     # Source
-    sc = section("Audio source", 2)
+    sc = section("Audio source", 3)
     rb = ttk.Frame(sc)
     ttk.Radiobutton(rb, text="Sine", value="sine", variable=v["source"]).pack(side="left")
     ttk.Radiobutton(rb, text="Audio file (WAV / MP3 / FLAC / OGG)", value="wav",
@@ -891,7 +1035,7 @@ def run_gui():
               foreground="gray").grid(row=6, column=0, columnspan=2, sticky="w")
 
     # Receiver requirement
-    rq = section("Receiver requirement", 3)
+    rq = section("Receiver requirement", 4)
     rqf = ttk.Frame(rq)
     for label, key, width in (("Rate", "req_sample_rate", 8), ("Ch", "req_channels", 4),
                               ("Bit", "req_bit_depth", 4), ("Samples", "req_samples_per_frame", 5),
@@ -901,7 +1045,7 @@ def run_gui():
     field(rq, 0, "", rqf)
 
     # Pacing
-    pc = section("Pacing", 4)
+    pc = section("Pacing", 5)
     pm = ttk.Frame(pc)
     ttk.Radiobutton(pm, text="Npcap send queue (sync, recommended)", value="sendqueue",
                     variable=v["mode"]).pack(side="left")
@@ -912,11 +1056,11 @@ def run_gui():
     info = tk.StringVar()
     warn = tk.StringVar()
     status = tk.StringVar(value="Idle")
-    comp = section("Computed", 5)
+    comp = section("Computed", 6)
     tk.Label(comp, textvariable=info, font=("Consolas", 9), justify="left", anchor="w").grid(
         row=0, column=0, sticky="w")
     ttk.Label(body, textvariable=warn, foreground="#c05000", padding=(10, 2), wraplength=640,
-              justify="left").grid(row=6, column=0, sticky="w")
+              justify="left").grid(row=7, column=0, sticky="w")
     start_btn = ttk.Button(bar, text="START")
     stop_btn = ttk.Button(bar, text="STOP", state="disabled")
     start_btn.pack(side="left")
@@ -926,6 +1070,7 @@ def run_gui():
     def snapshot():
         d = {k: var.get() for k, var in v.items()}
         d["device"] = selected_device()
+        d["device_b"] = selected_device(dev_b_var)
         return d
 
     info_cache = {}
@@ -958,10 +1103,23 @@ def run_gui():
             cfg = StreamConfig(d)
             req = Requirement(d)
             info.set(computed_text(cfg, req))
-            if cfg.bandwidth_mbps > cfg.link_mbps:
+            if cfg.bandwidth_mbps * cfg.link_copies > cfg.link_mbps:
                 msgs.append("Stream does not fit the link speed.")
             if cfg.payload_len > req.max_payload:
                 msgs.append(f"The receiver accepts at most {req.max_payload} B per packet.")
+            if cfg.rtag:
+                msgs.append("R-TAG on: the listener must remove it before the host (Egress Treatment with "
+                            "RemoveRTag), otherwise EthIf sees EtherType 0xF1C1. Switch ports on the path need "
+                            "max frame length / MAXSDU + 6 byte.")
+            if cfg.replication != "off" and not cfg.rtag:
+                msgs.append("Replication without R-TAG: the listener cannot tell the copies apart.")
+            if cfg.replication == "second":
+                if not d["device_b"]:
+                    msgs.append("Replication 'second': select Interface B.")
+                elif d["device_b"] == d["device"]:
+                    msgs.append("Interface B is interface A: use replication 'same' instead.")
+            if d["mode"] == "busy" and cfg.replication == "second":
+                msgs.append("Busy-wait mode sends both interfaces from one thread; send queue mode is preferred.")
         except (ValueError, ZeroDivisionError) as e:
             info.set(f"Invalid setting: {e}")
         if d["source"] == "wav" and d["wav_path"]:
@@ -989,9 +1147,13 @@ def run_gui():
     def tick():
         if talker.running or talker.t_start:
             el = max(0.0, (time.perf_counter_ns() - talker.t_start) / 1e9) if talker.t_start else 0.0
-            rate = talker.sent / el if el > 0.5 else 0.0
-            txt = (f"Sent {talker.sent}  |  {rate:.0f} pkt/s  |  catch-up {talker.catch_up}  |  "
-                   f"late {talker.late}  |  {el:.1f} s")
+            rate = talker.sent["A"] / el if el > 0.5 else 0.0
+            txt = f"Sent A {talker.sent['A']}"
+            if talker.sent["B"] or talker.dropped["B"]:
+                txt += f", B {talker.sent['B']}"
+            if talker.dropped["A"] or talker.dropped["B"]:
+                txt += f"  |  dropped A {talker.dropped['A']}, B {talker.dropped['B']}"
+            txt += f"  |  {rate:.0f} pkt/s  |  catch-up {talker.catch_up}  |  late {talker.late}  |  {el:.1f} s"
             if talker.errors:
                 txt += "  |  " + talker.errors[-1]
             status.set(("Running: " if talker.running else "Stopped: ") + txt)
@@ -1012,7 +1174,7 @@ def run_gui():
                 source = FileSource(data, cfg.channels, d["missing"], float(d["file_gain"]), bool(d["loop"]))
             else:
                 source = SineSource(float(d["sine_freq"]), float(d["sine_volume"]), cfg.channels, cfg.rate)
-            talker.start(d["device"], cfg, source, d["mode"], float(d["batch_ms"]))
+            talker.start({"A": d["device"], "B": d["device_b"]}, cfg, source, d["mode"], float(d["batch_ms"]))
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("AVTP Talker", str(e))
             return
@@ -1033,6 +1195,7 @@ def run_gui():
     for var in v.values():
         var.trace_add("write", lambda *_: refresh_info())
     dev_var.trace_add("write", lambda *_: refresh_info())
+    dev_b_var.trace_add("write", lambda *_: refresh_info())
     refresh_info()
     tick()
     root.mainloop()
@@ -1064,6 +1227,9 @@ def selftest():
     print("eth  :", f[:14].hex(" "))
     print("avtp :", f[14:38].hex(" "))
     print("pay  :", f[38:70].hex(" "), "...")
+    s.update(vlan=True, vid="10", rtag=True, rtag_seq_start="100")
+    f = PacketBuilder(StreamConfig(s), SineSource(1000.0, 0.2, cfg.channels, cfg.rate)).build(1)[0][0]
+    print("with VLAN 10 + R-TAG (seq 100):", f[:24].hex(" "), "| avtp ...")
     t0 = time.perf_counter()
     nb = 0
     while time.perf_counter() - t0 < 1.0:
