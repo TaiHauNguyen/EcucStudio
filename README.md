@@ -290,6 +290,24 @@ python scripts\avtp_talker.py --selftest   rem dựng thử gói (không gửi),
 - `avtp_timestamp` lấy từ đồng hồ PC, không phải gPTP. Npcap cài chế độ chỉ cho Administrator thì GUI tự xin quyền
   (UAC). Cấu hình lưu ở `%APPDATA%\avtp_talker\settings.json`.
 
+## Script: đổi MP3 sang WAV
+
+`scripts/mp3_to_wav.py` (cần `numpy`, `soundfile`) đổi file MP3 / FLAC / OGG (hoặc WAV) sang WAV PCM, ví dụ để
+có sẵn file đúng định dạng stream cho `avtp_talker` hoặc cho test audio trên ECU:
+
+```bat
+python scripts\mp3_to_wav.py song.mp3                                   rem song.wav cạnh file gốc, 16 bit
+python scripts\mp3_to_wav.py song.mp3 -o out --rate 48000 --channels 2 --bits 24
+python scripts\mp3_to_wav.py music_dir -r -o out --rate 48000           rem cả thư mục (kể cả thư mục con)
+python scripts\mp3_to_wav.py song.mp3 --start 30 --duration 10 --gain -3
+```
+
+- `--rate` resample bằng polyphase windowed-sinc (giống `avtp_talker`); `--channels`: nhiều kênh hơn thì lặp
+  kênh nguồn, 1 kênh thì lấy trung bình, ít hơn thì giữ N kênh đầu; `--bits` 16 / 24 / 32 / float.
+- Mỗi file in ra rate / kênh / độ dài / đỉnh (dBFS); mẫu vượt full scale bị clip và được đếm, kèm gợi ý `--gain`.
+- Thư mục: chỉ lấy .mp3 / .flac / .ogg (WAV chỉ đổi khi chỉ đích danh); file ra đã có thì bỏ qua trừ khi
+  `--overwrite`. Mã thoát 1 nếu có file lỗi.
+
 ## An toàn dữ liệu
 
 - Chỉ ghi các file ECUC đã sửa; phần không sửa giữ nguyên từng byte (đã test trên 70 file của project).
