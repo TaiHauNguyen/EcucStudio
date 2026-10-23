@@ -868,8 +868,10 @@ class Talker:
             left = target_ns - time.perf_counter_ns()
             if left <= 0:
                 return
-            if left > 2_000_000:
-                time.sleep((left - 1_500_000) / 1e9)
+            # Windows may run the timer at ~15.6 ms for a minimized / covered window: only sleep while more
+            # than that is left, spin the rest
+            if left > 20_000_000:
+                time.sleep((left - 17_000_000) / 1e9)
 
     def _queue_send_loop(self, lane):
         self.boost.thread_priority(THREAD_PRIORITY_TIME_CRITICAL)
