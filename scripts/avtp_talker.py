@@ -10,7 +10,11 @@ package) out of a PC network card through Npcap. A file at another sample rate i
 rate (windowed-sinc polyphase) unless "Resample" is off. Packets are
 paced by the Npcap send queue in synchronous mode (the driver busy-waits on the packet timestamps), so
 the gap between packets stays at samples_per_frame / sample_rate instead of following the coarse
-Windows timer. A "busy-wait per packet" mode is kept as fallback.
+Windows timer. A "busy-wait per packet" mode is kept as fallback. Each interface has its own send thread;
+all of them follow one shared schedule. A thread late by less than the catch-up limit sends the overdue
+packets at 2x the stream rate until back on schedule; later than that, the schedule skips ahead for every
+interface (counted as 'late' / 'lost'). While sending, the process runs at high priority without power
+throttling, with a 1 ms system timer and no garbage collection pauses.
 
 The "Receiver requirement" fields (sample rate, channels, bit depth, samples per frame, max payload)
 describe what the receiver under test accepts; the "Computed" panel checks the stream against them.
@@ -27,6 +31,7 @@ close; "Save as..." / "Load..." keep named settings files (JSON) for different s
 """
 import csv
 import ctypes
+import gc
 import json
 import math
 import os
@@ -620,16 +625,94 @@ class PacketBuilder:
 # --------------------------------------------------------------------------------------------
 # Sender (builder thread + paced transmit thread)
 # --------------------------------------------------------------------------------------------
+class _RealtimeBoost:
+    """While streaming (Windows): high process priority, no power throttling (EcoQoS), 1 ms system timer,
+    and no Python garbage collection pauses. Every step is best effort; end() restores what begin() changed."""
+
+    HIGH_PRIORITY_CLASS = 0x80
+    PROCESS_POWER_THROTTLING = 4                 # PROCESS_INFORMATION_CLASS ProcessPowerThrottling
+    THROTTLE_EXECUTION_SPEED = 0x1
+    THROTTLE_IGNORE_TIMER_RESOLUTION = 0x4
+
+    class _ThrottleState(ctypes.Structure):
+        _fields_ = [("Version", ctypes.c_ulong), ("ControlMask", ctypes.c_ulong), ("StateMask", ctypes.c_ulong)]
+
+    def __init__(self):
+        self.gc_was_enabled = False
+        self.old_class = 0
+        self.timer = False
+        self.k32 = None
+        if os.name == "nt":
+            try:
+                k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                k32.GetCurrentProcess.restype = ctypes.c_void_p
+                k32.GetPriorityClass.argtypes = [ctypes.c_void_p]
+                k32.GetPriorityClass.restype = ctypes.c_ulong
+                k32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+                k32.GetCurrentThread.restype = ctypes.c_void_p
+                k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+                self.k32 = k32
+            except (OSError, AttributeError):
+                self.k32 = None
+
+    def _throttling(self, off):
+        st = self._ThrottleState(1, (self.THROTTLE_EXECUTION_SPEED | self.THROTTLE_IGNORE_TIMER_RESOLUTION)
+                                 if off else 0, 0)
+        try:
+            self.k32.SetProcessInformation(ctypes.c_void_p(self.k32.GetCurrentProcess()), self.PROCESS_POWER_THROTTLING,
+                                           ctypes.byref(st), ctypes.sizeof(st))
+        except AttributeError:  # Windows older than 10 1709
+            pass
+
+    def begin(self):
+        self.gc_was_enabled = gc.isenabled()
+        gc.disable()
+        if not self.k32:
+            return
+        proc = self.k32.GetCurrentProcess()
+        self.old_class = self.k32.GetPriorityClass(proc)
+        self.k32.SetPriorityClass(proc, self.HIGH_PRIORITY_CLASS)
+        self._throttling(True)
+        try:
+            self.timer = ctypes.WinDLL("winmm").timeBeginPeriod(1) == 0
+        except OSError:
+            self.timer = False
+
+    def end(self):
+        if self.gc_was_enabled:
+            gc.enable()
+        if not self.k32:
+            return
+        if self.old_class:
+            self.k32.SetPriorityClass(self.k32.GetCurrentProcess(), self.old_class)
+        self._throttling(False)
+        if self.timer:
+            ctypes.WinDLL("winmm").timeEndPeriod(1)
+            self.timer = False
+
+    def thread_priority(self, level):
+        if self.k32:
+            self.k32.SetThreadPriority(self.k32.GetCurrentThread(), level)
+
+
+THREAD_PRIORITY_ABOVE_NORMAL = 1
+THREAD_PRIORITY_TIME_CRITICAL = 15
+
+
 class Talker:
-    """Paced sender. Each interface is a 'lane'; copy A goes to lane 0, copy B to lane 0 ('same') or 1 ('second').
+    """Paced sender. Each interface is a 'lane' with its own send thread; copy A goes to lane 0, copy B to
+    lane 0 ('same') or 1 ('second'). A builder thread prepares batches for all lanes.
 
     Events are (time_ns, frame, path) with time_ns relative to the stream start. A batch only holds events
     earlier than the first packet of the next batch; later ones (copy B delayed past the batch end) are
-    carried over, so batches never overlap in time on a lane."""
+    carried over, so batches never overlap in time on a lane.
 
-    # Behind schedule by up to this much: send the packets that are due back-to-back (keeps the average
-    # rate exact). More than this: shift the schedule instead, to avoid a long burst at line rate.
-    CATCH_UP_NS = 5_000_000
+    All lanes share one schedule (t_base + shift_ns): when a lane is late by more than the catch-up limit,
+    the schedule skips ahead for every lane, so copies A and B stay aligned for the listener's sequence
+    recovery. Late by less than the limit, the overdue packets go out at CATCH_UP_SPEED x the stream rate
+    (not as a line-rate burst that could overflow the listener's receive ring) until back on schedule."""
+
+    CATCH_UP_SPEED = 2
 
     def __init__(self, pcap):
         self.pcap = pcap
@@ -637,28 +720,34 @@ class Talker:
         self.lock = threading.Lock()
         self.threads = []
         self.handles = []
+        self.boost = _RealtimeBoost()
         self.reset_stats()
 
     def reset_stats(self):
         self.sent = {"A": 0, "B": 0}
         self.dropped = {"A": 0, "B": 0}  # copies left out on purpose (loss injection)
-        self.late = 0       # schedule shifted (stream lost that much time)
-        self.catch_up = 0   # batches sent partly back-to-back to get back on schedule
+        self.late = 0       # schedule skipped ahead (the stream lost that much time)
+        self.lost_ns = 0    # total time skipped
+        self.max_late_ns = 0
+        self.catch_up = 0   # batches sent partly at catch-up speed to get back on schedule
+        self.shift_ns = 0
         self.errors = []
         self.t_start = None
+        self.t_end = None
         self.running = False
 
     @property
     def sent_total(self):
         return self.sent["A"] + self.sent["B"]
 
-    def start(self, devices, cfg, source, mode, batch_ms, seed=None):
+    def start(self, devices, cfg, source, mode, batch_ms, seed=None, catch_up_ms=10.0):
         """devices: interface name of copy A, or {'A': name, 'B': name} (B used when replication = 'second')."""
         if isinstance(devices, str):
             devices = {"A": devices}
         self.reset_stats()
         self.stop_evt.clear()
         self.cfg = cfg
+        self.catch_up_ns = max(0, int(catch_up_ms * 1_000_000))
         self.handles = [self.pcap.open(devices["A"])]
         if cfg.replication == "second":
             if not devices.get("B"):
@@ -674,19 +763,18 @@ class Talker:
         self.rng = random.Random(seed)
         self.builder = PacketBuilder(cfg, source)
         self.batch = max(1, int(round(batch_ms / 1000.0 * cfg.pps)))
+        self.use_queue = mode == "sendqueue" and self.pcap.has_sendqueue
+        self.queues = [queue.Queue(maxsize=3) for _ in self.handles]
+        self.lanes_left = len(self.handles)
+        self.boost.begin()
+        if not self.use_queue:
+            sys.setswitchinterval(0.0002)
+        sender = self._queue_send_loop if self.use_queue else self._busy_send_loop
+        self.threads = [threading.Thread(target=self._build_loop, daemon=True)] + \
+                       [threading.Thread(target=sender, args=(lane,), daemon=True) for lane in range(len(self.handles))]
         self.t_base = time.perf_counter_ns() + 50_000_000
         self.t_start = self.t_base
         self.running = True
-        if mode == "sendqueue" and self.pcap.has_sendqueue:
-            self.queues = [queue.Queue(maxsize=3) for _ in self.handles]
-            self.lanes_left = len(self.handles)
-            self.threads = [threading.Thread(target=self._build_loop, daemon=True)] + \
-                           [threading.Thread(target=self._queue_send_loop, args=(lane,), daemon=True)
-                            for lane in range(len(self.handles))]
-        else:
-            sys.setswitchinterval(0.0002)
-            self.lanes_left = 1
-            self.threads = [threading.Thread(target=self._busy_send_loop, daemon=True)]
         for t in self.threads:
             t.start()
 
@@ -728,6 +816,7 @@ class Talker:
         return out
 
     def _build_loop(self):
+        self.boost.thread_priority(THREAD_PRIORITY_ABOVE_NORMAL)
         try:
             while not self.stop_evt.is_set():
                 lanes = self._next_batch(self.batch)
@@ -736,21 +825,43 @@ class Talker:
                 for lane, ev in enumerate(lanes):
                     if not ev:
                         continue
-                    start_us = ev[0][0] // 1000
-                    squeue, size = self.pcap.make_queue([f for _, f, _ in ev], [t // 1000 - start_us for t, _, _ in ev])
+                    if self.use_queue:
+                        start_us = ev[0][0] // 1000
+                        squeue, size = self.pcap.make_queue([f for _, f, _ in ev],
+                                                            [t // 1000 - start_us for t, _, _ in ev])
+                    else:
+                        squeue, size = None, 0
                     while True:
                         try:
                             self.queues[lane].put((squeue, size, ev), timeout=0.1)
                             break
                         except queue.Full:
                             if self.stop_evt.is_set():
-                                self.pcap.destroy_queue(squeue)
+                                if squeue is not None:
+                                    self.pcap.destroy_queue(squeue)
                                 return
         except Exception as e:  # noqa: BLE001 - report any build error in the GUI
             self._fail(f"build: {e}")
         finally:
             for q in self.queues:
                 q.put(None)
+
+    def _schedule(self, t, now):
+        """Scheduled send time of stream time t, after skipping the shared schedule ahead when the lane is
+        late by more than the catch-up limit."""
+        sched = self.t_base + self.shift_ns + t
+        lateness = now - sched
+        if lateness > self.max_late_ns:
+            self.max_late_ns = lateness
+        if lateness > self.catch_up_ns:
+            with self.lock:
+                new_shift = now - self.t_base - t
+                if new_shift > self.shift_ns:   # another lane may have skipped ahead already
+                    self.lost_ns += new_shift - self.shift_ns
+                    self.shift_ns = new_shift
+                    self.late += 1
+            sched = self.t_base + self.shift_ns + t
+        return sched
 
     def _wait_until(self, target_ns):
         while True:
@@ -761,8 +872,9 @@ class Talker:
                 time.sleep((left - 1_500_000) / 1e9)
 
     def _queue_send_loop(self, lane):
-        t_base = self.t_base
+        self.boost.thread_priority(THREAD_PRIORITY_TIME_CRITICAL)
         period = self.cfg.send_offset_ns(1)
+        fast = max(1, period // self.CATCH_UP_SPEED)
         handle = self.handles[lane]
         try:
             while True:
@@ -773,20 +885,18 @@ class Talker:
                 if self.stop_evt.is_set():
                     self.pcap.destroy_queue(squeue)
                     continue
-                target = t_base + ev[0][0]
                 now = time.perf_counter_ns()
-                lateness = now - target
-                if lateness > self.CATCH_UP_NS:
-                    self.late += 1
-                    t_base += lateness
-                elif lateness > period:
-                    # requeue with the packets already due at relative time 0
+                sched = self._schedule(ev[0][0], now)
+                if now - sched > period:
+                    # behind but within the limit: overdue packets at catch-up speed, the rest on schedule
                     self.catch_up += 1
                     self.pcap.destroy_queue(squeue)
+                    base = sched - ev[0][0]
+                    times = [max(base + t, now + i * fast) for i, (t, _, _) in enumerate(ev)]
                     squeue, size = self.pcap.make_queue([f for _, f, _ in ev],
-                                                        [max(0, t_base + t - now) // 1000 for t, _, _ in ev])
-                else:
-                    self._wait_until(target)
+                                                        [(x - times[0]) // 1000 for x in times])
+                elif sched > now:
+                    self._wait_until(sched)
                 sent = self.pcap.transmit_queue(handle, squeue, sync=True)
                 self.pcap.destroy_queue(squeue)
                 if sent < size:
@@ -794,32 +904,34 @@ class Talker:
                     continue
                 for _, _, p in ev:
                     self.sent[p] += 1
+        except Exception as e:  # noqa: BLE001
+            self._fail(f"send: {e}")
         finally:
             self._lane_done()
 
-    def _busy_send_loop(self):
-        t_base = self.t_base
-        small = max(1, min(self.batch, 4))
+    def _busy_send_loop(self, lane):
+        self.boost.thread_priority(THREAD_PRIORITY_TIME_CRITICAL)
+        period = self.cfg.send_offset_ns(1)
+        fast = max(1, period // self.CATCH_UP_SPEED)
+        handle = self.handles[lane]
+        next_free = 0
         try:
-            while not self.stop_evt.is_set():
-                lanes = self._next_batch(small)
-                if lanes is None:
+            while True:
+                item = self.queues[lane].get()
+                if item is None:
                     break
-                events = sorted(((t, lane, f, p) for lane, ev in enumerate(lanes) for t, f, p in ev),
-                                key=lambda e: e[0])
-                for t, lane, frame, p in events:
-                    target = t_base + t
-                    lateness = time.perf_counter_ns() - target
-                    if lateness > self.CATCH_UP_NS:
-                        self.late += 1
-                        t_base += lateness
-                    elif lateness < 0:
-                        self._wait_until(target)
-                    # 0 <= lateness <= CATCH_UP_NS: due already, send now to catch up
-                    if self.pcap.send(self.handles[lane], frame) != 0:
-                        self._fail("pcap_sendpacket: " + self.pcap.error(self.handles[lane]))
+                if self.stop_evt.is_set():
+                    continue
+                for t, frame, p in item[2]:
+                    now = time.perf_counter_ns()
+                    send_at = max(self._schedule(t, now), next_free)
+                    if send_at > now:
+                        self._wait_until(send_at)
+                    if self.pcap.send(handle, frame) != 0:
+                        self._fail("pcap_sendpacket: " + self.pcap.error(handle))
                         break
                     self.sent[p] += 1
+                    next_free = max(send_at, now) + fast
                     if self.stop_evt.is_set():
                         break
         except Exception as e:  # noqa: BLE001
@@ -839,6 +951,8 @@ class Talker:
             except Exception:  # noqa: BLE001
                 pass
         sys.setswitchinterval(0.005)
+        self.boost.end()
+        self.t_end = time.perf_counter_ns()
         self.running = False
 
 
@@ -853,7 +967,7 @@ DEFAULTS = {
     "link_speed": "1000.0", "frames_to_send": "0",
     "source": "sine", "wav_path": "", "loop": True, "resample": True, "missing": "repeat",
     "sine_freq": "1000.0", "sine_volume": "0.2", "file_gain": "1.0",
-    "mode": "sendqueue", "batch_ms": "20",
+    "mode": "sendqueue", "batch_ms": "50", "catch_up_ms": "10",
     "req_sample_rate": "48000", "req_channels": "8", "req_bit_depth": "32",
     "req_samples_per_frame": "12", "req_max_payload": "384",
     "rtag": False, "rtag_seq_start": "0", "replication": "off", "device_b": "",
@@ -1063,6 +1177,13 @@ def run_gui():
     ttk.Radiobutton(pm, text="Busy-wait per packet", value="busy", variable=v["mode"]).pack(side="left", padx=12)
     field(pc, 0, "Mode", pm)
     field(pc, 1, "Batch (ms)", ttk.Entry(pc, textvariable=v["batch_ms"]))
+    field(pc, 2, "Catch-up limit (ms)", ttk.Entry(pc, textvariable=v["catch_up_ms"]))
+    ttk.Label(pc, text="Late by less than the catch-up limit: the overdue packets go out at 2x the stream rate "
+                       "until back on schedule. Later than that: the stream skips ahead (a gap the listener "
+                       "hears), shown as 'late' / 'lost'. Batch 50-100 ms means fewer batch boundaries where "
+                       "the PC can be late. While sending, the tool runs at high priority (no power "
+                       "throttling, 1 ms timer).",
+              foreground="gray", wraplength=700, justify="left").grid(row=3, column=0, columnspan=2, sticky="w")
 
     info = tk.StringVar()
     warn = tk.StringVar()
@@ -1202,8 +1323,11 @@ def run_gui():
                     msgs.append("Replication 'second': select Interface B.")
                 elif d["device_b"] == d["device"]:
                     msgs.append("Interface B is interface A: use replication 'same' instead.")
-            if d["mode"] == "busy" and cfg.replication == "second":
-                msgs.append("Busy-wait mode sends both interfaces from one thread; send queue mode is preferred.")
+            if d["mode"] == "busy":
+                msgs.append("Busy-wait: one thread per interface spins on a CPU core and Python sends each packet "
+                            "itself; send queue mode keeps the timing better.")
+            if float(d["catch_up_ms"] or 0) < 0:
+                msgs.append("Catch-up limit must be >= 0 ms.")
         except (ValueError, ZeroDivisionError) as e:
             info.set(f"Invalid setting: {e}")
         if d["source"] == "wav" and d["wav_path"]:
@@ -1230,14 +1354,17 @@ def run_gui():
 
     def tick():
         if talker.running or talker.t_start:
-            el = max(0.0, (time.perf_counter_ns() - talker.t_start) / 1e9) if talker.t_start else 0.0
+            end = time.perf_counter_ns() if talker.running or not talker.t_end else talker.t_end
+            el = max(0.0, (end - talker.t_start) / 1e9) if talker.t_start else 0.0
             rate = talker.sent["A"] / el if el > 0.5 else 0.0
             txt = f"Sent A {talker.sent['A']}"
             if talker.sent["B"] or talker.dropped["B"]:
                 txt += f", B {talker.sent['B']}"
             if talker.dropped["A"] or talker.dropped["B"]:
                 txt += f"  |  dropped A {talker.dropped['A']}, B {talker.dropped['B']}"
-            txt += f"  |  {rate:.0f} pkt/s  |  catch-up {talker.catch_up}  |  late {talker.late}  |  {el:.1f} s"
+            txt += (f"  |  {rate:.0f} pkt/s  |  catch-up {talker.catch_up}  |  late {talker.late}"
+                    f" (lost {talker.lost_ns / 1e6:.1f} ms, max {max(0, talker.max_late_ns) / 1e6:.1f} ms)"
+                    f"  |  {el:.1f} s")
             if talker.errors:
                 txt += "  |  " + talker.errors[-1]
             status.set(("Running: " if talker.running else "Stopped: ") + txt)
@@ -1258,7 +1385,11 @@ def run_gui():
                 source = FileSource(data, cfg.channels, d["missing"], float(d["file_gain"]), bool(d["loop"]))
             else:
                 source = SineSource(float(d["sine_freq"]), float(d["sine_volume"]), cfg.channels, cfg.rate)
-            talker.start({"A": d["device"], "B": d["device_b"]}, cfg, source, d["mode"], float(d["batch_ms"]))
+            catch_up_ms = float(d["catch_up_ms"] or 0)
+            if catch_up_ms < 0:
+                raise ValueError("Catch-up limit must be >= 0 ms")
+            talker.start({"A": d["device"], "B": d["device_b"]}, cfg, source, d["mode"], float(d["batch_ms"]),
+                         catch_up_ms=catch_up_ms)
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("AVTP Talker", str(e))
             return

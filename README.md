@@ -278,7 +278,12 @@ python scripts\avtp_talker.py --selftest   rem dựng thử gói (không gửi),
   của stream được resample (polyphase windowed-sinc, ví dụ 44.1 → 48 kHz) khi bấm START, trừ khi tắt "Resample";
   đỉnh tín hiệu vượt full scale thì GUI gợi ý File gain để không bị clip.
 - Nhịp gửi: Npcap send queue chế độ sync (driver giữ khoảng cách giữa các gói, ví dụ 250 µs với 12 sample/frame
-  ở 48 kHz); dự phòng busy-wait từng gói. Trạng thái: số gói, gói/s, số lần trễ.
+  ở 48 kHz); dự phòng busy-wait từng gói. Mỗi card mạng một luồng gửi, tất cả theo **một lịch chung**: trễ dưới
+  *Catch-up limit* (mặc định 10 ms) thì các gói quá hạn được phát ở 2x tốc độ stream tới khi bắt kịp (không dồn
+  cục ở tốc độ đường truyền); trễ hơn thì lịch của mọi card cùng nhảy tới, nên copy A / B vẫn thẳng hàng cho
+  sequence recovery phía nhận. Trong lúc phát tool chạy ưu tiên cao, tắt power throttling (EcoQoS), timer 1 ms,
+  tắt garbage collection. Batch 50–100 ms (mặc định 50) ít điểm nối giữa các lô hơn, ít cơ hội bị trễ hơn.
+  Trạng thái: số gói, gói/s, catch-up, late (thời gian đã mất, độ trễ lớn nhất); đồng hồ dừng khi STOP.
 - "Receiver requirement" (rate / kênh / bit / samples / payload tối đa) là thứ bên nhận chấp nhận; khung "Computed"
   tính payload, độ dài AVTP, frame trên dây, chu kỳ, gói/s, băng thông và báo có khớp requirement không.
 - IEEE 802.1CB (FRER, phía phát): chèn R-TAG (0xF1C1, reserved 0, sequence 16 bit, số bắt đầu chỉnh được) ngay
