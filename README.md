@@ -288,7 +288,10 @@ python scripts\avtp_talker.py --selftest   rem dựng thử gói (không gửi),
   riêng gói gửi / bỏ của A và B. Bên nhận phải gỡ R-TAG trước host (Egress Treatment RemoveRTag), port trên
   đường đi cần max frame length / MAXSDU + 6 byte.
 - `avtp_timestamp` lấy từ đồng hồ PC, không phải gPTP. Npcap cài chế độ chỉ cho Administrator thì GUI tự xin quyền
-  (UAC). Cấu hình lưu ở `%APPDATA%\avtp_talker\settings.json`.
+  (UAC).
+- Setting tự lưu vào `%APPDATA%\avtp_talker\settings.json` 1 s sau mỗi thay đổi và khi đóng cửa sổ. Nút
+  *Save as…* / *Load…* (đầu cửa sổ) lưu / nạp bộ setting có tên (file JSON) cho từng kiểu test; khi nạp trên máy
+  khác mà không có card mạng đã lưu thì tool báo để chọn lại.
 
 ## Script: đổi MP3 sang WAV
 

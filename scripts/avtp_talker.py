@@ -22,7 +22,8 @@ time; random loss of copy A / copy B to check that the listener's sequence recov
 
 Needs Windows, Npcap, numpy (tkinter for the GUI); soundfile only for non-WAV files. If Npcap was
 installed with "Restrict Npcap driver's access to Administrators only", the GUI restarts itself elevated
-(UAC). Settings are kept in %APPDATA%\\avtp_talker\\settings.json.
+(UAC). Settings are kept in %APPDATA%\\avtp_talker\\settings.json, saved 1 s after every change and on
+close; "Save as..." / "Load..." keep named settings files (JSON) for different setups.
 """
 import csv
 import ctypes
@@ -857,6 +858,7 @@ DEFAULTS = {
     "req_samples_per_frame": "12", "req_max_payload": "384",
     "rtag": False, "rtag_seq_start": "0", "replication": "off", "device_b": "",
     "copy_b_delay_us": "0", "drop_a_pct": "0", "drop_b_pct": "0",
+    "profile_dir": "",
 }
 
 
@@ -899,9 +901,18 @@ def run_gui():
         if name == s.get("device_b"):
             dev_b_var.set(label)
 
-    # START / STOP bar stays at the bottom; everything else scrolls
+    # START / STOP bar stays at the bottom, settings bar at the top; everything else scrolls
     bar = ttk.Frame(root, padding=8)
     bar.pack(side="bottom", fill="x")
+    top = ttk.Frame(root, padding=(8, 6, 8, 0))
+    top.pack(side="top", fill="x")
+    ttk.Label(top, text="Settings:").pack(side="left")
+    save_as_btn = ttk.Button(top, text="Save as...")
+    load_btn = ttk.Button(top, text="Load...")
+    save_as_btn.pack(side="left", padx=(6, 0))
+    load_btn.pack(side="left", padx=6)
+    note = tk.StringVar(value="saved automatically to " + SETTINGS_FILE)
+    ttk.Label(top, textvariable=note, foreground="gray").pack(side="left", padx=6)
     outer = ttk.Frame(root)
     outer.pack(side="top", fill="both", expand=True)
     canvas = tk.Canvas(outer, highlightthickness=0)
@@ -1073,6 +1084,79 @@ def run_gui():
         d["device_b"] = selected_device(dev_b_var)
         return d
 
+    def apply_settings(d):
+        """Put a settings dict into the GUI (unknown keys ignored); returns the interfaces not found."""
+        for k, var in v.items():
+            if k in d and k not in ("device", "device_b", "profile_dir"):
+                var.set(bool(d[k]) if isinstance(var, tk.BooleanVar) else str(d[k]))
+        missing = []
+        for key, var in (("device", dev_var), ("device_b", dev_b_var)):
+            name = d.get(key, "")
+            label = next((lab for (n, _), lab in zip(devices, dev_labels) if n == name), "")
+            if label:
+                var.set(label)
+            elif name:
+                missing.append("A" if key == "device" else "B")
+        return missing
+
+    save_job = [None]
+
+    def save_now():
+        if save_job[0] is not None:
+            root.after_cancel(save_job[0])
+            save_job[0] = None
+        try:
+            save_settings(snapshot())
+        except OSError as e:
+            note.set(f"settings not saved: {e}")
+
+    def schedule_save():
+        # debounce: typing in an entry writes the variable on every key
+        if save_job[0] is not None:
+            root.after_cancel(save_job[0])
+        save_job[0] = root.after(1000, save_now)
+
+    def profile_dir():
+        return v["profile_dir"].get() or os.path.dirname(SETTINGS_FILE)
+
+    def save_as():
+        p = filedialog.asksaveasfilename(title="Save settings as", initialdir=profile_dir(),
+                                         initialfile="avtp_talker_settings.json", defaultextension=".json",
+                                         filetypes=[("Talker settings", "*.json"), ("All", "*.*")])
+        if not p:
+            return
+        try:
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(snapshot(), f, indent=2)
+        except OSError as e:
+            messagebox.showerror("AVTP Talker", f"Cannot save settings:\n{e}")
+            return
+        v["profile_dir"].set(os.path.dirname(p))
+        note.set(f"saved {p}")
+
+    def load_from():
+        if talker.running:
+            messagebox.showinfo("AVTP Talker", "Stop the stream before loading other settings.")
+            return
+        p = filedialog.askopenfilename(title="Load settings", initialdir=profile_dir(),
+                                       filetypes=[("Talker settings", "*.json"), ("All", "*.*")])
+        if not p:
+            return
+        try:
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
+            if not isinstance(d, dict) or not set(d) & set(DEFAULTS):
+                raise ValueError("not an AVTP talker settings file")
+        except (OSError, ValueError) as e:
+            messagebox.showerror("AVTP Talker", f"Cannot load settings:\n{e}")
+            return
+        missing = apply_settings(d)
+        v["profile_dir"].set(os.path.dirname(p))
+        text = f"loaded {p}"
+        if missing:
+            text += "  (interface " + " / ".join(missing) + " not on this PC: select it)"
+        note.set(text)
+
     info_cache = {}
     data_cache = {}
     peak_cache = {}
@@ -1186,16 +1270,23 @@ def run_gui():
         stop_btn.config(state="normal")
 
     def on_close():
+        save_now()
         talker.stop()
         root.after(200, root.destroy)
 
+    def on_change(*_):
+        refresh_info()
+        schedule_save()
+
     start_btn.config(command=on_start)
     stop_btn.config(command=talker.stop)
+    save_as_btn.config(command=save_as)
+    load_btn.config(command=load_from)
     root.protocol("WM_DELETE_WINDOW", on_close)
     for var in v.values():
-        var.trace_add("write", lambda *_: refresh_info())
-    dev_var.trace_add("write", lambda *_: refresh_info())
-    dev_b_var.trace_add("write", lambda *_: refresh_info())
+        var.trace_add("write", on_change)
+    dev_var.trace_add("write", on_change)
+    dev_b_var.trace_add("write", on_change)
     refresh_info()
     tick()
     root.mainloop()
