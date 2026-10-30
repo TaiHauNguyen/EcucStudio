@@ -268,10 +268,15 @@ luồng AAF (sine hoặc file audio) ra card mạng PC, ví dụ qua media conve
 
 ```bat
 python scripts\avtp_talker.py              rem GUI
-python scripts\avtp_talker.py --list       rem card mạng Npcap + MAC
+python scripts\avtp_talker.py --list       rem card mạng Npcap + MAC + trạng thái link
 python scripts\avtp_talker.py --selftest   rem dựng thử gói (không gửi), in header
 ```
 
+- GUI có 2 tab. **User**: chỉ chọn bài hát (danh sách file audio cùng thư mục, hoặc *Browse…*) và kéo âm lượng
+  0–100 % (đường cong bình phương: 50 % = −12 dB); đổi âm lượng khi đang phát thì có hiệu lực sau khoảng một lô
+  gửi, gain chuyển dần trong một lô nên không bị click; chọn bài khác khi đang phát thì stream chuyển sang bài đó
+  luôn. Tab này cũng hiện bài đang phát, thời gian, link của card A / B và gói đang ra card nào. **Admin**: mọi
+  thông số stream bên dưới; âm lượng 100 % = *File gain* của Admin (Admin đặt mức trần).
 - Thiết lập: MAC nguồn/đích, Stream ID, VLAN (VID/PCP), presentation offset; sample rate, số kênh, bit depth
   (16/24/32 → AAF INT_16/24/32BIT), samples/frame, link speed, số frame (0 = tới khi STOP); nguồn sine (tần số,
   âm lượng) hoặc file WAV / MP3 / FLAC / OGG (loop, kênh thiếu: lặp lại / im lặng, gain). File khác sample rate
@@ -286,17 +291,26 @@ python scripts\avtp_talker.py --selftest   rem dựng thử gói (không gửi),
   Trạng thái: số gói, gói/s, catch-up, late (thời gian đã mất, độ trễ lớn nhất); đồng hồ dừng khi STOP.
 - "Receiver requirement" (rate / kênh / bit / samples / payload tối đa) là thứ bên nhận chấp nhận; khung "Computed"
   tính payload, độ dài AVTP, frame trên dây, chu kỳ, gói/s, băng thông và báo có khớp requirement không.
-- IEEE 802.1CB (FRER, phía phát): chèn R-TAG (0xF1C1, reserved 0, sequence 16 bit, số bắt đầu chỉnh được) ngay
-  sau VLAN tag; nhân bản mỗi gói thành 2 bản giống hệt (cùng sequence): `same` = 2 bản trên cùng card mạng,
-  `second` = bản B ra card mạng thứ hai (2 đường vào ring); bản B trễ một khoảng đặt được (µs, có thể lớn hơn
-  một lô gửi); bỏ ngẫu nhiên x % bản A / bản B để kiểm tra sequence recovery phía nhận lấp đủ. Trạng thái đếm
-  riêng gói gửi / bỏ của A và B. Bên nhận phải gỡ R-TAG trước host (Egress Treatment RemoveRTag), port trên
-  đường đi cần max frame length / MAXSDU + 6 byte.
+- IEEE 802.1CB (FRER, phía phát), chỉ khi tick *Enable 802.1CB*: chèn R-TAG (0xF1C1, reserved 0, sequence 16 bit,
+  số bắt đầu chỉnh được) ngay sau VLAN tag; nhân bản mỗi gói thành 2 bản giống hệt (cùng sequence): `same` = 2 bản
+  trên cùng card mạng, `second` = bản B ra card mạng thứ hai (2 đường vào ring); bản B trễ một khoảng đặt được (µs,
+  có thể lớn hơn một lô gửi); bỏ ngẫu nhiên x % bản A / bản B để kiểm tra sequence recovery phía nhận lấp đủ.
+  Trạng thái đếm riêng gói gửi / bỏ của A và B. Bên nhận phải gỡ R-TAG trước host (Egress Treatment RemoveRTag),
+  port trên đường đi cần max frame length / MAXSDU + 6 byte. **Tắt 802.1CB thì không bao giờ có gói trùng**: mỗi
+  gói gửi đúng 1 lần, chỉ ra card A (không R-TAG, không nhân bản, không drop), các ô còn lại của mục này bị làm
+  mờ và bỏ qua dù setting cũ có `same` / `second`.
+- Link card mạng: trước mỗi lô gửi tool đọc trạng thái link của từng card (iphlpapi `GetIfEntry2`, không cần
+  Npcap hay quyền admin; `--list` và GUI cũng hiện trạng thái này). Card không có link thì không gửi gì, bản của
+  card đó bị bỏ chứ **không chuyển sang card kia**, nên rút cáp một đường không bao giờ sinh gói trùng; ví dụ
+  `second` mà card B mất link thì chỉ còn bản A, cắm lại thì bản B chạy tiếp theo lịch chung. Trạng thái đếm số
+  gói không gửi vì mất link (`no link`). Mọi card đều mất link thì stream vẫn chạy đúng nhịp nhưng không gửi (bài
+  hát không bị tua nhanh); START báo lỗi nếu không card nào có link. Trạng thái không xác định (loopback, không
+  tìm thấy adapter) được coi là có link.
 - `avtp_timestamp` lấy từ đồng hồ PC, không phải gPTP. Npcap cài chế độ chỉ cho Administrator thì GUI tự xin quyền
   (UAC).
-- Setting tự lưu vào `%APPDATA%\avtp_talker\settings.json` 1 s sau mỗi thay đổi và khi đóng cửa sổ. Nút
-  *Save as…* / *Load…* (đầu cửa sổ) lưu / nạp bộ setting có tên (file JSON) cho từng kiểu test; khi nạp trên máy
-  khác mà không có card mạng đã lưu thì tool báo để chọn lại.
+- Setting (cả bài hát và âm lượng) tự lưu vào `%APPDATA%\avtp_talker\settings.json` 1 s sau mỗi thay đổi và khi
+  đóng cửa sổ. Nút *Save as…* / *Load…* (đầu tab Admin) lưu / nạp bộ setting có tên (file JSON) cho từng kiểu
+  test; khi nạp trên máy khác mà không có card mạng đã lưu thì tool báo để chọn lại.
 
 ## Script: đổi MP3 sang WAV
 

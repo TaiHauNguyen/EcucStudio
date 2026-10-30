@@ -16,13 +16,22 @@ packets at 2x the stream rate until back on schedule; later than that, the sched
 interface (counted as 'late' / 'lost'). While sending, the process runs at high priority without power
 throttling, with a 1 ms system timer and no garbage collection pauses.
 
+The GUI has two tabs: "User" only picks the song (the audio files of one folder, or Browse...) and the volume
+(also while playing; a song picked while playing continues the stream with that song), "Admin" holds every
+stream setting. The volume scales the admin's "File gain" (volume 100 % = File gain).
+
 The "Receiver requirement" fields (sample rate, channels, bit depth, samples per frame, max payload)
 describe what the receiver under test accepts; the "Computed" panel checks the stream against them.
 
-IEEE 802.1CB (FRER) talker side: optional R-TAG (EtherType 0xF1C1, reserved 0, 16-bit sequence number)
-after the VLAN tag; replication of every packet as two identical copies (same sequence number) either on
-the same interface or with copy B on a second interface (two paths into a ring), copy B delayed by a set
-time; random loss of copy A / copy B to check that the listener's sequence recovery fills the gaps.
+IEEE 802.1CB (FRER) talker side, only while "Enable 802.1CB" is on: R-TAG (EtherType 0xF1C1, reserved 0,
+16-bit sequence number) after the VLAN tag; replication of every packet as two identical copies (same
+sequence number) either on the same interface or with copy B on a second interface (two paths into a ring),
+copy B delayed by a set time; random loss of copy A / copy B to check that the listener's sequence recovery
+fills the gaps. With 802.1CB off every packet goes out once, on interface A only.
+
+Link check: before every batch the link state of each interface is read (iphlpapi, not Npcap). An interface
+without link sends nothing; its copies are left out, never moved to the other interface, so a missing link never
+turns into a duplicate. With no link anywhere the stream keeps its timeline without sending (START refuses).
 
 Needs Windows, Npcap, numpy (tkinter for the GUI); soundfile only for non-WAV files. If Npcap was
 installed with "Restrict Npcap driver's access to Administrators only", the GUI restarts itself elevated
@@ -42,6 +51,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 
 import numpy as np
 
@@ -230,6 +240,73 @@ def mac_for_device(dev_name, macs):
 
 
 # --------------------------------------------------------------------------------------------
+# Link state of an interface (iphlpapi GetIfEntry2: no Npcap call, no administrator rights)
+# --------------------------------------------------------------------------------------------
+LINK_UP, LINK_DOWN, LINK_UNKNOWN = "up", "down", "unknown"
+IF_OPER_UP = 1
+IF_OPER_NO_LINK = (2, 6, 7)     # down, not present, lower layer down
+MEDIA_DISCONNECTED = 2
+
+
+class _Guid(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16), ("Data3", ctypes.c_uint16),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+class _MibIfRow2(ctypes.Structure):
+    """MIB_IF_ROW2 (netioapi.h), 1352 bytes."""
+    _fields_ = [("InterfaceLuid", ctypes.c_uint64), ("InterfaceIndex", ctypes.c_uint32),
+                ("InterfaceGuid", _Guid), ("Alias", ctypes.c_wchar * 257), ("Description", ctypes.c_wchar * 257),
+                ("PhysicalAddressLength", ctypes.c_uint32), ("PhysicalAddress", ctypes.c_ubyte * 32),
+                ("PermanentPhysicalAddress", ctypes.c_ubyte * 32), ("Mtu", ctypes.c_uint32),
+                ("Type", ctypes.c_uint32), ("TunnelType", ctypes.c_int), ("MediaType", ctypes.c_int),
+                ("PhysicalMediumType", ctypes.c_int), ("AccessType", ctypes.c_int),
+                ("DirectionType", ctypes.c_int), ("InterfaceAndOperStatusFlags", ctypes.c_ubyte),
+                ("OperStatus", ctypes.c_int), ("AdminStatus", ctypes.c_int), ("MediaConnectState", ctypes.c_int),
+                ("NetworkGuid", _Guid), ("ConnectionType", ctypes.c_int), ("TransmitLinkSpeed", ctypes.c_uint64),
+                ("ReceiveLinkSpeed", ctypes.c_uint64), ("Counters", ctypes.c_uint64 * 18)]
+
+
+_luids = {}     # Npcap device name -> interface LUID
+
+
+def link_state(dev_name):
+    """(LINK_UP / LINK_DOWN / LINK_UNKNOWN, transmit speed in bit/s) of the interface behind an Npcap device name
+    (\\Device\\NPF_{GUID}). Unknown (loopback, adapter not found, not Windows) does not count as 'no link'."""
+    if os.name != "nt" or "{" not in dev_name or "}" not in dev_name:
+        return LINK_UNKNOWN, 0
+    try:
+        ip = ctypes.windll.iphlpapi
+        luid = _luids.get(dev_name)
+        if luid is None:
+            u = uuid.UUID(dev_name[dev_name.index("{"):dev_name.index("}") + 1])
+            guid = _Guid(u.fields[0], u.fields[1], u.fields[2], (ctypes.c_ubyte * 8)(*u.bytes[8:]))
+            out = ctypes.c_uint64()
+            if ip.ConvertInterfaceGuidToLuid(ctypes.byref(guid), ctypes.byref(out)) != 0:
+                return LINK_UNKNOWN, 0
+            luid = _luids[dev_name] = out.value
+        row = _MibIfRow2(InterfaceLuid=luid)
+        if ip.GetIfEntry2(ctypes.byref(row)) != 0:
+            _luids.pop(dev_name, None)  # adapter removed: look the LUID up again next time
+            return LINK_UNKNOWN, 0
+    except (OSError, ValueError, AttributeError):
+        return LINK_UNKNOWN, 0
+    if row.OperStatus == IF_OPER_UP:
+        return LINK_UP, row.TransmitLinkSpeed
+    if row.MediaConnectState == MEDIA_DISCONNECTED or row.OperStatus in IF_OPER_NO_LINK:
+        return LINK_DOWN, 0
+    return LINK_UNKNOWN, 0
+
+
+def link_text(state, speed=0):
+    if state == LINK_UP:
+        if speed >= 1_000_000_000:
+            return f"link up, {speed / 1e9:g} Gbps"
+        return f"link up, {speed / 1e6:g} Mbps" if speed else "link up"
+    return "NO LINK" if state == LINK_DOWN else "link state unknown"
+
+
+# --------------------------------------------------------------------------------------------
 # Audio sources -> float64 array (n_samples, channels) in [-1, 1]
 # --------------------------------------------------------------------------------------------
 def read_wav(path):
@@ -382,7 +459,8 @@ class SineSource:
 
 
 class FileSource:
-    """Decoded audio file; channels are mapped per chunk so a long file stays at its own channel count."""
+    """Decoded audio file; channels are mapped per chunk so a long file stays at its own channel count.
+    'gain' may change while streaming (volume): the next chunk ramps from the old gain to the new one, no click."""
     def __init__(self, data, channels, missing, gain, loop):
         if data.shape[0] == 0:
             raise ValueError("audio file has no samples")
@@ -390,6 +468,7 @@ class FileSource:
         self.channels = channels
         self.missing = missing
         self.gain = gain
+        self.gain_now = gain
         self.loop = loop
         self.pos = 0
 
@@ -403,10 +482,22 @@ class FileSource:
             chunk = self.data[self.pos:self.pos + n]
             self.pos += chunk.shape[0]
             ended = self.pos >= total
-        return map_channels(chunk, self.channels, self.missing) * self.gain, ended
+        out = map_channels(chunk, self.channels, self.missing)
+        gain = self.gain
+        if gain != self.gain_now and out.shape[0]:
+            ramp = np.linspace(self.gain_now, gain, out.shape[0], endpoint=False)
+            self.gain_now = gain
+            return out * ramp[:, None], ended
+        return out * gain, ended
 
 
 WavSource = FileSource
+
+
+def volume_gain(pct):
+    """Volume 0..100 % -> linear gain, squared curve: 100 % = 1.0, 50 % = 0.25 (-12 dB), 0 % = silence."""
+    p = min(max(float(pct), 0.0), 100.0) / 100.0
+    return p * p
 
 
 # --------------------------------------------------------------------------------------------
@@ -439,18 +530,24 @@ class StreamConfig:
         self.link_mbps = float(s["link_speed"])
         self.frames_to_send = int(s["frames_to_send"])
         self.pres_offset_ns = int(float(s["pres_offset_ms"]) * 1_000_000)
-        # 802.1CB
+        # 802.1CB: "rtag" is the on switch. Off = one copy of every packet, no R-TAG, no loss injection, so a
+        # stream without 802.1CB is never sent twice whatever the other 802.1CB fields say
         self.rtag = bool(s.get("rtag", False))
-        self.rtag_seq_start = int(str(s.get("rtag_seq_start", "0")).strip() or "0", 0)
-        self.replication = str(s.get("replication", "off")).strip().lower()
-        self.copy_b_delay_ns = int(float(s.get("copy_b_delay_us", "0") or 0) * 1000)
-        self.drop_pct = {"A": float(s.get("drop_a_pct", "0") or 0), "B": float(s.get("drop_b_pct", "0") or 0)}
-        if not 0 <= self.rtag_seq_start <= 0xFFFF:
-            raise ValueError("R-TAG start sequence must be 0..65535 (0x0000..0xFFFF)")
-        if self.replication not in REPLICATION_MODES:
-            raise ValueError("replication must be off, same or second")
-        if self.copy_b_delay_ns < 0 or not all(0.0 <= p <= 100.0 for p in self.drop_pct.values()):
-            raise ValueError("copy B delay >= 0, drop 0..100 %")
+        self.rtag_seq_start = 0
+        self.replication = "off"
+        self.copy_b_delay_ns = 0
+        self.drop_pct = {"A": 0.0, "B": 0.0}
+        if self.rtag:
+            self.rtag_seq_start = int(str(s.get("rtag_seq_start", "0")).strip() or "0", 0)
+            self.replication = str(s.get("replication", "off")).strip().lower()
+            self.copy_b_delay_ns = int(float(s.get("copy_b_delay_us", "0") or 0) * 1000)
+            self.drop_pct = {"A": float(s.get("drop_a_pct", "0") or 0), "B": float(s.get("drop_b_pct", "0") or 0)}
+            if not 0 <= self.rtag_seq_start <= 0xFFFF:
+                raise ValueError("R-TAG start sequence must be 0..65535 (0x0000..0xFFFF)")
+            if self.replication not in REPLICATION_MODES:
+                raise ValueError("replication must be off, same or second")
+            if self.copy_b_delay_ns < 0 or not all(0.0 <= p <= 100.0 for p in self.drop_pct.values()):
+                raise ValueError("copy B delay >= 0, drop 0..100 %")
         if self.rate not in NSR_CODES:
             raise ValueError(f"sample rate {self.rate} has no AAF nsr code")
         if self.bit_depth not in FORMAT_CODES:
@@ -528,10 +625,15 @@ def computed_text(cfg, req):
         f"Frame rate       {cfg.pps:10.1f} /s",
         f"Transmit time    {cfg.wire_len * 8 / cfg.link_mbps:12.3f} us @ {cfg.link_mbps:g} Mbps",
     ]
-    if cfg.replication == "same":
+    if not cfg.rtag:
+        lines.append("Copies                  1 per packet on interface A (802.1CB off)")
+    elif cfg.replication == "same":
         lines.append("Copies                  2 per packet on interface A (link load x2)")
     elif cfg.replication == "second":
-        lines.append("Copies                  2 per packet: A on interface A, B on interface B")
+        lines.append("Copies                  2 per packet: A on interface A, B on interface B "
+                     "(each only while its link is up)")
+    else:
+        lines.append("Copies                  1 per packet on interface A (R-TAG, no replication)")
     lines += [f"Bandwidth        {load:12.3f} Mbps  ({util:.2f} % of link)", ""]
     bad = req.mismatches(cfg)
     if bad:
@@ -710,12 +812,18 @@ class Talker:
     All lanes share one schedule (t_base + shift_ns): when a lane is late by more than the catch-up limit,
     the schedule skips ahead for every lane, so copies A and B stay aligned for the listener's sequence
     recovery. Late by less than the limit, the overdue packets go out at CATCH_UP_SPEED x the stream rate
-    (not as a line-rate burst that could overflow the listener's receive ring) until back on schedule."""
+    (not as a line-rate burst that could overflow the listener's receive ring) until back on schedule.
+
+    A lane only sends while its interface has a link: link(name) is read before a batch is queued and again
+    before it is sent ('unknown' counts as up). Without link the batch is left out (counted in 'no_link'), never
+    moved to another lane, so a missing link never turns into a duplicate. When nothing could be queued (no
+    link anywhere) the builder waits until the batch is due, so the stream keeps its timeline."""
 
     CATCH_UP_SPEED = 2
 
-    def __init__(self, pcap):
+    def __init__(self, pcap, link=None):
         self.pcap = pcap
+        self.link = link or (lambda name: link_state(name)[0])
         self.stop_evt = threading.Event()
         self.lock = threading.Lock()
         self.threads = []
@@ -726,6 +834,7 @@ class Talker:
     def reset_stats(self):
         self.sent = {"A": 0, "B": 0}
         self.dropped = {"A": 0, "B": 0}  # copies left out on purpose (loss injection)
+        self.no_link = {"A": 0, "B": 0}  # copies not sent because their interface had no link
         self.late = 0       # schedule skipped ahead (the stream lost that much time)
         self.lost_ns = 0    # total time skipped
         self.max_late_ns = 0
@@ -744,25 +853,33 @@ class Talker:
         """devices: interface name of copy A, or {'A': name, 'B': name} (B used when replication = 'second')."""
         if isinstance(devices, str):
             devices = {"A": devices}
+        names = [devices["A"]]
+        if cfg.replication == "second":
+            if not devices.get("B"):
+                raise ValueError("replication 'second' needs interface B")
+            names.append(devices["B"])
+        if all(self.link(n) == LINK_DOWN for n in names):
+            raise ValueError("No link on interface A" + (" or B" if len(names) > 1 else "") + ": check the cable.")
         self.reset_stats()
         self.stop_evt.clear()
         self.cfg = cfg
         self.catch_up_ns = max(0, int(catch_up_ms * 1_000_000))
-        self.handles = [self.pcap.open(devices["A"])]
-        if cfg.replication == "second":
-            if not devices.get("B"):
-                self.pcap.close(self.handles[0])
-                raise ValueError("replication 'second' needs interface B")
-            try:
-                self.handles.append(self.pcap.open(devices["B"]))
-            except Exception:
-                self.pcap.close(self.handles[0])
-                raise
+        self.lane_names = names
+        self.handles = []
+        try:
+            for n in names:
+                self.handles.append(self.pcap.open(n))
+        except Exception:
+            for h in self.handles:
+                self.pcap.close(h)
+            raise
         self.path_lane = {"A": 0, "B": len(self.handles) - 1}
         self.carry = [[] for _ in self.handles]
         self.rng = random.Random(seed)
         self.builder = PacketBuilder(cfg, source)
         self.batch = max(1, int(round(batch_ms / 1000.0 * cfg.pps)))
+        self.batch_ns = cfg.send_offset_ns(self.batch)
+        self.batch_t0 = 0
         self.use_queue = mode == "sendqueue" and self.pcap.has_sendqueue
         self.queues = [queue.Queue(maxsize=3) for _ in self.handles]
         self.lanes_left = len(self.handles)
@@ -785,6 +902,15 @@ class Talker:
         self.errors.append(msg)
         self.stop_evt.set()
 
+    def _up(self, lane):
+        return self.link(self.lane_names[lane]) != LINK_DOWN
+
+    def _skip(self, ev):
+        """Copies of a lane without link: not sent, not sent elsewhere either."""
+        with self.lock:
+            for _, _, p in ev:
+                self.no_link[p] += 1
+
     def _next_batch(self, count):
         """Send events of the next batch per lane, sorted by time; None when the stream is over."""
         cfg = self.cfg
@@ -799,6 +925,7 @@ class Talker:
                         self.dropped[p] += 1
                         continue
                     new[self.path_lane[p]].append((t + (cfg.copy_b_delay_ns if p == "B" else 0), frame, p))
+            self.batch_t0 = cfg.send_offset_ns(first)
             cutoff = cfg.send_offset_ns(first + len(frames))
         elif any(self.carry):
             cutoff = None                      # end of stream: flush what was carried over
@@ -822,8 +949,12 @@ class Talker:
                 lanes = self._next_batch(self.batch)
                 if lanes is None:
                     break
+                queued = False
                 for lane, ev in enumerate(lanes):
                     if not ev:
+                        continue
+                    if not self._up(lane):
+                        self._skip(ev)
                         continue
                     if self.use_queue:
                         start_us = ev[0][0] // 1000
@@ -831,20 +962,43 @@ class Talker:
                                                             [t // 1000 - start_us for t, _, _ in ev])
                     else:
                         squeue, size = None, 0
-                    while True:
-                        try:
-                            self.queues[lane].put((squeue, size, ev), timeout=0.1)
-                            break
-                        except queue.Full:
-                            if self.stop_evt.is_set():
-                                if squeue is not None:
-                                    self.pcap.destroy_queue(squeue)
-                                return
+                    if self._put(lane, (squeue, size, ev)):
+                        queued = True
+                    elif self.stop_evt.is_set():
+                        return
+                if not queued:
+                    self._wait_due()
         except Exception as e:  # noqa: BLE001 - report any build error in the GUI
             self._fail(f"build: {e}")
         finally:
             for q in self.queues:
                 q.put(None)
+
+    def _put(self, lane, item):
+        """Queue a batch for a lane; False when the stream stopped or the interface lost its link while the
+        lane's queue was full (the batch is then left out)."""
+        while True:
+            try:
+                self.queues[lane].put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                stopped = self.stop_evt.is_set()
+                if stopped or not self._up(lane):
+                    if item[0] is not None:
+                        self.pcap.destroy_queue(item[0])
+                    if not stopped:
+                        self._skip(item[2])
+                    return False
+
+    def _wait_due(self):
+        """Nothing was queued (no link, or every copy dropped): wait until the batch is due, two batches ahead
+        like a running stream, instead of racing through the source."""
+        target = self.t_base + self.shift_ns + self.batch_t0 - 2 * self.batch_ns
+        while not self.stop_evt.is_set():
+            left = target - time.perf_counter_ns()
+            if left <= 0:
+                return
+            self.stop_evt.wait(min(left / 1e9, 0.05))
 
     def _schedule(self, t, now):
         """Scheduled send time of stream time t, after skipping the shared schedule ahead when the lane is
@@ -887,6 +1041,10 @@ class Talker:
                 if self.stop_evt.is_set():
                     self.pcap.destroy_queue(squeue)
                     continue
+                if not self._up(lane):
+                    self.pcap.destroy_queue(squeue)
+                    self._skip(ev)
+                    continue
                 now = time.perf_counter_ns()
                 sched = self._schedule(ev[0][0], now)
                 if now - sched > period:
@@ -902,6 +1060,9 @@ class Talker:
                 sent = self.pcap.transmit_queue(handle, squeue, sync=True)
                 self.pcap.destroy_queue(squeue)
                 if sent < size:
+                    if not self._up(lane):      # cable pulled during the batch
+                        self._skip(ev)
+                        continue
                     self._fail("pcap_sendqueue_transmit: " + self.pcap.error(handle))
                     continue
                 for _, _, p in ev:
@@ -924,12 +1085,19 @@ class Talker:
                     break
                 if self.stop_evt.is_set():
                     continue
-                for t, frame, p in item[2]:
+                ev = item[2]
+                if not self._up(lane):
+                    self._skip(ev)
+                    continue
+                for i, (t, frame, p) in enumerate(ev):
                     now = time.perf_counter_ns()
                     send_at = max(self._schedule(t, now), next_free)
                     if send_at > now:
                         self._wait_until(send_at)
                     if self.pcap.send(handle, frame) != 0:
+                        if not self._up(lane):  # cable pulled during the batch
+                            self._skip(ev[i:])
+                            break
                         self._fail("pcap_sendpacket: " + self.pcap.error(handle))
                         break
                     self.sent[p] += 1
@@ -974,8 +1142,9 @@ DEFAULTS = {
     "req_samples_per_frame": "12", "req_max_payload": "384",
     "rtag": False, "rtag_seq_start": "0", "replication": "off", "device_b": "",
     "copy_b_delay_us": "0", "drop_a_pct": "0", "drop_b_pct": "0",
-    "profile_dir": "",
+    "volume": "100", "profile_dir": "",
 }
+AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg")
 
 
 def load_settings():
@@ -992,6 +1161,11 @@ def save_settings(d):
     os.makedirs(os.path.dirname(SETTINGS_FILE), exist_ok=True)
     with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(d, f, indent=2)
+
+
+def mmss(seconds):
+    sec = int(seconds)
+    return f"{sec // 60:02d}:{sec % 60:02d}"
 
 
 def run_gui():
@@ -1017,10 +1191,17 @@ def run_gui():
         if name == s.get("device_b"):
             dev_b_var.set(label)
 
-    # START / STOP bar stays at the bottom, settings bar at the top; everything else scrolls
+    # START / STOP bar stays at the bottom under both tabs. "User" only picks the song and the volume; "Admin" has
+    # the settings bar and the statistics at the top, every stream setting below them scrolls
     bar = ttk.Frame(root, padding=8)
     bar.pack(side="bottom", fill="x")
-    top = ttk.Frame(root, padding=(8, 6, 8, 0))
+    tabs = ttk.Notebook(root)
+    tabs.pack(side="top", fill="both", expand=True, padx=6, pady=(6, 0))
+    user = ttk.Frame(tabs, padding=16)
+    admin = ttk.Frame(tabs)
+    tabs.add(user, text="  User  ")
+    tabs.add(admin, text="  Admin  ")
+    top = ttk.Frame(admin, padding=(8, 6, 8, 0))
     top.pack(side="top", fill="x")
     ttk.Label(top, text="Settings:").pack(side="left")
     save_as_btn = ttk.Button(top, text="Save as...")
@@ -1029,7 +1210,10 @@ def run_gui():
     load_btn.pack(side="left", padx=6)
     note = tk.StringVar(value="saved automatically to " + SETTINGS_FILE)
     ttk.Label(top, textvariable=note, foreground="gray").pack(side="left", padx=6)
-    outer = ttk.Frame(root)
+    stats = tk.StringVar(value="Idle")
+    ttk.Label(admin, textvariable=stats, padding=(8, 4, 8, 2), wraplength=740, justify="left").pack(side="top",
+                                                                                                    fill="x")
+    outer = ttk.Frame(admin)
     outer.pack(side="top", fill="both", expand=True)
     canvas = tk.Canvas(outer, highlightthickness=0)
     vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
@@ -1043,7 +1227,7 @@ def run_gui():
     canvas.bind("<Configure>", lambda e: canvas.itemconfigure(body_win, width=e.width))
 
     def on_wheel(e):
-        if body.winfo_height() > canvas.winfo_height():
+        if tabs.select() == str(admin) and body.winfo_height() > canvas.winfo_height():
             canvas.yview_scroll(int(-e.delta / 120), "units")
     canvas.bind_all("<MouseWheel>", on_wheel)
     root.geometry("780x720")
@@ -1066,10 +1250,20 @@ def run_gui():
                 return name
         return ""
 
+    def interface_box(frm, var, link_var):
+        """Interface combobox with its link state on the right."""
+        row = ttk.Frame(frm)
+        box = ttk.Combobox(row, textvariable=var, values=dev_labels, state="readonly", width=50)
+        box.pack(side="left", fill="x", expand=True)
+        ttk.Label(row, textvariable=link_var, width=22).pack(side="left", padx=(8, 0))
+        return row, box
+
     # Network
     net = section("Network", 0)
-    dev_box = field(net, 0, "Interface", ttk.Combobox(net, textvariable=dev_var, values=dev_labels,
-                                                      state="readonly", width=70))
+    link_a = tk.StringVar()
+    link_b = tk.StringVar()
+    dev_row, dev_box = interface_box(net, dev_var, link_a)
+    field(net, 0, "Interface", dev_row)
 
     def on_dev(_evt=None):
         name = selected_device()
@@ -1103,32 +1297,45 @@ def run_gui():
     ttk.Label(st, text="Frames to send = 0 means keep sending until STOP is pressed",
               foreground="gray").grid(row=6, column=0, columnspan=2, sticky="w")
 
-    # IEEE 802.1CB
+    # IEEE 802.1CB: every field but the on switch is greyed out while it is off
     cb = section("IEEE 802.1CB (FRER talker)", 2)
     rt = ttk.Frame(cb)
-    ttk.Checkbutton(rt, text="Add R-TAG (EtherType 0xF1C1)", variable=v["rtag"]).pack(side="left")
-    ttk.Label(rt, text="   Start sequence (0..65535 or 0x..)").pack(side="left")
-    ttk.Entry(rt, textvariable=v["rtag_seq_start"], width=8).pack(side="left", padx=(4, 0))
+    ttk.Checkbutton(rt, text="Enable 802.1CB (R-TAG 0xF1C1)", variable=v["rtag"]).pack(side="left")
+    ttk.Label(rt, text="   Start sequence (0..65535 / 0x..)").pack(side="left")
+    seq_entry = ttk.Entry(rt, textvariable=v["rtag_seq_start"], width=8)
+    seq_entry.pack(side="left", padx=(4, 0))
     field(cb, 0, "", rt)
     rp = ttk.Frame(cb)
-    ttk.Combobox(rp, textvariable=v["replication"], values=list(REPLICATION_MODES), state="readonly",
-                 width=8).pack(side="left")
+    repl_box = ttk.Combobox(rp, textvariable=v["replication"], values=list(REPLICATION_MODES), state="readonly",
+                            width=8)
+    repl_box.pack(side="left")
     ttk.Label(rp, text="  off = 1 copy, same = 2 copies on interface A, second = copy B on interface B",
               foreground="gray").pack(side="left")
     field(cb, 1, "Replication", rp)
-    field(cb, 2, "Interface B", ttk.Combobox(cb, textvariable=dev_b_var, values=dev_labels, state="readonly",
-                                             width=70))
+    dev_b_row, dev_b_box = interface_box(cb, dev_b_var, link_b)
+    field(cb, 2, "Interface B", dev_b_row)
     dl = ttk.Frame(cb)
     ttk.Label(dl, text="Copy B delay (us)").pack(side="left")
-    ttk.Entry(dl, textvariable=v["copy_b_delay_us"], width=8).pack(side="left", padx=(4, 16))
+    delay_entry = ttk.Entry(dl, textvariable=v["copy_b_delay_us"], width=8)
+    delay_entry.pack(side="left", padx=(4, 16))
     ttk.Label(dl, text="Drop copy A (%)").pack(side="left")
-    ttk.Entry(dl, textvariable=v["drop_a_pct"], width=6).pack(side="left", padx=(4, 16))
+    drop_a_entry = ttk.Entry(dl, textvariable=v["drop_a_pct"], width=6)
+    drop_a_entry.pack(side="left", padx=(4, 16))
     ttk.Label(dl, text="Drop copy B (%)").pack(side="left")
-    ttk.Entry(dl, textvariable=v["drop_b_pct"], width=6).pack(side="left", padx=(4, 0))
+    drop_b_entry = ttk.Entry(dl, textvariable=v["drop_b_pct"], width=6)
+    drop_b_entry.pack(side="left", padx=(4, 0))
     field(cb, 3, "", dl)
-    ttk.Label(cb, text="Both copies are identical (same R-TAG sequence). Drops are random, to check that the "
+    ttk.Label(cb, text="Off: every packet is sent once, on interface A only (no R-TAG, no replication, no drops). "
+                       "On: both copies are identical (same R-TAG sequence); an interface without link sends "
+                       "nothing and its copy is not sent anywhere else. Drops are random, to check that the "
                        "listener's sequence recovery fills the gaps.",
               foreground="gray", wraplength=700, justify="left").grid(row=4, column=0, columnspan=2, sticky="w")
+    cb_widgets = (seq_entry, repl_box, dev_b_box, delay_entry, drop_a_entry, drop_b_entry)
+
+    def on_rtag(*_):
+        on = bool(v["rtag"].get())
+        for w in cb_widgets:
+            w.config(state=("readonly" if isinstance(w, ttk.Combobox) else "normal") if on else "disabled")
 
     # Source
     sc = section("Audio source", 3)
@@ -1144,8 +1351,7 @@ def run_gui():
     def browse():
         p = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3 *.flac *.ogg"), ("All", "*.*")])
         if p:
-            v["wav_path"].set(p)
-            v["source"].set("wav")
+            song_chosen(os.path.normpath(p))
     ttk.Button(wf, text="Browse...", command=browse).grid(row=0, column=1, padx=(4, 0))
     field(sc, 1, "Audio file", wf)
     lp = ttk.Frame(sc)
@@ -1158,8 +1364,9 @@ def run_gui():
     field(sc, 3, "Sine freq (Hz)", ttk.Entry(sc, textvariable=v["sine_freq"]))
     field(sc, 4, "Sine volume (0-1)", ttk.Entry(sc, textvariable=v["sine_volume"]))
     field(sc, 5, "File gain", ttk.Entry(sc, textvariable=v["file_gain"]))
-    ttk.Label(sc, text="Sine volume affects the sine tone only. File gain 1.0 keeps the file at its original level.",
-              foreground="gray").grid(row=6, column=0, columnspan=2, sticky="w")
+    ttk.Label(sc, text="Sine volume affects the sine tone only. File gain is the file level at volume 100 % on the "
+                       "User tab (1.0 = original level); the volume lowers it from there.",
+              foreground="gray", wraplength=700, justify="left").grid(row=6, column=0, columnspan=2, sticky="w")
 
     # Receiver requirement
     rq = section("Receiver requirement", 4)
@@ -1195,11 +1402,43 @@ def run_gui():
         row=0, column=0, sticky="w")
     ttk.Label(body, textvariable=warn, foreground="#c05000", padding=(10, 2), wraplength=640,
               justify="left").grid(row=7, column=0, sticky="w")
-    start_btn = ttk.Button(bar, text="START")
-    stop_btn = ttk.Button(bar, text="STOP", state="disabled")
+    start_btn = ttk.Button(bar, text="START", width=12)
+    stop_btn = ttk.Button(bar, text="STOP", width=12, state="disabled")
     start_btn.pack(side="left")
     stop_btn.pack(side="left", padx=8)
     ttk.Label(bar, textvariable=status).pack(side="left", padx=8)
+
+    # User tab: song (the audio files of one folder) and volume, what is playing, which interfaces send
+    user.columnconfigure(1, weight=1)
+    song_var = tk.StringVar()
+    song_info = tk.StringVar()
+    vol_var = tk.DoubleVar(value=100.0)
+    vol_text = tk.StringVar()
+    now_var = tk.StringVar(value="Stopped")
+    pos_var = tk.StringVar()
+    net_var = tk.StringVar()
+    ttk.Label(user, text="Song").grid(row=0, column=0, sticky="w", padx=(0, 12), pady=6)
+    song_box = ttk.Combobox(user, textvariable=song_var, state="readonly")
+    song_box.grid(row=0, column=1, sticky="ew", pady=6)
+    ttk.Button(user, text="Browse...", command=browse).grid(row=0, column=2, sticky="w", padx=(8, 0))
+    ttk.Label(user, textvariable=song_info, foreground="gray", wraplength=600, justify="left").grid(
+        row=1, column=1, columnspan=2, sticky="w")
+    ttk.Label(user, text="Volume").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=(18, 6))
+    ttk.Scale(user, from_=0, to=100, variable=vol_var).grid(row=2, column=1, sticky="ew", pady=(18, 6))
+    ttk.Label(user, textvariable=vol_text, width=18).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(18, 6))
+    ttk.Separator(user).grid(row=3, column=0, columnspan=3, sticky="ew", pady=14)
+    ttk.Label(user, textvariable=now_var, font=("Segoe UI", 11, "bold")).grid(row=4, column=0, columnspan=3,
+                                                                              sticky="w")
+    prog = ttk.Progressbar(user, mode="determinate", maximum=1.0)
+    prog.grid(row=5, column=0, columnspan=2, sticky="ew", pady=6)
+    ttk.Label(user, textvariable=pos_var, width=18).grid(row=5, column=2, sticky="w", padx=(8, 0))
+    ttk.Separator(user).grid(row=6, column=0, columnspan=3, sticky="ew", pady=14)
+    ttk.Label(user, text="Network").grid(row=7, column=0, sticky="nw", padx=(0, 12))
+    ttk.Label(user, textvariable=net_var, wraplength=600, justify="left").grid(row=7, column=1, columnspan=2,
+                                                                              sticky="w")
+    ttk.Label(user, text="Interface, addresses, 802.1CB and the stream format are set on the Admin tab.",
+              foreground="gray").grid(row=8, column=0, columnspan=3, sticky="w", pady=(24, 0))
+    playing = [""]      # file being streamed
 
     def snapshot():
         d = {k: var.get() for k, var in v.items()}
@@ -1295,13 +1534,153 @@ def run_gui():
         key = (path, rate if do_resample else None)
         if key not in data_cache:
             data_cache.clear()
+            before = status.get()
             status.set("Loading audio file...")
             root.update_idletasks()
-            src_rate, data = read_audio(path)
-            data_cache[key] = resample(data, src_rate, rate) if do_resample else data
+            try:
+                src_rate, data = read_audio(path)
+                data_cache[key] = resample(data, src_rate, rate) if do_resample else data
+            finally:
+                status.set(before)
             peak_cache[path] = float(np.abs(data_cache[key]).max())
             refresh_info()
         return data_cache[key]
+
+    def file_gain():
+        """File gain (Admin) scaled by the volume (User)."""
+        return float(v["file_gain"].get()) * volume_gain(v["volume"].get() or 0)
+
+    def refresh_songs(*_):
+        path = v["wav_path"].get()
+        folder = os.path.dirname(path)
+        try:
+            names = sorted((f for f in os.listdir(folder) if f.lower().endswith(AUDIO_EXTENSIONS)),
+                           key=str.lower) if folder else []
+        except OSError:
+            names = []
+        song_box.config(values=names)
+        song_var.set(os.path.basename(path))
+        if v["source"].get() != "wav":
+            song_info.set("The Admin tab has the sine test tone selected: pick a song to play a file.")
+        elif not path:
+            song_info.set("Browse... picks a song; the other songs of its folder are then in the list.")
+        else:
+            try:
+                rate, nch, frames = file_info(path)
+                song_info.set(f"{rate / 1000:g} kHz, {nch} channel(s), {mmss(frames / rate)}\nFolder: {folder}")
+            except (OSError, ValueError, RuntimeError) as e:
+                song_info.set(f"{e}")
+
+    def song_chosen(path):
+        """Song picked (User list or Browse...): while streaming, the stream goes on with this song."""
+        v["wav_path"].set(path)
+        v["source"].set("wav")
+        if not talker.running:
+            return
+        cfg = talker.cfg
+        try:
+            data = file_data(path, cfg.rate, bool(v["resample"].get()))
+            src = FileSource(data, cfg.channels, v["missing"].get(), file_gain(), bool(v["loop"].get()))
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror("AVTP Talker", f"Cannot play {path}:\n{e}")
+            return
+        talker.builder.source = src     # the builder reads the next batch from the new song
+        playing[0] = path
+
+    def on_song(_evt=None):
+        folder = os.path.dirname(v["wav_path"].get())
+        if song_var.get():
+            song_chosen(os.path.normpath(os.path.join(folder, song_var.get())))
+    song_box.bind("<<ComboboxSelected>>", on_song)
+
+    def on_slider(*_):
+        pct = str(int(round(vol_var.get())))
+        if v["volume"].get() != pct:
+            v["volume"].set(pct)
+
+    def on_volume(*_):
+        """Volume or File gain changed: slider, label and the gain of the file being played (ramps, no click)."""
+        try:
+            pct = min(max(float(v["volume"].get()), 0.0), 100.0)
+        except ValueError:
+            return
+        if abs(vol_var.get() - pct) >= 0.5:
+            vol_var.set(pct)
+        g = volume_gain(pct)
+        vol_text.set(f"{pct:.0f} %  ({20 * math.log10(g):.1f} dB)" if g > 0 else f"{pct:.0f} %  (mute)")
+        src = talker.builder.source if talker.running else None
+        if isinstance(src, FileSource):
+            try:
+                src.gain = file_gain()
+            except ValueError:
+                pass
+
+    def dev_desc(name):
+        return next((desc for n, desc in devices if n == name), name)
+
+    def refresh_links():
+        """Link of the selected interfaces (Admin) and which copies go out where (User: the running stream, else
+        the settings); runs on every tick."""
+        cache = {}
+
+        def state_of(name):
+            if name not in cache:
+                cache[name] = link_state(name)
+            return cache[name]
+
+        sel = {"A": selected_device(), "B": selected_device(dev_b_var)}
+        two_sel = bool(v["rtag"].get()) and v["replication"].get() == "second"
+        for p, var in (("A", link_a), ("B", link_b)):
+            if p == "B" and not two_sel:
+                var.set("not used")
+            else:
+                var.set(link_text(*state_of(sel[p])) if sel[p] else "not selected")
+        if talker.running:
+            rtag, repl, used = talker.cfg.rtag, talker.cfg.replication, list(talker.lane_names)
+        else:
+            rtag, repl = bool(v["rtag"].get()), v["replication"].get()
+            used = [sel["A"]] + ([sel["B"]] if two_sel else [])
+        two = rtag and repl == "second"
+        state, lines = {}, []
+        for p, name in zip("AB", used):
+            if not name:
+                lines.append(f"Interface {p}: not selected (Admin tab)")
+                continue
+            st, speed = state_of(name)
+            state[p] = st
+            lines.append(f"Interface {p}: {dev_desc(name)}  -  {link_text(st, speed)}")
+        down = sorted(p for p, st in state.items() if st == LINK_DOWN)
+        if not rtag:
+            lines.append("802.1CB off: every packet once, on interface A only.")
+        elif not two:
+            lines.append("802.1CB on: " + ("2 copies of every packet on interface A."
+                                           if repl == "same" else "every packet once, with R-TAG."))
+        elif len(state) < 2:
+            lines.append("802.1CB on, replication 'second': select interface A and B on the Admin tab.")
+        elif down == ["A", "B"]:
+            lines.append("802.1CB on: no link on interface A or B, nothing is sent.")
+        elif down:
+            lines.append(f"802.1CB on: only copy {'B' if down == ['A'] else 'A'} is sent, interface {down[0]} has "
+                         f"no link (its copy is not sent anywhere else).")
+        else:
+            lines.append("802.1CB on: copy A on interface A and copy B on interface B.")
+        if not two and down:
+            lines.append("Interface A has no link: nothing is sent until the cable is back.")
+        net_var.set("\n".join(lines))
+
+    def refresh_player():
+        src = talker.builder.source if talker.running else None
+        if isinstance(src, FileSource):
+            rate = talker.cfg.rate
+            total = src.data.shape[0] / rate
+            pos = min(src.pos / rate, total)
+            now_var.set("Playing: " + os.path.basename(playing[0]))
+            prog.config(maximum=max(total, 1e-3), value=pos)
+            pos_var.set(f"{mmss(pos)} / {mmss(total)}")
+            return
+        now_var.set("Playing: sine test tone (Admin tab)" if src is not None else "Stopped")
+        prog.config(value=0)
+        pos_var.set("")
 
     def refresh_info():
         d = snapshot()
@@ -1315,11 +1694,9 @@ def run_gui():
             if cfg.payload_len > req.max_payload:
                 msgs.append(f"The receiver accepts at most {req.max_payload} B per packet.")
             if cfg.rtag:
-                msgs.append("R-TAG on: the listener must remove it before the host (Egress Treatment with "
-                            "RemoveRTag), otherwise EthIf sees EtherType 0xF1C1. Switch ports on the path need "
-                            "max frame length / MAXSDU + 6 byte.")
-            if cfg.replication != "off" and not cfg.rtag:
-                msgs.append("Replication without R-TAG: the listener cannot tell the copies apart.")
+                msgs.append("802.1CB on: the listener must remove the R-TAG before the host (Egress Treatment "
+                            "with RemoveRTag), otherwise EthIf sees EtherType 0xF1C1. Switch ports on the path "
+                            "need max frame length / MAXSDU + 6 byte.")
             if cfg.replication == "second":
                 if not d["device_b"]:
                     msgs.append("Replication 'second': select Interface B.")
@@ -1346,7 +1723,7 @@ def run_gui():
                     msgs.append(f"Missing channels: {d['missing']}.")
                 peak = peak_cache.get(d["wav_path"])
                 if peak is not None and peak * float(d["file_gain"] or 0) > 1.0:
-                    msgs.append(f"Peak {peak:.3f} x File gain {d['file_gain']} clips: "
+                    msgs.append(f"Peak {peak:.3f} x File gain {d['file_gain']} clips at volume 100 %: "
                                 f"use File gain <= {0.99 / peak:.2f}.")
             except (OSError, ValueError, RuntimeError) as e:
                 msgs.append(f"File: {e}")
@@ -1355,21 +1732,28 @@ def run_gui():
         warn.set("\n".join(msgs))
 
     def tick():
+        refresh_links()
+        refresh_player()
         if talker.running or talker.t_start:
             end = time.perf_counter_ns() if talker.running or not talker.t_end else talker.t_end
             el = max(0.0, (end - talker.t_start) / 1e9) if talker.t_start else 0.0
-            rate = talker.sent["A"] / el if el > 0.5 else 0.0
+            rate = max(talker.sent["A"], talker.sent["B"]) / el if el > 0.5 else 0.0
             txt = f"Sent A {talker.sent['A']}"
-            if talker.sent["B"] or talker.dropped["B"]:
+            if talker.sent["B"] or talker.dropped["B"] or talker.no_link["B"]:
                 txt += f", B {talker.sent['B']}"
             if talker.dropped["A"] or talker.dropped["B"]:
                 txt += f"  |  dropped A {talker.dropped['A']}, B {talker.dropped['B']}"
+            if talker.no_link["A"] or talker.no_link["B"]:
+                txt += f"  |  no link, not sent: A {talker.no_link['A']}, B {talker.no_link['B']}"
             txt += (f"  |  {rate:.0f} pkt/s  |  catch-up {talker.catch_up}  |  late {talker.late}"
                     f" (lost {talker.lost_ns / 1e6:.1f} ms, max {max(0, talker.max_late_ns) / 1e6:.1f} ms)"
                     f"  |  {el:.1f} s")
+            short = ("Running" if talker.running else "Stopped") + f"  {mmss(el)}"
             if talker.errors:
                 txt += "  |  " + talker.errors[-1]
-            status.set(("Running: " if talker.running else "Stopped: ") + txt)
+                short += "  |  " + talker.errors[-1]
+            stats.set(("Running: " if talker.running else "Stopped: ") + txt)
+            status.set(short)
         if not talker.running:
             start_btn.config(state="normal")
             stop_btn.config(state="disabled")
@@ -1378,13 +1762,15 @@ def run_gui():
     def on_start():
         d = snapshot()
         if not d["device"]:
-            messagebox.showerror("AVTP Talker", "Select an interface first.")
+            messagebox.showerror("AVTP Talker", "Select an interface first (Admin tab).")
             return
         try:
             cfg = StreamConfig(d)
             if d["source"] == "wav":
+                if not d["wav_path"]:
+                    raise ValueError("Pick a song first.")
                 data = file_data(d["wav_path"], cfg.rate, bool(d["resample"]))
-                source = FileSource(data, cfg.channels, d["missing"], float(d["file_gain"]), bool(d["loop"]))
+                source = FileSource(data, cfg.channels, d["missing"], file_gain(), bool(d["loop"]))
             else:
                 source = SineSource(float(d["sine_freq"]), float(d["sine_volume"]), cfg.channels, cfg.rate)
             catch_up_ms = float(d["catch_up_ms"] or 0)
@@ -1395,6 +1781,7 @@ def run_gui():
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("AVTP Talker", str(e))
             return
+        playing[0] = d["wav_path"] if d["source"] == "wav" else ""
         try:
             save_settings(d)
         except OSError:
@@ -1420,6 +1807,15 @@ def run_gui():
         var.trace_add("write", on_change)
     dev_var.trace_add("write", on_change)
     dev_b_var.trace_add("write", on_change)
+    v["rtag"].trace_add("write", on_rtag)
+    v["wav_path"].trace_add("write", refresh_songs)
+    v["source"].trace_add("write", refresh_songs)
+    v["volume"].trace_add("write", on_volume)
+    v["file_gain"].trace_add("write", on_volume)
+    vol_var.trace_add("write", on_slider)
+    on_rtag()
+    on_volume()
+    refresh_songs()
     refresh_info()
     tick()
     root.mainloop()
@@ -1435,7 +1831,7 @@ def list_devices():
     pcap = Npcap()
     macs = adapter_macs()
     for i, (name, desc) in enumerate(pcap.devices()):
-        print(f"[{i}] {desc}\n     {name}  MAC {mac_for_device(name, macs) or '?'}")
+        print(f"[{i}] {desc}\n     {name}  MAC {mac_for_device(name, macs) or '?'}  {link_text(*link_state(name))}")
     print("send queue API:", "yes" if pcap.has_sendqueue else "no")
 
 

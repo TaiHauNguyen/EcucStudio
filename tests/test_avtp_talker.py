@@ -1,4 +1,5 @@
 """scripts/avtp_talker.py: IEEE 1722 AAF packets, WAV reading, stream summary, paced sending (fake Npcap)."""
+import ctypes
 import importlib.util
 import os
 import shutil
@@ -70,13 +71,31 @@ class FakePcap:
         pass
 
 
-def run_talker(cfg, mode, devices="A", seed=1):
+class FakeLink:
+    """link(name) for the Talker: state per interface name (up when not set), may change while streaming."""
+    def __init__(self, **states):
+        self.states = states
+
+    def __call__(self, name):
+        return self.states.get(name, at.LINK_UP)
+
+
+def start_talker(cfg, mode, devices="A", seed=1, link=None):
     fake = FakePcap()
-    talker = at.Talker(fake)
+    talker = at.Talker(fake, link)
     talker.start(devices, cfg, at.SineSource(1000.0, 0.2, cfg.channels, cfg.rate), mode, 20, seed=seed)
+    return talker, fake
+
+
+def wait_done(talker):
     deadline = time.time() + 15
     while talker.running and time.time() < deadline:
         time.sleep(0.02)
+
+
+def run_talker(cfg, mode, devices="A", seed=1, link=None):
+    talker, fake = start_talker(cfg, mode, devices, seed, link)
+    wait_done(talker)
     return talker, fake
 
 
@@ -261,11 +280,100 @@ class AvtpTalkerTest(unittest.TestCase):
                 self.assertEqual(len(seq_a) + talker.dropped["A"], 400)
                 self.assertTrue(60 < talker.dropped["A"] < 180)                # about 30 %
                 self.assertEqual(sorted(set(seq_a) | set(seq_b)), list(range(400)))  # union has no gap
-        cfg = at.StreamConfig(settings(frames_to_send=50, replication="second", drop_a_pct=100))
+        cfg = at.StreamConfig(settings(frames_to_send=50, rtag=True, replication="second", drop_a_pct=100))
         talker, fake = run_talker(cfg, "sendqueue", {"A": "A", "B": "B"})
         self.assertEqual((len(fake.wire["A"]), len(fake.wire["B"])), (0, 50))
         with self.assertRaises(ValueError):
             at.Talker(FakePcap()).start("A", cfg, at.SineSource(1.0, 0.1, 8, 48000), "sendqueue", 20)
+
+    def test_no_duplicates_without_8021cb(self):
+        for repl in ("same", "second"):
+            with self.subTest(replication=repl):
+                cfg = at.StreamConfig(settings(frames_to_send=200, rtag=False, replication=repl, drop_a_pct=50,
+                                               copy_b_delay_us=100))
+                self.assertEqual((cfg.replication, cfg.drop_pct), ("off", {"A": 0.0, "B": 0.0}))
+                talker, fake = run_talker(cfg, "sendqueue", {"A": "A", "B": "B"})
+                self.assertEqual(talker.errors, [])
+                self.assertEqual(talker.sent, {"A": 200, "B": 0})
+                self.assertNotIn("B", fake.wire)                                # interface B is not even opened
+                wire = [f for _, f in fake.wire["A"]]
+                self.assertEqual(len(set(wire)), 200)                           # every packet exactly once
+                self.assertEqual(wire[0][12:14], b"\x22\xf0")                   # no R-TAG
+        text = at.computed_text(cfg, at.Requirement(settings()))
+        self.assertIn("1 per packet on interface A (802.1CB off)", text)
+
+    def test_interface_without_link_sends_nothing(self):
+        cfg = at.StreamConfig(settings(frames_to_send=200, rtag=True, replication="second"))
+        for mode in ("sendqueue", "busy"):
+            with self.subTest(mode=mode):
+                talker, fake = run_talker(cfg, mode, {"A": "A", "B": "B"}, link=FakeLink(B=at.LINK_DOWN))
+                self.assertEqual(talker.errors, [])
+                self.assertEqual((len(fake.wire["A"]), len(fake.wire["B"])), (200, 0))
+                self.assertEqual(talker.no_link, {"A": 0, "B": 200})
+                talker, fake = run_talker(cfg, mode, {"A": "A", "B": "B"}, link=FakeLink(A=at.LINK_DOWN))
+                self.assertEqual((len(fake.wire["A"]), len(fake.wire["B"])), (0, 200))   # copy B once, not moved
+                self.assertEqual([rtag_seq(f) for _, f in fake.wire["B"]], list(range(200)))
+        talker, fake = run_talker(cfg, "sendqueue", {"A": "A", "B": "B"}, link=FakeLink(B=at.LINK_UNKNOWN))
+        self.assertEqual((len(fake.wire["A"]), len(fake.wire["B"])), (200, 200))         # unknown is not down
+        same = at.StreamConfig(settings(frames_to_send=20, rtag=True, replication="same"))
+        for c, devices, link in ((cfg, {"A": "A", "B": "B"}, FakeLink(A=at.LINK_DOWN, B=at.LINK_DOWN)),
+                                 (same, "A", FakeLink(A=at.LINK_DOWN)),
+                                 (at.StreamConfig(settings(frames_to_send=20)), "A", FakeLink(A=at.LINK_DOWN))):
+            with self.assertRaisesRegex(ValueError, "No link"):
+                at.Talker(FakePcap(), link).start(devices, c, at.SineSource(1.0, 0.1, 8, 48000), "sendqueue", 20)
+
+    def test_link_lost_and_back_while_streaming(self):
+        cfg = at.StreamConfig(settings(frames_to_send=2000, rtag=True, replication="second"))   # 0.5 s
+        for mode in ("sendqueue", "busy"):
+            with self.subTest(mode=mode):
+                link = FakeLink()
+                talker, fake = start_talker(cfg, mode, {"A": "A", "B": "B"}, link=link)
+                time.sleep(0.15)
+                link.states["B"] = at.LINK_DOWN
+                time.sleep(0.15)
+                link.states["B"] = at.LINK_UP
+                wait_done(talker)
+                self.assertEqual(talker.errors, [])
+                seq_a = [rtag_seq(f) for _, f in fake.wire["A"]]
+                seq_b = [rtag_seq(f) for _, f in fake.wire["B"]]
+                self.assertEqual(seq_a, list(range(2000)))                     # copy A not disturbed
+                self.assertEqual(len(seq_b) + talker.no_link["B"], 2000)
+                self.assertTrue(200 < talker.no_link["B"] < 1500)
+                self.assertEqual(seq_b, sorted(set(seq_b)))                    # each copy B at most once
+                self.assertEqual(seq_b[-1], 1999)                              # back after the link returned
+                holes = [b - a for a, b in zip(seq_b, seq_b[1:]) if b - a > 1]
+                self.assertEqual(len(holes), 1)
+
+    def test_no_link_keeps_timeline(self):
+        link = FakeLink()
+        cfg = at.StreamConfig(settings(frames_to_send=1600))                 # 0.4 s
+        t0 = time.perf_counter()
+        talker, fake = start_talker(cfg, "sendqueue", link=link)
+        time.sleep(0.1)
+        link.states["A"] = at.LINK_DOWN
+        wait_done(talker)
+        self.assertEqual(talker.errors, [])
+        self.assertEqual(talker.sent["A"] + talker.no_link["A"], 1600)
+        self.assertGreater(talker.no_link["A"], 800)
+        self.assertGreater(time.perf_counter() - t0, 0.3)                    # did not race through the rest
+
+    def test_link_state(self):
+        self.assertEqual(ctypes.sizeof(at._MibIfRow2), 1352)
+        self.assertEqual(at.link_state("A"), (at.LINK_UNKNOWN, 0))
+        self.assertEqual(at.link_state(r"\Device\NPF_{00000000-1111-2222-3333-444444444444}")[0], at.LINK_UNKNOWN)
+        self.assertEqual(at.link_text(at.LINK_UP, 1_000_000_000), "link up, 1 Gbps")
+        self.assertEqual(at.link_text(at.LINK_UP, 100_000_000), "link up, 100 Mbps")
+        self.assertEqual(at.link_text(at.LINK_DOWN), "NO LINK")
+
+    def test_volume(self):
+        self.assertEqual([at.volume_gain(p) for p in (100, 50, 0, 150, -5)], [1.0, 0.25, 0.0, 1.0, 0.0])
+        src = at.FileSource(np.ones((1000, 1), np.float32), 1, "repeat", 1.0, loop=True)
+        self.assertTrue(np.all(src.read(100)[0] == 1.0))
+        src.gain = 0.25                                                     # volume moved while streaming
+        ramp = src.read(100)[0][:, 0]
+        self.assertEqual(ramp[0], 1.0)
+        self.assertTrue(np.all(np.diff(ramp) < 0) and ramp[-1] > 0.25)       # ramp, no step
+        self.assertTrue(np.allclose(src.read(100)[0], 0.25))
 
     def test_copy_b_delay(self):
         for mode in ("sendqueue", "busy"):
